@@ -1,0 +1,55 @@
+# forgd-verdict: an example policy that fails closed.
+#
+# The loader merges one policy file over the built-in defaults, not over
+# the shipped policy.yaml. This file is therefore a whole policy: what it
+# does not set comes from the built-in defaults. To keep the shipped
+# policy.yaml's tuning instead, set the keys under "Fail closed" in your
+# copy of policy.yaml.
+#
+# Values starting with `$` are read from the environment. The names match
+# the shipped policy.yaml, so the same deployment wiring serves both.
+
+detectors:
+  shell_exfil:
+    enabled: true
+    severity: block
+
+privacy:
+  hash_salt: $FORGD_HASH_SALT
+
+server:
+  secrets:
+    - $WEBHOOK_SECRET
+    - $WEBHOOK_SECRET_PREVIOUS
+  store: $FORGD_VERDICT_STORE
+  metrics_token: $FORGD_METRICS_TOKEN
+  detectors:
+    gitleaks:
+      daemon: $FORGD_GITLEAKS_SOCKET
+
+  # -- Fail closed -------------------------------------------------------
+  # Deny on a `block` finding. `observe`, the shipped value, records the
+  # verdict and allows.
+  mode: enforce
+  # A blocking tier that did not run denies. The setting takes `allow` or
+  # `deny`.
+  on_tier_dropped: deny
+  # A scan error answers 500, so the org's own failure handling in
+  # Anthropic decides.
+  on_internal_error: fail
+
+hook:
+  detectors:
+    gitleaks:
+      daemon: $FORGD_GITLEAKS_SOCKET
+      # Where deploy/MDM.md installs gitleaks. Under `on_error: block` a
+      # laptop without it blocks every prompt and tool call.
+      binary: /opt/forgd/bin/gitleaks
+  enabled_events:
+    - UserPromptSubmit
+    - UserPromptExpansion
+    - PreToolUse
+  # -- Fail closed -------------------------------------------------------
+  # A failed scan, a policy that does not load, or a payload that does not
+  # parse exits 2, which blocks the prompt or tool call.
+  on_error: block

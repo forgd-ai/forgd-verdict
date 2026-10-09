@@ -1,0 +1,38 @@
+# Baseline gitleaks config shipped with forgd-verdict and passed explicitly
+# as --config on every invocation.
+#
+# This file exists for a security reason, not a tuning one. gitleaks resolves
+# its config in this order:
+#
+#   1. --config/-c
+#   2. $GITLEAKS_CONFIG            (path)
+#   3. $GITLEAKS_CONFIG_TOML       (inline content)
+#   4. <target path>/.gitleaks.toml
+#   5. the built-in default
+#
+# Without an explicit --config, rule 4 means any repository can weaken or
+# disable detection by committing its own .gitleaks.toml -- and rules 2 and 3
+# mean any environment variable can do the same. For a DLP scanner that is a
+# policy bypass, and adapter 2 runs in exactly that position: inside a
+# developer's working directory.
+#
+# So: forgd-verdict always passes --config, scrubs the two environment
+# variables from the subprocess, and runs gitleaks from a neutral directory.
+# An operator who genuinely wants custom rules sets `detectors.gitleaks.config`
+# in policy.yaml to a trusted, root-owned path -- a deliberate administrative
+# act, not an ambient property of whatever directory the scan happens in.
+
+title = "forgd-verdict baseline"
+
+[extend]
+useDefault = true
+
+# Overrides gitleaks' own rule of the same id: gitleaks keeps the upstream
+# rule's keywords, entropy threshold and allowlists and takes this regex in
+# place of upstream's `\b...\b`. The key matches with any character but an
+# uppercase letter or digit on either side, including a lowercase letter
+# and `_`.
+[[rules]]
+id = "aws-access-token"
+regex = '''(?:^|[^A-Z0-9])((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})(?:[^A-Z0-9]|$)'''
+secretGroup = 1

@@ -1,0 +1,38 @@
+{
+  "_expect_action": "allow",
+  "_note": "An image arrives as an attachment with file_name and text null. Most fields are nullable; none of it may cause a rejection.",
+  "frame": {
+    "type": "prompt",
+    "request_id": "req_05_null_fields",
+    "tenant_id": null,
+    "actor": {
+      "type": "user",
+      "id": null,
+      "email_address": null
+    },
+    "source": {
+      "application": "claude-ai"
+    },
+    "session_id": null,
+    "model": null,
+    "metadata": {},
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "attachment",
+            "file_name": null,
+            "media_type": "image/png",
+            "size_bytes": null,
+            "text": null
+          },
+          {
+            "type": "text",
+            "text": "what is in this image?"
+          }
+        ]
+      }
+    ]
+  }
+}

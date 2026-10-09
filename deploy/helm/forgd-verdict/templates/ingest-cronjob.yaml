@@ -1,0 +1,132 @@
+{{- if .Values.ingest.enabled }}
+{{- include "forgd-verdict.checkOrgSecretNames" (dict "root" . "list" .Values.ingest.complianceOrgs "listKey" "ingest.complianceOrgs" "inline" .Values.secrets.complianceKeys "inlineKey" "secrets.complianceKeys" "prefix" "ANTHROPIC_COMPLIANCE_ACCESS_KEY" "previous" false) }}
+{{/*
+Adapter 3, as a CronJob. Holds the Compliance Access Key.
+
+NO VOLUME, and that is correct rather than an omission. The cursor lives in
+the findings store: already durable, already reachable with this
+identity, and right on every target. An emptyDir is the obvious mistake --
+it persists within a replica, and a scheduled job gets a new replica every
+run, so the cursor would be gone before the next pass read it. It would look
+like a fix and be none.
+*/}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-ingest
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingest
+spec:
+  schedule: {{ .Values.ingest.schedule | quote }}
+  # Forbid, not Replace. A pass that overruns its schedule is still walking
+  # sessions; starting a second one against the same cursor would scan the
+  # same pages twice and advance it past work the first pass had not
+  # finished.
+  concurrencyPolicy: Forbid
+  # A missed window is not worth catching up on: the next pass reads from
+  # the cursor, so it covers whatever the missed one would have.
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: {{ .Values.ingest.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.ingest.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.ingest.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.ingest.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "forgd-verdict.labels" . | nindent 12 }}
+            app.kubernetes.io/component: ingest
+            {{- if .Values.workloadIdentity.enabled }}
+            azure.workload.identity/use: "true"
+            {{- end }}
+            {{- with .Values.podLabels }}{{- toYaml . | nindent 12 }}{{- end }}
+          annotations:
+            checksum/policy: {{ include (print $.Template.BasePath "/configmap-policy.yaml") . | sha256sum }}
+            {{- with .Values.podAnnotations }}{{- toYaml . | nindent 12 }}{{- end }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "forgd-verdict.writerServiceAccountName" . }}
+          # No role calls the Kubernetes API. Workload identity's token is a
+          # separate projected volume and is mounted either way.
+          automountServiceAccountToken: false
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          containers:
+            - name: ingest
+              {{- include "forgd-verdict.workingDir" $ | nindent 14 }}
+              # The -ingest variant. On the base image the run completes,
+              # finds nothing at the Presidio tier -- the tier is `auto` and
+              # the dependency is absent -- and reports a clean scan.
+              image: {{ include "forgd-verdict.ingestImage" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- include "forgd-verdict.securityContext" . | nindent 16 }}
+              env:
+                - name: FORGD_ROLE
+                  value: ingest
+                - name: FORGD_INGEST_ARGS
+                  value: {{ .Values.ingest.args | quote }}
+                {{- $managed := .Values.ingest.managedAgentsWorkspaces }}
+                {{- if not $managed }}
+                {{- $managed = keys .Values.secrets.managedAgentsKeys | sortAlpha }}
+                {{- end }}
+                - name: ANTHROPIC_COMPLIANCE_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "forgd-verdict.secretName" . }}
+                      key: compliance-key
+                      {{- if $managed }}
+                      # Optional only beside Managed Agents: a Platform-only
+                      # deployment has no Enterprise org to hold a key for.
+                      optional: true
+                      {{- else if .Values.ingest.complianceOrgs }}
+                      # Optional beside per-org keys, which can replace it.
+                      optional: true
+                      {{- end }}
+                {{- range $name := .Values.ingest.complianceOrgs }}
+                - name: ANTHROPIC_COMPLIANCE_ACCESS_KEY_{{ upper (replace "-" "_" $name) }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "forgd-verdict.secretName" $ }}
+                      key: compliance-key-{{ $name | lower }}
+                {{- end }}
+                {{- range $name := $managed }}
+                - name: FORGD_MANAGED_AGENTS_KEY_{{ $name | upper | replace "-" "_" | replace "." "_" }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "forgd-verdict.secretName" $ }}
+                      key: managed-agents-key-{{ $name | lower }}
+                      optional: true
+                {{- end }}
+                {{- with .Values.serviceAccounts.writer.clientId }}
+                - name: AZURE_CLIENT_ID
+                  value: {{ . | quote }}
+                {{- end }}
+                {{- include "forgd-verdict.hashSaltEnv" . | nindent 16 }}
+                {{- include "forgd-verdict.commonEnv" . | nindent 16 }}
+              resources: {{- toYaml .Values.ingest.resources | nindent 16 }}
+              volumeMounts:
+                - name: policy
+                  mountPath: {{ .Values.policy.mountPath }}
+                  readOnly: true
+                {{- include "forgd-verdict.scratchMounts" . | nindent 16 }}
+          volumes:
+            {{- include "forgd-verdict.policyVolume" . | nindent 12 }}
+            {{- include "forgd-verdict.scratchVolumes" . | nindent 12 }}
+          {{- with .Values.ingest.nodeSelector }}
+          nodeSelector: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.ingest.tolerations }}
+          tolerations: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.ingest.affinity }}
+          affinity: {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

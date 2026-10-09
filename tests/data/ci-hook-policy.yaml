@@ -1,0 +1,10 @@
+# The policy CI's hook smoke steps pass with --policy. gitleaks is off, so
+# the allow path has no T1 message to print, and the contact line marks a
+# block as decided under this file rather than the built-in defaults.
+detectors:
+  gitleaks:
+    enabled: false
+deny:
+  contact_line: "Contact the forgd-verdict CI policy owner."
+hook:
+  ship_mode: "off"

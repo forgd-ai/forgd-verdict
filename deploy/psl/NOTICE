@@ -1,0 +1,10 @@
+The Public Suffix List (https://publicsuffix.org/), Mozilla Public License,
+Version 2.0; the full text is in LICENSE beside this file.
+
+The ingest image carries the copy bundled in the tldextract 5.3.2 wheel,
+unmodified, at
+/usr/local/lib/python3.13/site-packages/tldextract/.tld_set_snapshot
+(list version 2025-04-07_15-51-09_UTC, publicsuffix/list commit
+5fc8d12c1624ddbc56a80e944aca151a8ee466a1), and the same list, as fetched
+and parsed by tldextract, in the cache seed under /opt/forgd/tldextract-seed.
+Its source form is https://github.com/publicsuffix/list.

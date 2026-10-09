@@ -1,0 +1,8 @@
+# Binary files the repository may hold, one per line as
+# `<path> <sha256>  # reason`. The secret and content checks cannot read a
+# binary file, so each is reviewed by hand before it is listed: provenance,
+# and its metadata and strings for paths, hosts, UUIDs, addresses and names.
+# A changed file needs a new review and hash. tests/test_binaries.py checks
+# this list against the tracked files.
+src/forgd_verdict/dashboard/assets/fonts/inter-latin-var.woff2 c940764593d0fe5d596be327ca7558855e018039fb78509aa21921fd3644c3e4  # Inter v20 latin subset, byte-identical to fonts.gstatic.com; OFL; name table holds only upstream copyright, version and the OFL URL
+src/forgd_verdict/dashboard/assets/fonts/roboto-mono-latin-var.woff2 2ed6ac9efae6d21f51b2946176a0eef79a4043d643f9ac976e66d7fc4d57803a  # Roboto Mono v31 latin subset, byte-identical to fonts.gstatic.com; OFL; name table holds only upstream copyright, version and the OFL URL

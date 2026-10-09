@@ -1,0 +1,171 @@
+{{- if .Values.intake.enabled }}
+{{/*
+Adapter 2's receiving end. NOT the `ingest` CronJob -- that is adapter 3,
+the Compliance API scan. The names are close because the domain's are; this
+one receives, that one fetches.
+
+Developer laptops POST their spooled findings here with a per-developer
+bearer token, so they hold no store credential at all. On Azure the
+writer's Storage Blob Data Contributor includes DELETE, and a laptop able to
+remove findings is a laptop able to remove evidence.
+
+WRITE-ONLY, and separate from the verdict server and the dashboard on
+purpose: the verdict server must never grow a second auth scheme, and the
+dashboard must stay read-only so the one service humans sign into holds no
+write credential.
+*/}}
+{{- if .Values.intake.enabled }}
+{{- if and (not .Values.intake.clients) (not .Values.secrets.intakeTokens) }}
+{{- fail "intake.enabled with no intake.clients: the endpoint starts and refuses every developer with 401, which looks exactly like a laptop with the wrong URL or a stale token -- and the developer debugging it cannot see the thing that would say otherwise. List one name per developer in intake.clients; the token itself goes in the secret as intake-token-<name>." }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-intake
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+spec:
+  replicas: {{ .Values.intake.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: intake
+  template:
+    metadata:
+      labels:
+        {{- include "forgd-verdict.labels" . | nindent 8 }}
+        app.kubernetes.io/component: intake
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        checksum/policy: {{ include (print $.Template.BasePath "/configmap-policy.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "forgd-verdict.writerServiceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: intake
+          image: {{ include "forgd-verdict.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "forgd-verdict.workingDir" $ | nindent 10 }}
+          securityContext:
+            {{- include "forgd-verdict.securityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.intake.port }}
+          env:
+            - name: FORGD_ROLE
+              value: intake
+            - name: PORT
+              value: {{ .Values.intake.port | quote }}
+            {{- with .Values.serviceAccounts.writer.clientId }}
+            - name: AZURE_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            # /scan scans with a laptop waiting on the answer, so it gets
+            # the daemon and the deployment salt.
+            #
+            # The salt is not a detail of the socket. Records written on
+            # /intake arrive already hashed with the sending laptop's own
+            # per-device salt and this does not touch them; records
+            # written on /scan are hashed HERE, and without this they
+            # were hashed with empty -- a bare sha256 of an SSN is about
+            # a billion guesses.
+            - name: FORGD_GITLEAKS_SOCKET
+              value: /run/forgd/gitleaksd.sock
+            {{- include "forgd-verdict.hashSaltEnv" . | nindent 12 }}
+            {{- if or .Values.secrets.metricsToken .Values.secrets.existingSecret }}
+            # Guards /stats, which counts refused and accepted batches per
+            # fleet and client. Optional, like the verdict server's.
+            - name: FORGD_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" $ }}
+                  key: metrics-token
+                  optional: true
+            {{- end }}
+            {{- $names := .Values.intake.clients }}
+            {{- if not $names }}
+            {{- $names = keys .Values.secrets.intakeTokens }}
+            {{- end }}
+            {{- range $name := $names }}
+            # One per developer, from the NAME list rather than from the
+            # token values -- an existingSecret deployment gets the
+            # variables without putting the secrets in the release.
+            #
+            # optional, and that fails CLOSED: a client whose token
+            # resolves to nothing is skipped by the app rather than
+            # authenticating an empty bearer.
+            - name: FORGD_INTAKE_TOKEN_{{ $name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" $ }}
+                  key: intake-token-{{ $name | lower }}
+                  optional: true
+            {{- end }}
+            {{- include "forgd-verdict.commonEnv" . | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            # gitleaksd compiles its rule set before the socket appears,
+            # and the entrypoint will not bind the app until it does.
+            periodSeconds: 2
+            failureThreshold: 30
+          resources: {{- toYaml .Values.intake.resources | nindent 12 }}
+          volumeMounts:
+            - name: policy
+              mountPath: {{ .Values.policy.mountPath }}
+              readOnly: true
+            {{- include "forgd-verdict.scratchMounts" . | nindent 12 }}
+      volumes:
+        {{- include "forgd-verdict.policyVolume" . | nindent 8 }}
+        {{- include "forgd-verdict.scratchVolumes" . | nindent 8 }}
+      {{- with .Values.intake.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-intake
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: intake
+  {{- with include "forgd-verdict.gkeServiceAnnotations" (list . "intake") }}
+  {{- . | nindent 2 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.intake.port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: intake
+{{- end }}

@@ -1,0 +1,124 @@
+/* Self-hosted, not imported. This line used to be
+
+     @import url('https://fonts.googleapis.com/css2?family=Inter...');
+
+   which made the dashboard fetch from Google on every load and forced the
+   CSP to allow two third-party origins -- while `render.py` claimed there
+   were no external requests at all. See fonts/README.md.
+
+   Latin subset, variable weight, 80 KB for both. Served from the same
+   origin as everything else, so `font-src 'self'` holds. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+  src: url('/assets/fonts/inter-latin-var.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Roboto Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('/assets/fonts/roboto-mono-latin-var.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+    U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+    U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  /* Brand */
+  --brand-dark: #18181B;
+  --brand-light: #FFFFFF;
+  --brand-muted: #E4E4E7;
+  --brand-accent: #3B82F6;
+
+  /* Brand emphasis: eyebrows, calls to action, active states, key highlights. */
+  --brand-accent-light: #60A5FA;
+  --brand-accent-dim: #1D4ED8;
+  --brand-accent-bg: rgba(59, 130, 246, 0.10);
+  --brand-accent-bg-strong: rgba(59, 130, 246, 0.18);
+  --brand-accent-glow: rgba(59, 130, 246, 0.06);
+  --border-orange: rgba(217, 119, 6, 0.4);
+
+  /* Background scale */
+  --bg-deep: #0B0D11;
+  --bg-primary: #0F1218;
+  --bg-card: #161A22;
+  --bg-card-hover: #1B2029;
+  --bg-elevated: #222833;
+
+  /* Accent system */
+  --accent-primary: #A1A9B8;
+  --accent-primary-light: #D5DAE3;
+  --accent-primary-dim: #566070;
+  --accent-primary-glow: rgba(161, 169, 184, 0.06);
+  --accent-primary-glow-strong: rgba(161, 169, 184, 0.12);
+
+  /* Text */
+  --text-primary: #F3F4F6;
+  --text-secondary: #9CA3AF;
+  --text-dim: #5B6472;
+  --text-body-print: #374151;  /* body text for print/document formats (docx) */
+
+  /* Functional accents */
+  --accent-green: #22A06B;
+  --accent-green-bg: rgba(34, 160, 107, 0.06);
+  --accent-red: #D14343;
+  --accent-red-bg: rgba(209, 67, 67, 0.06);
+  --accent-blue: #3B82F6;
+  --accent-blue-bg: rgba(59, 130, 246, 0.06);
+
+  /* Category palette: grouped or differentiated content */
+  --cat-terracotta: #D97706;
+  --cat-sage: #4D9078;
+  --cat-steel: #3B82F6;
+  --cat-brown: #A16207;
+  --cat-moss: #3F9142;
+
+  /* Category backgrounds (15% opacity: icon circles, large fills) */
+  --cat-terracotta-bg: rgba(217, 119, 6, 0.15);
+  --cat-sage-bg: rgba(77, 144, 120, 0.15);
+  --cat-steel-bg: rgba(59, 130, 246, 0.15);
+  --cat-brown-bg: rgba(161, 98, 7, 0.15);
+  --cat-moss-bg: rgba(63, 145, 66, 0.15);
+
+  /* Category subtle fills (12% opacity: small elements, bullets) */
+  --cat-terracotta-subtle: rgba(217, 119, 6, 0.12);
+  --cat-sage-subtle: rgba(77, 144, 120, 0.12);
+  --cat-steel-subtle: rgba(59, 130, 246, 0.12);
+  --cat-brown-subtle: rgba(161, 98, 7, 0.12);
+  --cat-moss-subtle: rgba(63, 145, 66, 0.12);
+
+  /* Component tokens (accent cards, flow rows, comparison panels) */
+  --comp-card-border: 3px;
+  --comp-pill-bg: rgba(255, 255, 255, 0.06);
+  --comp-pill-radius: 6px;
+  --comp-badge-radius: 6px;
+  --comp-tag-bg: rgba(255, 255, 255, 0.05);
+  --comp-tag-radius: 10px;
+  --comp-arrow-color: #9CA3AF;
+  --comp-progress-bg: rgba(255, 255, 255, 0.03);
+  --comp-progress-border: rgba(255, 255, 255, 0.06);
+
+  /* Borders */
+  --border-subtle: rgba(161, 169, 184, 0.06);
+  --border-medium: rgba(161, 169, 184, 0.12);
+  --border-strong: rgba(161, 169, 184, 0.22);
+
+  /* Structure */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-card: 0 2px 16px rgba(0, 0, 0, 0.3);
+  --shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --transition-smooth: 0.25s ease;
+  --transition-snap: 0.15s ease;
+
+  /* Font stacks (use these in generated HTML, not bare font names) */
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'Roboto Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+}

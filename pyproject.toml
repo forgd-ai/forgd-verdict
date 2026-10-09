@@ -1,0 +1,127 @@
+[project]
+name = "forgd-verdict"
+version = "0.47.0"
+description = "One OSS scan core, six thin adapters, for Claude Enterprise DLP control points."
+dynamic = ["readme"]
+requires-python = ">=3.11"
+license = "Apache-2.0 AND OFL-1.1"
+license-files = [
+  "LICENSE",
+  "NOTICE",
+  "src/forgd_verdict/dashboard/assets/fonts/OFL-*.txt",
+]
+authors = [{ name = "forgd", email = "oss@forgd.ai" }]
+keywords = ["dlp", "inference-hooks", "claude", "claude-code", "compliance"]
+dependencies = [
+  "PyYAML>=6.0",
+  # Ed25519 signatures on runtime-override records, verified by every service.
+  "cryptography>=50.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/forgd-ai/forgd-verdict"
+Documentation = "https://github.com/forgd-ai/forgd-verdict#readme"
+Source = "https://github.com/forgd-ai/forgd-verdict"
+Issues = "https://github.com/forgd-ai/forgd-verdict/issues"
+
+[project.optional-dependencies]
+# Adapter 1 (HTTPS verdict server). Stdlib-only ASGI app; uvicorn just runs it.
+server = ["uvicorn>=0.30"]
+# Adapter 3 needs nothing: the Compliance client is stdlib urllib, so
+# the scanner has no third-party dependency. Kept as an empty extra so
+# `pip install forgd-verdict[compliance]` still resolves.
+compliance = []
+# Azure Blob findings store. The local filesystem store is stdlib.
+azure = ["azure-storage-blob>=12.19", "azure-identity>=1.16"]
+# Amazon S3 findings store. PutObject's IfNoneMatch, which keeps a record
+# immutable, is not in botocore 1.35.0's model; 1.36 has it.
+aws = ["boto3>=1.36"]
+# Google Cloud Storage findings store. download_as_bytes and the per-call
+# retry argument are not in google-cloud-storage 1.28; Retry.with_timeout
+# needs google-api-core 2.11.
+gcp = ["google-cloud-storage>=2.0", "google-api-core>=2.11"]
+# The dashboard is server-rendered HTML with inline SVG -- no JS
+# toolchain, no charting library. PyJWT is for `auth.mode: oidc_jwt`:
+# verifying a signature needs RSA, which the stdlib does not provide.
+dashboard = ["uvicorn>=0.30", "PyJWT[crypto]>=2.13.0"]
+# The findings connector: a remote MCP server over the store. The MCP SDK
+# brings Starlette; PyJWT verifies the identity provider's tokens with the
+# dashboard's verifier.
+connector = ["mcp>=2.2,<3", "uvicorn>=0.30", "PyJWT[crypto]>=2.13.0"]
+# T2 detectors. Heavy; off by default.
+ml = ["llm-guard>=0.3.15", "presidio-analyzer>=2.2"]
+# Presidio without LLM Guard. LLM Guard pulls torch, which is ~2.5 GB of
+# image for a tier the post-hoc scanner does not use; Presidio needs only
+# spaCy. This is what the ingest image installs.
+ml-pii = ["presidio-analyzer>=2.2"]
+dev = [
+  "pytest>=8.0",
+  "pytest-xdist>=3.6,<4",
+  "pytest-asyncio>=0.23",
+  "PyYAML>=6.0",
+  "uvicorn>=0.30",
+  "PyJWT[crypto]>=2.13.0",
+  "mcp>=2.2,<3",
+  # Pinned minor: ruff adds rules in minor releases, which would
+  # otherwise turn a dependency refresh into a red build.
+  "ruff>=0.14,<0.17",
+]
+
+[project.scripts]
+forgd-verdict = "forgd_verdict.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# hatch_build.py sets the long description from README.md.
+[tool.hatch.metadata.hooks.custom]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/forgd_verdict"]
+# The gitleaks baseline config is load-bearing for correctness, not a
+# sample: the detector passes it as --config on every invocation.
+artifacts = [
+  "src/forgd_verdict/detectors/*.toml",
+  # tokens.css and the two webfonts ship inside the package so
+  # the dashboard renders with no external requests.
+  #
+  # BOTH globs. A single `*` does not recurse, so `assets/fonts/` would be
+  # absent from the wheel -- working from a source checkout and missing
+  # from the image, where the page would silently fall back to system
+  # fonts and the CSP would then refuse the request it no longer makes.
+  "src/forgd_verdict/dashboard/assets/*",
+  "src/forgd_verdict/dashboard/assets/fonts/*",
+]
+
+[tool.uv]
+# llm-guard 0.3.16 pins presidio-anonymizer 2.2.358, which requires
+# cryptography<44.1. The override replaces that cap when `uv lock` or
+# `uv sync` resolves the `ml` extra. pip and `uv pip` ignore it:
+# `pip install '.[ml]'` backtracks to llm-guard 0.3.15 and presidio
+# 2.2.354, which do not cap cryptography.
+override-dependencies = ["cryptography>=50.0.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "serial: timing- or memory-bounded; runs alone, after the parallel suite",
+]
+filterwarnings = ["error::DeprecationWarning:forgd_verdict.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "I"]
+ignore = [
+  # A long-lived file handle closed by the writer thread, not a context
+  # manager -- see applog.py.
+  "SIM115",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into internals deliberately.
+"tests/*" = ["E501"]

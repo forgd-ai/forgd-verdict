@@ -1,0 +1,75 @@
+# forgd-verdict adapter 1 behind Caddy.
+#
+# Requirements Anthropic enforces, all of which this config satisfies:
+#   * https:// on port 443, publicly routable host
+#   * a certificate that validates against the public CA trust store
+#   * NO redirects on the hook path -- a redirect is a webhook failure,
+#     because redirects are not followed
+#   * request bodies up to 64 MiB
+#
+# Reverse-tunnel hosts (ngrok and similar) are blocked by Anthropic's network
+# policy. Host this on a domain you control.
+
+verdict.example.com {
+	# Caddy obtains and renews a public-CA certificate automatically.
+	# For an internal CA or a provided cert, use:
+	#   tls /etc/ssl/verdict.crt /etc/ssl/verdict.key
+	# ...but the cert must chain to a public root or connection fails.
+
+	# Protocol allows up to 64 MiB. The common failure is here: nginx
+	# defaults to client_max_body_size 1m and Express to 100 kB, and a
+	# rejected body is a webhook failure -- so under "Allow the request"
+	# failure handling an oversized prompt reaches the model uninspected.
+	request_body {
+		max_size 64MB
+	}
+
+	# RECOMMENDED: admit only Anthropic's Inference hooks egress range.
+	# The app reads a body before it can verify the signature over it, so
+	# without this anyone can make it read up to
+	# server.preauth_body_budget_bytes and fill that budget, and governed
+	# prompts get 503 while it is full (docs/SERVER.md#memory). Off here
+	# because a stale range fails every governed prompt: check Anthropic's
+	# published IP addresses before uncommenting, and when they change.
+	# That block carries Anthropic egress beyond Inference hooks, so it is
+	# never a substitute for signature verification.
+	# @not_anthropic not remote_ip 160.79.106.0/24
+	# respond @not_anthropic 403
+
+	# /healthz stays public: scripts/verify_deployment.sh reads it from
+	# outside to tell the new revision from the old, and it carries no
+	# findings. /metrics is token-gated by the app, and answers 404 without
+	# a configured token, so publishing it would be acceptable; this config
+	# keeps it on the internal listener below anyway.
+	@metrics path /metrics
+	respond @metrics 404
+
+	reverse_proxy 127.0.0.1:8000 {
+		# The org verdict timeout is 1-10,000ms and covers the whole
+		# exchange. Keep the proxy's own timeout above it so the
+		# upstream, not the proxy, is what times out.
+		transport http {
+			read_timeout 30s
+			write_timeout 30s
+			# Anthropic reuses connections; keep them warm.
+			keepalive 90s
+			keepalive_idle_conns 32
+		}
+		# Never compress the verdict: the response body must be
+		# uncompressed and is read to at most 64 KiB.
+		header_up -Accept-Encoding
+	}
+
+	log {
+		output file /var/log/caddy/verdict.log
+		# Do not log request bodies. They are transcripts.
+		format json
+	}
+}
+
+# /metrics and /healthz for scrapers and probes inside the network.
+:9000 {
+	@ours path /metrics /healthz
+	reverse_proxy @ours 127.0.0.1:8000
+	respond 404
+}

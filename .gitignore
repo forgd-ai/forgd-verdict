@@ -1,0 +1,66 @@
+.venv/
+# Not committed. deploy/constraints/*.txt are the pinned set for what
+# ships; a universal lock cannot match them while the ml extra's llm-guard
+# pins presidio-analyzer and regex exactly.
+uv.lock
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+# Copied in by scripts/build_wheels.sh for the hook wheel's build.
+packaging/forgd-verdict-hook/LICENSE
+packaging/forgd-verdict-hook/NOTICE
+.pytest_cache/
+
+# Runtime output. timings.csv and the archive hold operational data;
+# the archive holds full transcripts and must never be committed.
+timings.csv
+archive/
+compliance-state.json
+*.jsonl.gz
+# The quickstart's local findings store.
+/findings/
+
+# Local policy overrides may carry resolved secrets.
+policy.local.yaml
+policy.local.json
+.env
+.env.*
+!.env.example
+
+# Cloud and cluster credentials. google-github-actions/auth writes
+# gha-creds-*.json into the workspace.
+gha-creds-*.json
+credentials
+credentials.json
+kubeconfig
+.kube/
+*.pem
+*.key
+id_rsa
+id_ecdsa
+id_ed25519
+id_dsa
+
+# Screenshots the Playwright MCP server writes.
+.playwright-mcp/
+
+# Terraform. State holds the signing secret, the Compliance Access Key and
+# the hash salt in PLAINTEXT -- it must never be committed.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+.terraform.lock.hcl
+!deploy/terraform/examples/aks/.terraform.lock.hcl
+
+# Claude
+.claude/
+
+
+# What `go build` writes in the sidecar module. Committed once by mistake;
+# it embeds gitleaks's rule fixtures, which secret scanning reports.
+/sidecar/gitleaksd/gitleaksd

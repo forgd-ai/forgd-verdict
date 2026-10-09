@@ -1,0 +1,594 @@
+{{- if .Values.ingress.enabled }}
+{{- $host := .Values.ingress.host | required "ingress.host is required when ingress.enabled" }}
+{{- $dashHost := default $host .Values.ingress.dashboard.host }}
+{{- $full := include "forgd-verdict.fullname" . }}
+{{/*
+One deployment, possibly several names for it.
+
+The cutover case: stand the cluster up on the Azure-issued
+<label>.<region>.cloudapp.azure.com, which needs no domain ownership, then
+add a vanity name to the SAME ingress once DNS is delegated -- rather than
+re-pointing Anthropic twice. Every name here is served by identical rules
+and covered by one certificate's SANs.
+
+The primary host stays first and is what NOTES.txt and the deploy gate
+report, so adding a name never changes which one those name.
+*/}}
+{{- $hosts := concat (list $host) (.Values.ingress.extraHosts | default list) }}
+{{- if ne (len $hosts) (len (uniq $hosts)) }}
+{{- fail (printf "ingress.extraHosts repeats ingress.host (%s): nginx would serve two rules for one server, and cert-manager would request a certificate with a duplicate SAN" $host) }}
+{{- end }}
+{{- if and (ne $dashHost $host) (has $dashHost $hosts) }}
+{{- fail (printf "ingress.dashboard.host (%s) is also in ingress.extraHosts: it is either a name of its own or one of the public names, not both" $dashHost) }}
+{{- end }}
+{{- $routeDash := and .Values.dashboard.enabled .Values.ingress.dashboard.enabled }}
+{{- if and .Values.dashboard.serveOpen $routeDash }}
+{{- fail "dashboard.serveOpen serves every finding with no sign-in, and ingress.dashboard.enabled would route the dashboard from the public Ingress. Set ingress.dashboard.enabled: false and reach the dashboard with kubectl port-forward or a route you control, or give the dashboard a sign-in (dashboard.auth) and set dashboard.serveOpen: false." }}
+{{- end }}
+{{- $conn := .Values.connector.enabled }}
+{{- $connHost := include "forgd-verdict.connectorHost" . }}
+{{- $separateConn := and $conn (ne $connHost $host) }}
+{{- if and $separateConn (has $connHost $hosts) }}
+{{- fail (printf "ingress.connector.host (%s) is also in ingress.extraHosts: it is either a name of its own or one of the public names, not both" $connHost) }}
+{{- end }}
+{{- if and $separateConn $routeDash (eq $connHost $dashHost) }}
+{{- fail (printf "ingress.connector.host and ingress.dashboard.host are both %s. The dashboard's hostname carries its sign-in, which would answer Claude before the connector could" $connHost) }}
+{{- end }}
+{{- if include "forgd-verdict.gke" . }}
+{{/*
+GKE MODE: ONE INGRESS, every path on it.
+
+The GCE controller builds one load balancer, with its own address, per
+Ingress object, so this mode renders one Ingress. IAP is attached per
+backend service, through each Service's BackendConfig (templates/gke.yaml).
+
+  /hook /v1 /intake /scan              Prefix  verdict, collector, intake
+  /healthz /metrics /health /stats     Exact   verdict, collector
+  /                                    Prefix  dashboard, IAP on its backend
+
+GKE documents the kubernetes.io/ingress.class annotation for this
+controller, so spec.ingressClassName is left unset.
+*/}}
+{{- if not .Values.ingress.tls.enabled }}
+{{- fail "ingress.className gce with ingress.tls.enabled false: the chart turns HTTP off on the GCE load balancer, so without TLS it serves nothing. Set ingress.gke.managedCertificate or ingress.tls.secretName." }}
+{{- end }}
+{{- if not (or .Values.ingress.gke.managedCertificate .Values.ingress.tls.secretName) }}
+{{- fail "ingress.className gce with TLS on and neither ingress.gke.managedCertificate nor ingress.tls.secretName: the load balancer would have no certificate to serve." }}
+{{- end }}
+{{- if .Values.ingress.tls.clusterIssuer }}
+{{- fail "ingress.tls.clusterIssuer does not apply with ingress.className gce. Use ingress.gke.managedCertificate, or a secret cert-manager writes, named in ingress.tls.secretName." }}
+{{- end }}
+{{- if or .Values.ingress.diagnostics.annotations .Values.ingress.dashboard.annotations }}
+{{- fail "ingress.diagnostics.annotations and ingress.dashboard.annotations do not apply with ingress.className gce: there is one Ingress, and ingress.annotations is its only map. The dashboard's IAP is set by the chart on its BackendConfig." }}
+{{- end }}
+{{- if or .Values.ingress.connector.annotations .Values.ingress.connector.sourceRanges }}
+{{- fail "ingress.connector.annotations and ingress.connector.sourceRanges do not apply with ingress.className gce: there is one Ingress, and the connector's backend is set by the chart on its BackendConfig. Restrict source ranges with a Cloud Armor policy on that backend instead." }}
+{{- end }}
+{{- if .Values.ingress.hook.sourceRanges }}
+{{- fail "ingress.hook.sourceRanges does not apply with ingress.className gce: there is one Ingress. Restrict source ranges with a Cloud Armor policy on the verdict server's backend instead." }}
+{{- end }}
+{{- include "forgd-verdict.denyPublicAuth" .Values.ingress.annotations }}
+{{- include "forgd-verdict.denyGkeBackend" .Values.ingress.annotations }}
+{{- $separateDash := and $routeDash (ne $dashHost $host) }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress
+  annotations:
+    kubernetes.io/ingress.class: gce
+    kubernetes.io/ingress.allow-http: "false"
+    {{- if .Values.ingress.gke.managedCertificate }}
+    networking.gke.io/managed-certificates: {{ $full }}
+    {{- end }}
+    {{- with .Values.ingress.gke.staticIpName }}
+    kubernetes.io/ingress.global-static-ip-name: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.tls.secretName }}
+  tls:
+    - hosts:
+        {{- range $hosts }}
+        - {{ . | quote }}
+        {{- end }}
+        {{- if $separateDash }}
+        - {{ $dashHost | quote }}
+        {{- end }}
+        {{- if $separateConn }}
+        - {{ $connHost | quote }}
+        {{- end }}
+      secretName: {{ . }}
+  {{- end }}
+  rules:
+    {{- range $h := $hosts }}
+    - host: {{ $h | quote }}
+      http:
+        paths:
+          {{- if $.Values.verdict.enabled }}
+          - path: /hook
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-verdict
+                port:
+                  number: {{ $.Values.verdict.port }}
+          {{- end }}
+          {{- if $.Values.collector.enabled }}
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-collector
+                port:
+                  number: {{ $.Values.collector.port }}
+          {{- end }}
+          {{- if $.Values.intake.enabled }}
+          - path: /intake
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-intake
+                port:
+                  number: {{ $.Values.intake.port }}
+          - path: /scan
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-intake
+                port:
+                  number: {{ $.Values.intake.port }}
+          {{- end }}
+          {{- if $.Values.ingress.diagnostics.enabled }}
+          {{- if $.Values.verdict.enabled }}
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-verdict
+                port:
+                  number: {{ $.Values.verdict.port }}
+          - path: /metrics
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-verdict
+                port:
+                  number: {{ $.Values.verdict.port }}
+          {{- end }}
+          {{- if $.Values.collector.enabled }}
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-collector
+                port:
+                  number: {{ $.Values.collector.port }}
+          - path: /stats
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-collector
+                port:
+                  number: {{ $.Values.collector.port }}
+          {{- end }}
+          {{- end }}
+          {{- if and $conn (not $separateConn) }}
+          {{- include "forgd-verdict.connectorPaths" $ | nindent 10 }}
+          {{- end }}
+          {{- if and $routeDash (eq $dashHost $host) }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-dashboard
+                port:
+                  number: {{ $.Values.dashboard.port }}
+          {{- end }}
+    {{- end }}
+    {{- if $separateConn }}
+    - host: {{ $connHost | quote }}
+      http:
+        paths:
+          {{- include "forgd-verdict.connectorPaths" $ | nindent 10 }}
+    {{- end }}
+    {{- if $separateDash }}
+    - host: {{ $dashHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-dashboard
+                port:
+                  number: {{ $.Values.dashboard.port }}
+    {{- end }}
+{{- else }}
+{{- if and .Values.ingress.tls.enabled (not .Values.ingress.tls.clusterIssuer) (not .Values.ingress.tls.secretName) }}
+{{- fail "ingress.tls.enabled with neither ingress.tls.clusterIssuer nor ingress.tls.secretName: nginx then serves its own self-signed certificate, and the failure is a browser warning on the dashboard and a TLS verification error inside Anthropic's exporter -- which it reports as a delivery failure, not as a certificate problem" }}
+{{- end }}
+{{/*
+ONE HOSTNAME FOR THE PATHS ANTHROPIC POSTS TO, and nothing on it that can
+change how they are matched or who is allowed to reach them.
+
+  public     /hook     -> verdict     Prefix, no auth, no rewrite
+             /v1       -> collector   Prefix, ditto
+  diagnostic /healthz  -> verdict     Exact
+             /metrics  -> verdict     Exact
+             /health   -> collector   Exact
+             /stats    -> collector   Exact
+  dashboard  /         -> dashboard   Prefix; auth annotations go HERE
+
+Three objects because nginx has no per-path annotation: an `auth-url` added
+for the dashboard would front every location in the object carrying it. That
+much was the original design and it stands.
+
+WHAT THE ORIGINAL DESIGN GOT WRONG, and why this file looks the way it does:
+
+* The split says nothing about `ingress.annotations`, which is a passthrough
+  map on this very object. Guarded now by a render-time refusal, not a
+  comment -- see _helpers.tpl.
+
+* `rewrite-target` on ANY Ingress for a host makes EVERY location on that
+  host a case-insensitive regex match, whatever object it was set on. A
+  rewrite serving /verdict/* and /collector/* would make /hook and /v1
+  something other than element-wise Prefix matches: /v1anything and /V1/LOGS would reach
+  the collector, and what kept /hook ahead of / would be ingress-nginx's
+  location ordering rather than the longest-prefix rule.
+
+  So there is no rewrite anywhere. Both roles answer /healthz AND
+  /health -- see server/app.py and otel/app.py -- so the two aliases are
+  what disambiguate which backend a health probe reaches on a shared
+  hostname. /metrics and /stats are already unique to one role each. No
+  prefix to strip means no rewrite to add.
+
+* `enable-global-auth` defaults to TRUE. A cluster whose ingress-nginx
+  ConfigMap sets `global-auth-url` -- the usual way to put oauth2-proxy in
+  front of everything -- fronts /hook and /v1 no matter how the objects are
+  split. Opted out explicitly below, and not through a value, because
+  setting it back is the bug.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}-public
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: public
+  annotations:
+    {{- include "forgd-verdict.denyPublicAuth" .Values.ingress.annotations }}
+    # A cluster-wide global-auth-url would otherwise front both paths. Not
+    # a value: overriding it is the failure this exists to prevent.
+    nginx.ingress.kubernetes.io/enable-global-auth: "false"
+    # Same shape, different mechanism. A cluster with ModSecurity and the
+    # OWASP core rule set on inspects request bodies -- and the bodies here
+    # are prompt text and telemetry, which is precisely what that rule set
+    # is built to find suspicious. A 403 on a governed prompt is a webhook
+    # failure, and the frames most likely to trip it are the ones carrying
+    # the content worth scanning.
+    nginx.ingress.kubernetes.io/enable-modsecurity: "false"
+    # OTLP batches and inference-hook frames both exceed nginx's 1 MB
+    # default, and it answers 413. An exporter drops a rejected batch and
+    # the hook counts one as a webhook failure.
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.ingress.proxyBodySize | quote }}
+    {{- with .Values.ingress.tls.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    # One certificate, every name as a SAN. Separate tls entries would be
+    # separate certificates for one server block.
+    - hosts:
+        {{- range $hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ default (printf "%s-tls" $full) .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    {{- range $h := $hosts }}
+    - host: {{ $h | quote }}
+      http:
+        paths:
+          {{- if and $.Values.verdict.enabled (not $.Values.ingress.hook.sourceRanges) }}
+          - path: /hook
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-verdict
+                port:
+                  number: {{ $.Values.verdict.port }}
+          {{- end }}
+          {{- if $.Values.collector.enabled }}
+          # /v1/logs and /v1/traces. The signal is taken from the path, so
+          # the prefix must reach the app intact. A decoder handed a body
+          # without its path would read logs as traces: resource_logs and
+          # resource_spans are both protobuf field 1, scope_logs and
+          # scope_spans both field 2, and the collision is silent.
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-collector
+                port:
+                  number: {{ $.Values.collector.port }}
+          {{- end }}
+          {{- if $.Values.intake.enabled }}
+          # Adapter 2's receiving end. Deliberately NOT under /v1, which
+          # the collector's prefix already claims -- see
+          # intake/__init__.py. It authenticates each caller with a fleet
+          # or client bearer token, so it belongs on this object rather
+          # than behind the dashboard's auth.
+          - path: /intake
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-intake
+                port:
+                  number: {{ $.Values.intake.port }}
+          # Adapter 2's scan route, same service and same bearer.
+          #
+          # It needs its own rule: there is no shared prefix with /intake,
+          # and without one it falls through to `/` -- the dashboard --
+          # where oauth2-proxy answers a 302 to a login page. A hook would
+          # read that as unreachable and silently fall back to scanning
+          # locally, which is the coverage it was configured to stop doing.
+          - path: /scan
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-intake
+                port:
+                  number: {{ $.Values.intake.port }}
+          {{- end }}
+    {{- end }}
+{{- if and .Values.verdict.enabled .Values.ingress.hook.sourceRanges }}
+---
+{{/*
+/hook on an object of its own when ingress.hook.sourceRanges is set, so the
+source allowlist applies to the path Anthropic posts frames to and not to
+/v1, /intake and /scan, which laptops reach from anywhere. The same
+annotations as the public object otherwise.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}-hook
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hook
+  annotations:
+    nginx.ingress.kubernetes.io/enable-global-auth: "false"
+    nginx.ingress.kubernetes.io/enable-modsecurity: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.ingress.proxyBodySize | quote }}
+    nginx.ingress.kubernetes.io/whitelist-source-range: {{ join "," .Values.ingress.hook.sourceRanges | quote }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  # No tls block and no issuer annotation: the public object declares both
+  # for these hostnames.
+  rules:
+    {{- range $h := $hosts }}
+    - host: {{ $h | quote }}
+      http:
+        paths:
+          - path: /hook
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-verdict
+                port:
+                  number: {{ $.Values.verdict.port }}
+    {{- end }}
+{{- end }}
+{{- if .Values.ingress.diagnostics.enabled }}
+---
+{{/*
+The diagnostic endpoints, on their real paths.
+
+/healthz is public: scripts/verify_deployment.sh reads it from outside to
+tell a new revision from an old one still serving, and it carries no
+findings. /metrics and /stats are token-gated by the app and answer 404
+without a configured token, so publishing the paths does not publish the
+data. deploy/Caddyfile takes the same position and keeps /metrics off its
+public listener as well.
+
+Exact, not Prefix: these are single endpoints, and an Exact path renders as
+`location = /healthz`, which nginx resolves ahead of the dashboard's `/`
+without depending on ordering.
+
+Separate object only so its annotations stay its own. It carries no rewrite,
+because a rewrite anywhere on this host changes how /hook is matched.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}-diagnostics
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: diagnostics
+  annotations:
+    {{- include "forgd-verdict.denyServerScoped" (list "ingress.diagnostics.annotations" .Values.ingress.diagnostics.annotations) }}
+    nginx.ingress.kubernetes.io/enable-global-auth: "false"
+    nginx.ingress.kubernetes.io/enable-modsecurity: "false"
+    {{- with .Values.ingress.diagnostics.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  # No tls block and no issuer annotation: the public object above already
+  # declares both for this hostname, and TLS is per server rather than per
+  # location. Repeating them made three Ingresses name one secret, which
+  # cert-manager treats as three Certificates racing for it.
+  rules:
+    {{- range $h := $hosts }}
+    - host: {{ $h | quote }}
+      http:
+        paths:
+          {{- if $.Values.verdict.enabled }}
+          # /healthz for the verdict server and /health for the collector.
+          # Both roles serve both aliases, so the pair is what lets one
+          # hostname route a health probe to a chosen backend without a
+          # rewrite. Arbitrary which way round; fixed here so the deploy
+          # gate and this file cannot disagree.
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-verdict
+                port:
+                  number: {{ $.Values.verdict.port }}
+          - path: /metrics
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-verdict
+                port:
+                  number: {{ $.Values.verdict.port }}
+          {{- end }}
+          {{- if $.Values.collector.enabled }}
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-collector
+                port:
+                  number: {{ $.Values.collector.port }}
+          - path: /stats
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $full }}-collector
+                port:
+                  number: {{ $.Values.collector.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}
+{{- if $routeDash }}
+---
+{{/*
+The dashboard, and the ONLY object here that may carry auth annotations.
+
+Per-location auth -- auth-url, auth-signin -- is exactly what belongs here
+and is left alone. The server-scoped keys are refused while it shares the
+public hostname, because ingress-nginx renders those into the server block
+and they would apply to /hook too: requiring a client certificate there
+turns every governed prompt into a webhook failure. Set
+ingress.dashboard.host to move the dashboard to its own hostname and the
+restriction lifts.
+
+Without a proxy in front, configure auth.mode: oidc_jwt in policy.yaml and
+the app verifies the token itself. Either way the app refuses every request
+until one of them is configured -- correctly, and uselessly.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}-dashboard
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+  {{- if eq $dashHost $host }}
+  {{- include "forgd-verdict.denyServerScoped" (list "ingress.dashboard.annotations" .Values.ingress.dashboard.annotations) }}
+  {{- end }}
+  {{- /* Built up rather than emitted line by line, so a dashboard with no
+         auth proxy and no cert-manager issuer does not ship a bare
+         `annotations:` key that reads back as null. */}}
+  {{- $ann := merge (dict) (.Values.ingress.dashboard.annotations | default dict) }}
+  {{- if ne $dashHost $host }}
+  {{- with .Values.ingress.tls.clusterIssuer }}
+  {{- $_ := set $ann "cert-manager.io/cluster-issuer" . }}
+  {{- end }}
+  {{- end }}
+  {{- with $ann }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if and .Values.ingress.tls.enabled (ne $dashHost $host) }}
+  # Only when it has a hostname of its own. Sharing the public one means the
+  # public object's certificate already covers it, and a second tls block
+  # naming a second secret for the same host is two Certificates for one
+  # server.
+  tls:
+    - hosts: [{{ $dashHost | quote }}]
+      secretName: {{ printf "%s-dashboard-tls" $full }}
+  {{- end }}
+  rules:
+    {{- range $h := (eq $dashHost $host) | ternary $hosts (list $dashHost) }}
+    - host: {{ $h | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $full }}-dashboard
+                port:
+                  number: {{ $.Values.dashboard.port }}
+    {{- end }}
+{{- end }}
+{{- if $conn }}
+---
+{{/*
+The findings connector, on an object of its own: /mcp and its protected
+resource metadata, Exact, so nothing else on the hostname reaches it and it
+reaches nothing else.
+
+Treated as a public path, like /hook: no auth annotations, global auth and
+ModSecurity off. The connector authenticates each request itself, and its
+401 is how Claude discovers the identity provider, so anything answering
+first -- a sign-in redirect, a proxy's 401, a WAF's 403 -- breaks the
+connection.
+*/}}
+{{- include "forgd-verdict.denyConnectorAuth" .Values.ingress.connector.annotations }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}-connector
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: connector
+  annotations:
+    nginx.ingress.kubernetes.io/enable-global-auth: "false"
+    nginx.ingress.kubernetes.io/enable-modsecurity: "false"
+    {{- with .Values.ingress.connector.sourceRanges }}
+    nginx.ingress.kubernetes.io/whitelist-source-range: {{ join "," . | quote }}
+    {{- end }}
+    {{- if $separateConn }}
+    {{- with .Values.ingress.tls.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.ingress.connector.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if and .Values.ingress.tls.enabled $separateConn }}
+  tls:
+    - hosts: [{{ $connHost | quote }}]
+      secretName: {{ printf "%s-connector-tls" $full }}
+  {{- end }}
+  rules:
+    {{- range $h := $separateConn | ternary (list $connHost) $hosts }}
+    - host: {{ $h | quote }}
+      http:
+        paths:
+          {{- include "forgd-verdict.connectorPaths" $ | nindent 10 }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

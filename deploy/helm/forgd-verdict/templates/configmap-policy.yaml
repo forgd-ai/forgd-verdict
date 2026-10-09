@@ -1,0 +1,34 @@
+{{/*
+The policy as a mounted file.
+
+The entrypoint also accepts FORGD_POLICY_INLINE_GZ, which exists for targets
+that mount differently per platform -- Container Apps, ECS, Cloud Run.
+Kubernetes has a ConfigMap, so the file just exists and that branch is never
+entered.
+
+Supplied with --set-file rather than copied into the chart:
+
+  helm upgrade --install forgd deploy/helm/forgd-verdict \
+    --set-file policy.inline=policy.yaml
+
+The repository's policy.yaml is the only copy. A second one inside the chart
+would be free to drift from the one the Container Apps module reads, and the
+drift would show up as two deployments disagreeing about a detector
+threshold with nothing saying why.
+
+Both the verdict server and the collector mount THIS object, so the live
+path and the collector cannot run different rules.
+
+A change here rolls the pods: the checksum annotation on each pod template
+is what turns an edited policy into a restart rather than a config nobody
+picked up.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-policy
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+data:
+  policy.yaml: |
+    {{- .Values.policy.inline | required "policy.inline is empty: pass the repository's policy file with --set-file policy.inline=policy.yaml. The image ships a default, but a deployment running rules nobody chose for it is the failure this refuses to be quiet about" | nindent 4 }}

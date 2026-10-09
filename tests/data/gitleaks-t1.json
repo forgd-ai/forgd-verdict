@@ -1,0 +1,27 @@
+{
+  "_comment": "Random, non-functional values in default gitleaks rule formats, keyed by the gitleaks rule id that must report each, stored as parts that are joined at load time so no contiguous token is in the file. Every family except github-pat is invisible to the T0 detectors in prose context; T0's github-token rule also matches ghp_. Read by tests/conftest.py and by the container smoke step in .github/workflows/ci.yml.",
+  "github-pat": [
+    "ghp_",
+    "eLAtslda0UMqVFJGNhLohoNBhpLYuFQ7fQRY"
+  ],
+  "gitlab-pat": [
+    "glpat-",
+    "V9v0M48onQvilZzFz0tS"
+  ],
+  "npm-access-token": [
+    "npm_",
+    "8i58frvtcgq1vc9ynd4kqu2p5ctekhn8j8c7"
+  ],
+  "shopify-access-token": [
+    "shpat_",
+    "9046bd783d0f9d7e91bbb3499aeac44e"
+  ],
+  "digitalocean-pat": [
+    "dop_v1_",
+    "844640dd33c851efae95baebd75c08cf2f6c75e73d9ac16ee28350c8e734233b"
+  ],
+  "linear-api-key": [
+    "lin_api_",
+    "UuPLh4dZ7eeZaLCmEPjc3zGqOjvj9TTfy4UHkQum"
+  ]
+}

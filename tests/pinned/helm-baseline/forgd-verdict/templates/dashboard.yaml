@@ -1,0 +1,290 @@
+{{- if .Values.dashboard.enabled }}
+{{/*
+THE SHIPPED POLICY'S DASHBOARD AUTH DOES NOT PORT TO KUBERNETES.
+
+policy.yaml sets `dashboard.auth.mode: trusted_header` with
+`header: x-ms-client-principal-name`. That is an authentication check only
+where the proxy in front STRIPS inbound copies of that header. Container
+Apps EasyAuth does, which is why it is the default and why it is safe there.
+
+oauth2-proxy has no reason to strip a header named for Azure, and does not.
+So a dashboard fronted by oauth2-proxy while running this policy unchanged
+is not authenticated at all: a caller sets `x-ms-client-principal-name`
+itself and is whoever it says. The app's own docstring says exactly this --
+see dashboard/auth.py -- and the failure is invisible from outside, because
+signing in through the proxy also works.
+
+A fork inherits our default, so the chart refuses rather than trusting that
+someone read the comment. Two ways forward:
+
+  * `auth.mode: oidc_jwt` in the policy, which verifies a signature against
+    the issuer's JWKS and therefore trusts an assertion rather than a
+    network position. This is the mode that ports.
+  * keep trusted_header and set `dashboard.trustedHeaderStrippedBy` to the
+    proxy you have CHECKED strips that exact header, which records the
+    claim next to the deployment that depends on it.
+
+`auth.mode: none` is not guarded here: it requires editing the policy
+deliberately, and a guard that fires on a choice someone made gets switched
+off. It still serves every finding to anyone who reaches it.
+*/}}
+{{- $policy := .Values.policy.inline | fromYaml }}
+{{/*
+The EFFECTIVE mode, not the policy's.
+
+dashboard.auth.mode overrides it for this deployment through
+FORGD_DASHBOARD_AUTH_MODE, so one policy can serve a Container Apps
+deployment on trusted_header and a Kubernetes one on oidc_jwt. Reading only
+the policy would refuse a deployment that had already solved this.
+*/}}
+{{- $mode := default (dig "dashboard" "auth" "mode" "" $policy) .Values.dashboard.auth.mode }}
+{{- if and (ne $mode "oidc_jwt") .Values.dashboard.auth.platform }}
+{{- fail (printf "dashboard.auth.platform is only for oidc_jwt; the effective mode is %q. A platform chooses which header is trusted, and under trusted_header that swaps the header trustedHeaderStrippedBy vouches for with one nobody checked. Set dashboard.auth.header to the one your proxy strips." $mode) }}
+{{- end }}
+{{- $platform := default (dig "dashboard" "auth" "platform" "" $policy) .Values.dashboard.auth.platform }}
+{{- if and (eq $platform "iap") (dig "dashboard" "entitlements" "map" list $policy) }}
+{{- fail "the policy sets dashboard.entitlements.map but dashboard.auth.platform is iap: Identity-Aware Proxy tokens carry no groups, so no entry can match and the app refuses to start. Remove dashboard.entitlements.map, or sign in through an identity provider whose token carries groups." }}
+{{- end }}
+{{- if and (include "forgd-verdict.gke" .) (ne $platform "iap") }}
+{{- fail (printf "ingress.className gce puts the dashboard behind IAP, but dashboard.auth.platform is %q. IAP answers every request before it reaches the app, so no other sign-in can be used. Set dashboard.auth.platform: iap and its audience." (default "unset" $platform)) }}
+{{- end }}
+{{- if and (eq $mode "trusted_header") (not .Values.dashboard.trustedHeaderStrippedBy) }}
+{{- $header := dig "dashboard" "auth" "header" "" $policy }}
+{{/*
+The policy supplies the header as a $VAR, so quoting it raw would name a
+placeholder rather than the header a caller would actually have to forge.
+Resolve it the way the app does: the chart's value, else the app's default.
+*/}}
+{{- if hasPrefix "$" $header }}
+{{- $header = default "x-ms-client-principal-name" $.Values.dashboard.auth.header }}
+{{- end }}
+{{- fail (printf "the effective dashboard.auth.mode is trusted_header with header %q, which authenticates nothing unless the proxy in front strips inbound copies of it. Container Apps EasyAuth does; oauth2-proxy does not strip an Azure-named header, so a caller would set it and be whoever it claims. Set dashboard.auth.mode: oidc_jwt with its three values, or set dashboard.trustedHeaderStrippedBy to the proxy you have verified strips %q." $header $header) }}
+{{- end }}
+{{- if eq .Values.dashboard.auth.mode "oidc_jwt" }}
+{{/*
+Only when the CHART switches the mode.
+
+A policy that already says oidc_jwt carries its own jwks_url, issuer and
+audience -- possibly as $VAR placeholders resolved from elsewhere -- and
+demanding chart copies of them would refuse a deployment that had already
+solved this properly.
+
+When the chart switches the mode, it owns the three values. The app refuses
+at startup if any is empty, because a missing audience accepts tokens minted
+for a DIFFERENT application; catching it here makes that a render error
+rather than a crash-looping pod.
+*/}}
+{{- $a := .Values.dashboard.auth }}
+{{- if eq $a.platform "alb_oidc" }}
+{{- range $k := list "albArn" "issuer" "audience" }}
+{{- if not (index $a $k) }}
+{{- fail (printf "dashboard.auth.platform is alb_oidc but dashboard.auth.%s is empty; ALB tokens carry no audience, so the load balancer ARN and the IdP client id are what say who a token is for" $k) }}
+{{- end }}
+{{- end }}
+{{- if $a.issuers }}
+{{- fail "dashboard.auth.issuers is not supported with alb_oidc: the load balancer fronts one identity provider" }}
+{{- end }}
+{{- if not (regexMatch "^arn:aws:elasticloadbalancing:[a-z0-9-]+:[0-9]{12}:loadbalancer/app/[A-Za-z0-9-]+/[0-9a-f]+$" $a.albArn) }}
+{{- fail "dashboard.auth.albArn is not an application load balancer ARN in the commercial partition (arn:aws:); GovCloud and China publish ALB keys elsewhere and are not supported" }}
+{{- end }}
+{{- else if eq $a.platform "iap" }}
+{{- if not $a.audience }}
+{{- fail "dashboard.auth.platform is iap but dashboard.auth.audience is empty; set it to the backend IAP protects (/projects/NUMBER/global/backendServices/ID), or a token for any IAP-protected app would be accepted" }}
+{{- end }}
+{{- if not (regexMatch "^/projects/[0-9]+/(global/backendServices/[0-9]+|locations/[a-z0-9-]+/services/[a-z0-9-]+)$" (toString $a.audience)) }}
+{{- fail "dashboard.auth.audience is not an IAP audience; expected /projects/NUMBER/global/backendServices/ID or /projects/NUMBER/locations/REGION/services/NAME" }}
+{{- end }}
+{{- if or $a.issuers $a.jwksUrl $a.issuer }}
+{{- fail "dashboard.auth.platform is iap, which verifies against IAP's own issuer and keys; clear dashboard.auth.issuer, jwksUrl and issuers" }}
+{{- end }}
+{{- else }}
+{{- range $n, $i := $a.issuers }}
+{{- range $k := list "issuer" "jwksUrl" "audience" }}
+{{- if not (index $i $k) }}
+{{- fail (printf "dashboard.auth.issuers[%d].%s is empty; the app refuses to start without it, because an unset audience would accept tokens minted for another application" $n $k) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not $a.issuers }}
+{{- range $k := list "jwksUrl" "issuer" "audience" }}
+{{- if not (index $a $k) }}
+{{- fail (printf "dashboard.auth.mode is oidc_jwt but dashboard.auth.%s is empty (and no dashboard.auth.issuers are set); the app refuses to start without it, because an unset audience would accept tokens minted for another application" $k) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{/*
+The read-only view over the findings store.
+
+The one service here that SHOULD sit behind an auth proxy -- a human signs
+in. It runs on the READER service account, and it gets NO hash salt: it
+reads every finding hash, so handing it the salt would put the key beside
+the data it protects and one compromise would yield both.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-dashboard
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  replicas: {{ .Values.dashboard.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: dashboard
+  template:
+    metadata:
+      labels:
+        {{- include "forgd-verdict.labels" . | nindent 8 }}
+        app.kubernetes.io/component: dashboard
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        checksum/policy: {{ include (print $.Template.BasePath "/configmap-policy.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      # The reader identity, and the separation is enforced by the cloud's
+      # access control -- Azure RBAC, or IAM on EKS -- rather than by
+      # anything in the app.
+      serviceAccountName: {{ include "forgd-verdict.readerServiceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: dashboard
+          {{- include "forgd-verdict.workingDir" $ | nindent 10 }}
+          image: {{ include "forgd-verdict.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "forgd-verdict.securityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.dashboard.port }}
+          env:
+            - name: FORGD_ROLE
+              value: dashboard
+            - name: PORT
+              value: {{ .Values.dashboard.port | quote }}
+            # Azure only, and absent when clientId is empty, as on EKS.
+            # Overrides nothing by accident: this must be the READER client
+            # id, or ManagedIdentityCredential picks whichever identity the
+            # node offers and the dashboard holds write access it was
+            # deliberately not granted.
+            {{- with .Values.serviceAccounts.reader.clientId }}
+            - name: AZURE_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.mode }}
+            # Overrides the policy for this deployment only, so one policy
+            # file can serve Container Apps on trusted_header and this on
+            # oidc_jwt.
+            - name: FORGD_DASHBOARD_AUTH_MODE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.jwksUrl }}
+            - name: FORGD_DASHBOARD_JWKS_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.issuer }}
+            - name: FORGD_DASHBOARD_ISSUER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.audience }}
+            - name: FORGD_DASHBOARD_AUDIENCE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.header }}
+            - name: FORGD_DASHBOARD_HEADER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.platform }}
+            - name: FORGD_DASHBOARD_PLATFORM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.albArn }}
+            - name: FORGD_DASHBOARD_ALB_ARN
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.groupsClaim }}
+            - name: FORGD_DASHBOARD_GROUPS_CLAIM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.dashboard.auth.issuers }}
+            # JSON, because an environment variable cannot carry a list.
+            # Keys renamed to the policy's spelling.
+            {{- $list := list }}
+            {{- range . }}
+            {{- $list = append $list (dict "issuer" .issuer "jwks_url" .jwksUrl "audience" .audience "groups_claim" (default "" .groupsClaim)) }}
+            {{- end }}
+            - name: FORGD_DASHBOARD_ISSUERS
+              value: {{ $list | toJson | quote }}
+            {{- end }}
+            {{- if .Values.dashboard.trustedHeaderStrippedBy }}
+            # The attestation this chart already refuses trusted_header
+            # without. Passed through so the APP enforces it too: the
+            # guard held on Helm and not on Terraform or a bare run.
+            #
+            # OUTSIDE the `with` above. Inside it `.` is the header
+            # string, so `.Values` does not resolve -- and `helm template`
+            # rendered anyway in the fixture that leaves the header unset,
+            # because the whole block was skipped.
+            - name: FORGD_DASHBOARD_STRIPPED_BY
+              value: {{ .Values.dashboard.trustedHeaderStrippedBy | quote }}
+            {{- end }}
+            # NO FORGD_HASH_SALT here. See the note above before adding it
+            # to resolve org labels.
+            {{- include "forgd-verdict.commonEnv" . | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources: {{- toYaml .Values.dashboard.resources | nindent 12 }}
+          volumeMounts:
+            - name: policy
+              mountPath: {{ .Values.policy.mountPath }}
+              readOnly: true
+            {{- include "forgd-verdict.scratchMounts" . | nindent 12 }}
+      volumes:
+        {{- include "forgd-verdict.policyVolume" . | nindent 8 }}
+        {{- include "forgd-verdict.scratchVolumes" . | nindent 8 }}
+      {{- with .Values.dashboard.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dashboard.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.dashboard.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-dashboard
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+  {{- with include "forgd-verdict.gkeServiceAnnotations" (list . "dashboard") }}
+  {{- . | nindent 2 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.dashboard.port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: dashboard
+{{- end }}

@@ -1,0 +1,769 @@
+# forgd-verdict on Kubernetes.
+#
+# The store comes from Terraform (modules/store-azure, modules/store-s3 on
+# AWS, or modules/store-gcs on Google Cloud) on every deployment path,
+# including this one. The chart does not create it: findings outlive
+# clusters, and a `helm uninstall` must not be able to take the evidence
+# with it.
+#
+# TWO OF THE SIX ROLES MUST NEVER SIT BEHIND AN AUTH PROXY. Anthropic
+# authenticates to the verdict server with a webhook signature and to the
+# collector with an OTLP header, so an auth redirect turns every governed
+# prompt and every export into a delivery failure rather than a deny. That
+# is why the dashboard's ingress is a SEPARATE object from the public one
+# even when they share a hostname -- see templates/ingress.yaml.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # REQUIRED. Empty renders `image: :<version>`, which helm lint and
+  # `kubectl apply --dry-run` both accept and the kubelet rejects with
+  # InvalidImageName.
+  #
+  # A registry the cluster can pull from: ACR with AcrPull on AKS, ECR on
+  # EKS, Artifact Registry on GKE. CI rolls the tag.
+  repository: ""
+  # Empty means Chart.appVersion. CI sets a commit SHA.
+  tag: ""
+  # Optional. `sha256:` and 64 lowercase hex characters, without the
+  # repository or an `@`. When set, the image renders as
+  # `repository@<digest>` and `tag` is ignored.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+logLevel: INFO
+
+# The container's working directory, mounted writable.
+#
+# policy.yaml carries relative paths -- `server.csv_path: ./timings.csv`,
+# `hook.archive_dir: ./archive` -- which resolve against the image's WORKDIR
+# of /app. /app is read-only here, so the verdict server crash-looped on
+# `Read-only file system: './timings.csv'` while the collector, which does
+# not open that file, came up fine. There is no environment override for the
+# path, so the relative paths are given somewhere to land instead.
+workingDir: /var/lib/forgd
+
+store:
+  # FORGD_VERDICT_STORE. `open_store` dispatches on the prefix, so an
+  # https://...blob.core.windows.net/... URL selects the Azure backend, an
+  # s3://bucket/prefix URL the S3 one, a gs://bucket/prefix URL the GCS one,
+  # and a local path the file one.
+  #
+  # Output `store_url` of the store-azure, store-s3 or store-gcs Terraform
+  # module.
+  #
+  # REQUIRED, and the refusal matters more here than anywhere else. Empty
+  # gives a working deployment that persists nothing:
+  # _apply_env_overrides skips an empty string, so policy.yaml's
+  # `store: $FORGD_VERDICT_STORE` resolves to none, and policy.yaml says
+  # "Empty disables it". The pods pass readiness, the dashboard renders, no
+  # finding is ever written, and nothing anywhere reports an error.
+  url: ""
+
+# Organization UUIDs. Never commit real values -- see CLAUDE.md. Supply them
+# with --set or a values file kept out of the repository.
+#
+#   orgIds:
+#     primary: 00000000-0000-0000-0000-000000000000
+#
+# Each becomes FORGD_ORG_ID_<NAME>.
+orgIds: {}
+
+# Fleet OTel exporter tokens: one token valid for a set of orgs, by their
+# orgIds names, for an otel.orgs entry with
+#   ids: [$FORGD_ORG_ID_PROD, $FORGD_ORG_ID_DEV]
+#   token: $FORGD_OTEL_TOKEN_LAPTOPS
+# Each fleet becomes FORGD_OTEL_TOKEN_<FLEET>, from otel-token-<fleet>
+# (secrets.otelTokens.<fleet> for a chart-managed secret). A fleet cannot
+# share a name with an org, and every org it lists needs its orgIds entry.
+#
+#   otelFleets:
+#     laptops: [prod, dev]
+otelFleets: {}
+
+serviceAccounts:
+  # The verdict server, the collector and the ingest job write findings.
+  # On Azure, store-azure assigns Storage Blob Data Contributor, or its
+  # custom writer role while control_enabled is true. store-s3's writer
+  # role on AWS, store-gcs's writer service account on GKE.
+  writer:
+    name: ""
+    # Azure only. azure.workload.identity/client-id: the client id of the
+    # user-assigned identity from the store module, federated to this
+    # service account by modules/cluster-aks. Leave empty on EKS and GKE.
+    # On EKS under IRSA put the role in `annotations` as
+    # eks.amazonaws.com/role-arn; on GKE put the Google service account
+    # there as iam.gke.io/gcp-service-account.
+    clientId: ""
+    annotations: {}
+  # READ-ONLY, for the dashboard only. On Azure, store-azure assigns Storage
+  # Blob Data Reader, or its custom reader role while control_enabled is
+  # true. store-s3's reader role on AWS, store-gcs's reader service account
+  # on GKE.
+  reader:
+    name: ""
+    clientId: ""
+    annotations: {}
+  # The findings connector's own service account. It carries the READER
+  # identity above -- clientId and annotations are the reader's -- so only
+  # the name is set here. modules/cluster-* federate it when
+  # connector_enabled; its default there is forgd-verdict-connector.
+  connector:
+    name: ""
+  # The dashboard's identity when dashboard.admins.enabled, in place of the
+  # reader: the reader's grants plus writes to state/runtime-overrides.json
+  # and under audit/runtime-overrides/ (docs/OVERRIDES.md). store-azure's,
+  # store-s3's or store-gcs's control identity, federated to this service
+  # account by modules/cluster-* with control_enabled. Not rendered while
+  # admins are off. The connector stays on the reader.
+  control:
+    name: ""
+    clientId: ""
+    annotations: {}
+
+# Azure workload identity, rather than a credential in a secret. The pod
+# label and the service account annotation are both required; the mutating
+# webhook reads the label and does nothing without it.
+#
+# On EKS and GKE set this false and attach the cloud identities through
+# serviceAccounts.*.annotations -- see values-eks.example.yaml and
+# values-gke.example.yaml.
+workloadIdentity:
+  enabled: true
+  tenantId: ""
+
+secrets:
+  # Point at a secret this chart does not manage -- external-secrets, the
+  # CSI driver, or one created by hand. Preferred: the values below end up
+  # in the release, and `helm get values` shows them.
+  existingSecret: ""
+  # Required keys when the chart creates the secret:
+  #   hash-salt        FORGD_HASH_SALT. Unsalted hashes of an SSN or a card
+  #                    number are brute-forceable in about a billion tries.
+  #   webhook-secret   The Anthropic signing secret, whsec_-prefixed.
+  #                    Optional when verdict.signingOrgs is set; then
+  #                    webhook-secret-<name> for each, and
+  #                    webhook-secret-<name>-previous while rotating.
+  #   compliance-key   The Compliance Access Key. Ingest only, and optional
+  #                    when ingest.managedAgentsWorkspaces is set: a
+  #                    Platform-only deployment has no Enterprise org.
+  #                    Optional when ingest.complianceOrgs is set; then
+  #                    compliance-key-<name> for each.
+  #   metrics-token    Guards /metrics and /stats. Optional.
+  hashSalt: ""
+  webhookSecret: ""
+  # The OUTGOING secret during a rotation. policy.yaml accepts both, so set
+  # this to the old value while Anthropic is switched over, then drop it.
+  # Without it a rotation has a window where in-flight frames are signed
+  # with a secret the server no longer holds, and a rejected frame is a
+  # webhook failure rather than a deny.
+  webhookSecretPrevious: ""
+  complianceKey: ""
+  metricsToken: ""
+  # FORGD_OTEL_TOKEN_<NAME>, one per org whose agents export to the
+  # collector. Keys are matched to orgIds by name.
+  otelTokens: {}
+  # FORGD_INTAKE_FLEET_TOKEN, and FORGD_INTAKE_FLEET_TOKEN_PREVIOUS during a
+  # rotation: the bearer every laptop in a managed fleet ships with, as
+  # secret keys intake-fleet-token and intake-fleet-token-previous. One
+  # device is revoked with `forgd-verdict overrides deny-device`, without
+  # rotating this.
+  intakeFleetToken: ""
+  intakeFleetTokenPrevious: ""
+  # Per-org secrets, for a chart-managed secret. Each key is a name from the
+  # role's list (verdict.signingOrgs, ingest.complianceOrgs,
+  # intake.fleet.orgs); the list, not these maps, decides which variables
+  # the pods get, so secrets.existingSecret needs only the lists.
+  #
+  #   webhookSecrets:      prod: {current: whsec_..., previous: whsec_...}
+  #                        -> webhook-secret-prod, webhook-secret-prod-previous
+  #   complianceKeys:      prod: sk-ant-api01-...   -> compliance-key-prod
+  #   intakeFleetTokens:   prod: {current: ..., previous: ...}
+  #                        -> intake-fleet-token-prod, intake-fleet-token-prod-previous
+  #
+  # A Compliance Access Key has no previous slot: an entry takes one key,
+  # and its rotation is a switch (docs/OPERATIONS.md).
+  webhookSecrets: {}
+  complianceKeys: {}
+  intakeFleetTokens: {}
+  # FORGD_INTAKE_TOKEN_<NAME>, one per intake client: an agent, or a laptop
+  # outside a fleet.
+  #
+  # Either way a laptop holds no store credential. Adapter 2 scans locally
+  # and needs no server for that; shipping is the only part that touches
+  # infrastructure, and it goes through /intake rather than straight at the
+  # store.
+  intakeTokens: {}
+  # FORGD_MANAGED_AGENTS_KEY_<NAME>, one per Managed Agents workspace the
+  # ingest job reads (adapter 6). A workspace API key: no read-only scope
+  # is documented for one, so it can also create and delete sessions.
+  # Each is the variable a managed_agents.workspaces[].api_key names; name it
+  # after the workspace's `key`, which every workspace entry must carry.
+  managedAgentsKeys: {}
+  # dashboard-form-key   FORGD_DASHBOARD_FORM_KEY, the HMAC key for the
+  #                      dashboard's admin form tokens. Required while
+  #                      dashboard.admins.enabled; every dashboard replica
+  #                      shares it. openssl rand -base64 32
+  dashboardFormKey: ""
+  # Adapter 5's sink bearers, for the policy's sinks[].token. A token
+  # written as $FORGD_SINK_TOKEN_<NAME> is read by the collector, and no
+  # other workload, from the secret key sink-token-<name> (<name> lower-
+  # cased, `_` as `-`). The policy decides which keys are needed, so
+  # secrets.existingSecret needs only the keys. A literal token in the
+  # policy is refused.
+  #
+  #   sinkTokens:
+  #     siem: <the destination's bearer>   # $FORGD_SINK_TOKEN_SIEM
+  sinkTokens: {}
+  # Adapter 1's optional second factor, for the policy's
+  # server.required_headers: $FORGD_SHARED_HEADER from the key
+  # shared-header, and $FORGD_SHARED_HEADER_<NAME> from
+  # shared-header-<name>. The verdict server alone reads them. A literal
+  # value in the policy is refused.
+  sharedHeader: ""
+  sharedHeaders: {}
+
+policy:
+  mountPath: /etc/forgd
+  # Required, and supplied by reference rather than pasted:
+  #
+  #   --set-file policy.inline=policy.yaml
+  #
+  # The repository's policy.yaml stays the only copy. A copy inside the chart
+  # would be free to drift from the one the Container Apps module reads.
+  inline: ""
+
+# --- adapter 1: the verdict server ---------------------------------------
+verdict:
+  enabled: true
+  port: 8000
+  # FORGD_VERDICT_MODE. `observe` records and allows; `enforce` denies.
+  mode: observe
+  # ONE replica.
+  #
+  # The session cache and the webhook-id dedupe store are per-process, so a
+  # second replica makes the latency numbers meaningless and lets a retried
+  # webhook-id scan twice. Raising this needs a shared cache first, which is
+  # why the template refuses a higher number unless you say you know.
+  replicas: 1
+  sharedStateAcknowledged: false
+  # One signing secret per org, by orgIds name, when each org's Inference
+  # hook signs with its own. Each NAME becomes WEBHOOK_SECRET_<NAME> and
+  # WEBHOOK_SECRET_<NAME>_PREVIOUS, from webhook-secret-<name> and
+  # webhook-secret-<name>-previous; list both in policy.yaml's
+  # server.secrets. With a list, webhookSecret is optional.
+  signingOrgs: []
+  # Memory: unsigned callers can make the server hold at most
+  # server.preauth_body_budget_bytes (256 MiB) of request body, up to twice
+  # that while a body is joined, so about 512 MiB, plus the process (~100
+  # MiB), gitleaksd, and the frames being scanned after their signature
+  # verified. Raise preauth_body_budget_bytes only with the limit.
+  resources:
+    requests: { cpu: "1", memory: 2Gi }
+    limits: { cpu: "2", memory: 2Gi }
+  # The org's verdict timeout covers connection through response, so a pod
+  # that is still warming is a webhook failure rather than a slow allow.
+  # Repeated failures trip Anthropic's circuit breaker and stop governing.
+  minReadySeconds: 5
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# --- adapter 4: the OTLP collector ---------------------------------------
+collector:
+  enabled: true
+  port: 8100
+  # One replica: the store sink queue is per-process, and backpressure --
+  # the 503 that makes an exporter hold its batch instead of dropping it --
+  # only means anything with a single queue.
+  replicas: 1
+  sharedStateAcknowledged: false
+  # Run the collector on the ingest image, which carries Presidio and its
+  # spaCy model, so a sink can redact names, emails, phone numbers and
+  # places as well as secrets. See policy.yaml `otel.sink_detectors`.
+  #
+  # Off by default: the model adds about 600 MB to the image and about a
+  # gigabyte of memory once loaded, and a deployment with no sink, or one
+  # whose sinks only redact secrets, gains nothing from it. With it off, a
+  # sink that names a `presidio:` id refuses to start.
+  useIngestImage: false
+  resources:
+    requests: { cpu: "1", memory: 2Gi }
+    limits: { cpu: "2", memory: 2Gi }
+  # Long enough for the sink queue to drain. A killed collector loses the
+  # batches it already acknowledged.
+  terminationGracePeriodSeconds: 60
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# --- the dashboard -------------------------------------------------------
+dashboard:
+  enabled: true
+  port: 8080
+  replicas: 1
+  # Overrides the policy's dashboard.auth for THIS deployment, so one
+  # policy file can serve Container Apps on trusted_header and Kubernetes
+  # on oidc_jwt.
+  #
+  # oidc_jwt verifies a signature against the issuer's JWKS -- signature,
+  # exp, iss, aud -- so it trusts an assertion rather than a network
+  # position. It does not sign anyone in: put a proxy in front that does the
+  # interactive flow and passes the ID token through as a bearer token.
+  auth:
+    mode: ""       # "" keeps the policy's mode
+    jwksUrl: ""    # https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys
+    issuer: ""     # https://login.microsoftonline.com/<tenant>/v2.0
+    audience: ""   # the application (client) id
+    header: ""     # "" keeps the policy's, or the platform's below
+    # Picks the header for a known proxy: container_apps, cloud_run,
+    # oauth2_proxy, cloudflare_access, pomerium, alb_oidc (which also
+    # needs albArn, and treats audience as the IdP client id), or iap
+    # (Identity-Aware Proxy: audience only, the backend service it protects;
+    # issuer and jwksUrl stay empty). cloud_run is a service-invocation
+    # token, not a user sign-in; a person signing in on GCP is iap.
+    platform: ""
+    albArn: ""     # alb_oidc: the load balancer that must have signed the token
+    groupsClaim: ""  # "" keeps the policy's, which defaults to `groups`
+    # More identity providers. Each needs issuer, jwksUrl and audience
+    # (a string or a list); groupsClaim is optional. With more than one
+    # issuer, every dashboard.entitlements.map entry must name its issuer.
+    #   issuers:
+    #     - issuer: https://example.okta.com/oauth2/default
+    #       jwksUrl: https://example.okta.com/oauth2/default/v1/keys
+    #       audience: forgd-dashboard
+    issuers: []
+
+  # Required when the EFFECTIVE auth.mode is trusted_header.
+  #
+  # That mode authenticates nothing unless the proxy in front strips inbound
+  # copies of the header it reads. Container Apps EasyAuth strips
+  # x-ms-client-principal-name, which is why the shipped policy defaults to
+  # it; oauth2-proxy does not strip an Azure-named header, so on Kubernetes
+  # the same policy lets a caller set the header and be whoever it says.
+  #
+  # Name the proxy you have CHECKED, e.g. "oauth2-proxy with
+  # --set-xauthrequest and a matching header:, verified stripped". Or switch
+  # the policy to auth.mode: oidc_jwt, which verifies a signature and
+  # therefore ports.
+  trustedHeaderStrippedBy: ""
+  # Serves the dashboard with no sign-in: every route serves every finding
+  # to anyone who can reach the pod. Required when the effective auth.mode
+  # is none, which is also what a policy with no dashboard.auth resolves to,
+  # and refused under any other mode or with the dashboard disabled. Also
+  # refused while the chart routes the dashboard from an Ingress: set
+  # ingress.dashboard.enabled: false and reach it with kubectl port-forward
+  # or a route you control.
+  serveOpen: false
+  # Runtime overrides from the dashboard (docs/OVERRIDES.md). True runs the
+  # dashboard as serviceAccounts.control and gives it FORGD_DASHBOARD_FORM_KEY
+  # from the secret key dashboard-form-key and FORGD_OVERRIDES_SIGNING_KEY
+  # from admins.signingKey. The policy's dashboard.admins
+  # says who is an admin; the chart refuses a policy that sets its groups
+  # while this is false.
+  # The chart cannot see the store module, so it cannot check that the
+  # store's control_enabled has taken the writers' writes to the overrides
+  # away, as the app modules' overrides_writer_lockout does. The dashboard
+  # verifies it from the cloud's IAM policy, and no service adopts an
+  # override until every writer identity is verified.
+  admins:
+    enabled: false
+    # REQUIRED while enabled: the store module's overrides_writer_identities
+    # output, the writer identities whose lockout the dashboard verifies
+    # (FORGD_OVERRIDES_WRITER_IDENTITIES). Role ARNs on S3,
+    # serviceAccount: members on GCS, principal ids on Azure. It must match
+    # that output exactly: every identity the writer service accounts run as
+    # must be listed, since one that is not is never checked. The chart
+    # refuses an empty list or a blank entry but cannot tell whether an
+    # identity is missing.
+    writerIdentities: []
+    # REQUIRED while enabled on an Azure store: store-azure's
+    # storage_account_id output (FORGD_OVERRIDES_STORAGE_ACCOUNT_ID).
+    storageAccountId: ""
+    # GCS only: who audited the writers' grants inherited from the project,
+    # folder and organization and held through groups, and when
+    # (FORGD_OVERRIDES_GCS_INHERITED_AUDITED_BY). The bucket policy the
+    # lockout check reads shows neither, so on GCS nothing is adopted until
+    # this is set. An attestation; the dashboard does not check it.
+    gcsInheritedAuditedBy: ""
+    # REQUIRED while enabled: the Kubernetes Secret holding the Ed25519
+    # private key the dashboard signs every runtime-override record with
+    # (FORGD_OVERRIDES_SIGNING_KEY), on the dashboard only. Create the
+    # Secret yourself from `forgd-verdict overrides keygen`; the chart never
+    # takes the key as a value, since a value lands in the Helm release.
+    # Empty secretName uses secrets.existingSecret, under the same key. The
+    # chart-managed Secret never holds it.
+    signingKey:
+      secretName: ""
+      key: overrides-signing-key
+    # REQUIRED while enabled: the Ed25519 public keys every workload that
+    # reads runtime overrides verifies records with
+    # (FORGD_OVERRIDES_VERIFY_KEY, joined with ","). Each entry is 43
+    # characters of unpadded URL-safe base64, as `forgd-verdict overrides
+    # keygen` prints it. List the old and the new key while rotating. The
+    # chart refuses an empty list or a malformed entry, but cannot tell
+    # whether the signing key's public half is listed: the dashboard refuses
+    # to start when it is not.
+    verifyKeys: []
+  resources:
+    requests: { cpu: "250m", memory: 512Mi }
+    limits: { cpu: "500m", memory: 1Gi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# --- adapter 2's receiving end -------------------------------------------
+#
+# NOT the `ingest` cron below -- that is adapter 3, the Compliance API scan.
+# This one RECEIVES findings that developer laptops already scanned.
+#
+# Off by default: it needs a token, and a deployment that has not issued
+# one would expose an endpoint that refuses everything.
+intake:
+  enabled: false
+  # The fleet token, for policy.yaml's intake.fleet: FORGD_INTAKE_FLEET_TOKEN
+  # and FORGD_INTAKE_FLEET_TOKEN_PREVIOUS from the secret keys
+  # intake-fleet-token and intake-fleet-token-previous.
+  fleet:
+    enabled: false
+    # One fleet token pair per org, by orgIds name, for intake.fleet[]
+    # entries with their own `org`. Each NAME becomes
+    # FORGD_INTAKE_FLEET_TOKEN_<NAME> and FORGD_INTAKE_FLEET_TOKEN_<NAME>_PREVIOUS,
+    # from intake-fleet-token-<name> and intake-fleet-token-<name>-previous.
+    # Independent of `enabled`, which renders the single fleet token.
+    orgs: []
+  # NAMES, not tokens. One per intake client: an agent, or a laptop outside
+  # a fleet. Managed laptops share the fleet token under `fleet`, above.
+  #
+  # Generated from here rather than from secrets.intakeTokens, for the same
+  # reason the collector's org tokens come from orgIds: a deployment using
+  # secrets.existingSecret must not have to list token-shaped values in
+  # values.yaml just to get the variable NAMES, which would put the secrets
+  # back into the release the existingSecret was chosen to keep them out of.
+  #
+  #   clients: [invoice-bot]
+  #
+  # Each becomes FORGD_INTAKE_TOKEN_<NAME> read from the secret key
+  # intake-token-<name>.
+  clients: []
+  port: 8200
+  replicas: 1
+  # Sized for the gitleaksd startup compile, not for steady state. The
+  # daemon answers a scan in 0.21 ms and the container sits at about
+  # 60 Mi; the cost is one burst of regex compilation at boot, and at
+  # 500m that burst took long enough that the entrypoint's socket wait
+  # was the thing under pressure.
+  resources:
+    requests: { cpu: "250m", memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  nodeSelector: {}
+
+# --- the findings connector ----------------------------------------------
+#
+# A read-only MCP server over the findings store, added to your Claude
+# organization as a custom connector. See docs/CONNECTOR.md. Experimental:
+# it has not been run against a real Claude organization or identity provider.
+#
+# Off by default. Anything Claude reads through it enters your Claude
+# conversations, where the Compliance API retains it and the inference hook
+# scans it.
+#
+# It authenticates every request itself against your identity provider, so
+# its ingress takes no auth annotations: a proxy's sign-in answers Claude
+# before the connector can, and Claude reads that as a failure.
+connector:
+  enabled: false
+  port: 8090
+  replicas: 1
+  # The canonical MCP URL, the one entered in Claude. Empty derives
+  # https://<ingress.connector.host or ingress.host>/mcp; set, it must equal
+  # that.
+  resource: ""
+  # What Claude requests at sign-in. On Entra, the full name under the
+  # Application ID URI: https://<host>/mcp/findings.read.
+  scopes: []
+  # Required. Checked against the token's scp or scope claim; on Entra, the
+  # short name: findings.read. The chart and the app refuse to start without
+  # it.
+  requiredScope: ""
+  # Browser origins allowed on a request that carries Origin. Empty is
+  # https://claude.ai.
+  allowedOrigins: []
+  auth:
+    issuer: ""     # https://login.microsoftonline.com/<tenant>/v2.0
+    jwksUrl: ""    # https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys
+    # A list. On Entra, the MCP URL and the API app's client id: which one
+    # the token carries is not yet confirmed.
+    audience: []
+    groupsClaim: ""  # "" is groups
+    # More identity providers, as dashboard.auth.issuers. The first is the
+    # one Claude signs in with.
+    issuers: []
+  resources:
+    requests: { cpu: "100m", memory: 256Mi }
+    limits: { cpu: "500m", memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Extra environment for every role. Non-secret deployment values that
+# policy.yaml refers to as `$NAME`.
+#
+# `sinks[].endpoint` is the reason this exists: the Azure Monitor URI names
+# the deployment's own data collection rule, so committing it to policy.yaml
+# would point every fork at a rule they hold no grant on.
+#
+# NOT for credentials -- these land in the Helm release in plaintext and
+# `helm get values` prints them. Credentials are `secrets.*`.
+# Refused, matched upper-cased: a variable the chart wires from a Secret
+# (FORGD_SINK_TOKEN_* and FORGD_SHARED_HEADER included); a variable the
+# chart sets or checks (FORGD_ROLE, PORT, FORGD_INGEST_ARGS, and anything
+# starting FORGD_VERDICT_, FORGD_POLICY_, FORGD_DASHBOARD_,
+# FORGD_CONNECTOR_, FORGD_OVERRIDES_, FORGD_ORG_ID_ or FORGD_GITLEAKS_);
+# and a cloud identity or credential (AZURE_*, AWS_ credential and role
+# variables, GOOGLE_APPLICATION_CREDENTIALS).
+#
+#   extraEnv:
+#     FORGD_SINK_ENDPOINT_AZMON: https://dce-....ingest.monitor.azure.com/dataCollectionRules/dcr-.../streams/Custom-ForgdVerdict_CL
+extraEnv: {}
+
+# --- adapter 3: the ingest cron ------------------------------------------
+ingest:
+  enabled: true
+  # Managed Agents workspaces this job reads, by name, for a deployment
+  # whose keys come from secrets.existingSecret. Defaults to the names in
+  # secrets.managedAgentsKeys.
+  managedAgentsWorkspaces: []
+  # One Compliance Access Key per org, by orgIds name. Each NAME becomes
+  # ANTHROPIC_COMPLIANCE_ACCESS_KEY_<NAME>, from compliance-key-<name>, for
+  # that org's compliance.orgs entry. With a list, complianceKey is optional.
+  complianceOrgs: []
+  # Every six hours. The Compliance API exposes sessions updated since a
+  # cursor, so the schedule sets staleness, not coverage.
+  schedule: "0 */6 * * *"
+  # BOTH session families. `local` and `remote` are different
+  # populations, not two views of one: `local` holds office agents,
+  # Cowork and Claude Code sessions, `remote` holds Cowork remote
+  # ones, with no overlap. With `--family local` alone every remote
+  # session is invisible to every run, and the coverage matrix shows
+  # the gap as an empty cell rather than as something never looked
+  # at.
+  #
+  # A family the org does not have answers 404 and is skipped, so
+  # asking for both costs a Team workspace one request per run.
+  args: "--family local,remote"
+  image:
+    # BOTH are REQUIRED while ingest is enabled, and neither defaults.
+    #
+    # The base image runs this role happily: it finds nothing at the Presidio
+    # tier, because the tier is `auto` and the dependency is absent, and
+    # reports a clean scan. Defaulting either would make the failure mode of a
+    # forgotten value "no PII anywhere" rather than an error.
+    #
+    # THE TAG CARRIES THE VARIANT, NOT THE REPOSITORY. One repository is
+    # tagged twice -- `forgd-verdict:<sha>` and `forgd-verdict:<sha>-ingest`
+    # -- so this repository is normally the same string as image.repository
+    # and requiring it alone proves nothing. A tag falling back to
+    # image.tag would be exactly the base image, so the tag is required.
+    #
+    # A digest replaces the tag: when set, the image renders as
+    # `repository@<digest>` and `tag` is ignored, so one of the two is
+    # required. It must be the -ingest image's digest, not image.digest.
+    repository: ""
+    tag: ""
+    digest: ""
+  # 2 vCPU / 4 Gi, not the 1/2 the online roles get: en_core_web_lg is about
+  # a gigabyte resident on top of a 1.4 GB image.
+  resources:
+    requests: { cpu: "1", memory: 3Gi }
+    limits: { cpu: "2", memory: 4Gi }
+  # One pass walks every session updated since the last run, and the
+  # Presidio tier multiplies the per-frame cost.
+  activeDeadlineSeconds: 3600
+  backoffLimit: 1
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # No volume. The cursor lives in the findings store -- already
+  # durable, already reachable with this identity, and correct on every
+  # target. An emptyDir would be the obvious mistake: it persists within a
+  # replica, and a scheduled job gets a new replica every run.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+ingress:
+  enabled: true
+  className: nginx
+  # One hostname, path-routed. /hook reaches the verdict server, /v1/* the
+  # collector, everything else the dashboard.
+  host: ""
+  # Further names for the SAME deployment, served by identical rules and
+  # covered by one certificate's SANs.
+  #
+  # The cutover case: stand up on the Azure-issued
+  # <label>.<region>.cloudapp.azure.com, which needs no domain ownership,
+  # then add a vanity name here once DNS is delegated -- rather than
+  # re-pointing Anthropic twice. `host` stays the one the notes and the
+  # deploy gate report.
+  extraHosts: []
+  # Applied to the PUBLIC ingress -- the one carrying /hook and /v1. An auth,
+  # rewrite or snippet key here is REFUSED at render time rather than
+  # commented against: it would front or re-match the two paths Anthropic
+  # posts to. Timeouts, buffer sizes and the like are fine.
+  annotations: {}
+  # 64 MiB, matching policy.yaml's `server.max_body_bytes: 67108864` and the
+  # Caddyfile. Anything lower means nginx answers 413 to a frame the app
+  # would have accepted -- and the Caddyfile names this as the common
+  # failure, because nginx defaults to 1m. A rejected batch is telemetry an
+  # exporter will not resend; a rejected frame is a webhook failure that
+  # counts toward the circuit breaker.
+  proxyBodySize: 64m
+  hook:
+    # Recommended: Anthropic's Inference hooks egress range, so only
+    # Anthropic can make the verdict server read a body before its
+    # signature is checked. Take it from Anthropic's published IP addresses
+    # (https://platform.claude.com/docs/en/api/ip-addresses), and check it
+    # again when they change: a stale list fails every governed prompt.
+    #
+    #   sourceRanges: ["192.0.2.0/24"]   # example; use Anthropic's range
+    #
+    # Set, /hook moves to an Ingress object of its own carrying
+    # whitelist-source-range; /v1, /intake and /scan stay open to laptops.
+    # Not available with ingress.className gce: use Cloud Armor there.
+    sourceRanges: []
+  tls:
+    enabled: true
+    secretName: ""
+    # cert-manager. The issuer annotation goes on all three objects.
+    clusterIssuer: ""
+  diagnostics:
+    # /healthz and /metrics on the verdict server; /health and /stats on the
+    # collector. Real paths, no rewrite: a rewrite-target on ANY Ingress for
+    # a host switches every location on that host to a regex match, so one
+    # added here would change how /hook and /v1 are matched. Both roles
+    # serve both health aliases, which is what makes the split possible.
+    enabled: true
+    annotations: {}
+  dashboard:
+    # False routes nothing to the dashboard: no Ingress object for it, and
+    # in GKE mode no `/` path. Required with dashboard.serveOpen.
+    enabled: true
+    # Its own hostname, or empty for the public one. Empty is fine and is
+    # the default; setting it is what lets the dashboard use SERVER-scoped
+    # annotations -- mTLS, server-snippet -- which ingress-nginx applies to
+    # every path on a hostname and which are therefore refused while the
+    # dashboard shares one with /hook.
+    host: ""
+    # A SEPARATE ingress object, so per-location auth here cannot reach
+    # /hook or /v1. This is where oauth2-proxy goes.
+    #
+    #   annotations:
+    #     nginx.ingress.kubernetes.io/auth-url: https://.../oauth2/auth
+    #     nginx.ingress.kubernetes.io/auth-signin: https://.../oauth2/start?rd=$escaped_request_uri
+    #
+    # With a proxy in front, set auth.mode: trusted_header in policy.yaml.
+    # Without one, use auth.mode: oidc_jwt and let the app verify the token
+    # itself -- the app refuses every request until one of those is
+    # configured, correctly and uselessly.
+    annotations: {}
+  connector:
+    # Its own hostname, or empty for the public one. On Entra it needs one
+    # in a domain the tenant has verified: the MCP URL must be registered as
+    # an Application ID URI.
+    host: ""
+    # A SEPARATE ingress object carrying /mcp and its metadata path. Auth,
+    # rewrite and snippet keys are refused here as on the public object.
+    annotations: {}
+    # An optional allowlist, off by default. Anthropic's published egress
+    # range is 160.79.104.0/21 today, and it has changed before; a stale
+    # entry fails as "Couldn't reach the MCP server". It also cuts off
+    # Claude Code, which connects from the user's machine.
+    sourceRanges: []
+  # GKE only: ingress.className gce. One Ingress carries every path, each
+  # routed Service gets a BackendConfig, and IAP goes on the dashboard's
+  # backend whenever the dashboard is on. See templates/ingress.yaml and
+  # templates/gke.yaml.
+  gke:
+    # Renders a ManagedCertificate with every host as a domain and names it
+    # on the Ingress. The alternative is ingress.tls.secretName; one of the
+    # two is required.
+    managedCertificate: false
+    # A reserved global static address, by name. Empty takes an ephemeral
+    # one, which changes if the Ingress is recreated.
+    staticIpName: ""
+    # Seconds the load balancer waits for the collector's response.
+    collectorTimeoutSec: 120
+    iap:
+      oauthclientCredentials:
+        # A secret holding client_id and client_secret for a custom OAuth
+        # client. Empty uses the Google-managed client.
+        secretName: ""
+
+# --- network policy ------------------------------------------------------
+# One NetworkPolicy per role with a Service (verdict, collector, dashboard,
+# intake, connector), admitting ingress on the role's port only from the
+# ingress controller's pods and from extraFrom, or for the dashboard from
+# dashboardExtraFrom. Needs a CNI that enforces
+# NetworkPolicy; without one the policies are accepted and do nothing.
+# cluster-aks uses Cilium. On EKS, NetworkPolicy is enforced only if the VPC
+# CNI runs with enableNetworkPolicy, which cluster-eks sets by default; on an
+# EKS cluster of your own, enable it on the vpc-cni add-on or run another
+# enforcing CNI. Anything else that calls a role from inside the cluster,
+# such as a Prometheus scraping /metrics, must be listed in extraFrom
+# (dashboardExtraFrom for the dashboard, which under trusted_header also
+# needs dashboardExtraFromTrustedAcknowledged). The dashboard serves no
+# /metrics, so a scraper never needs dashboardExtraFrom.
+networkPolicy:
+  enabled: false
+  # Both selectors are LabelSelectors, and both are required together. For
+  # the AKS app routing add-on:
+  #   namespaceSelector:
+  #     matchLabels: {kubernetes.io/metadata.name: app-routing-system}
+  #   podSelector:
+  #     matchLabels: {app: nginx}
+  # Check the labels on your controller's pods with
+  #   kubectl get pods -n <namespace> --show-labels
+  ingressController:
+    namespaceSelector: {}
+    podSelector: {}
+  # Further NetworkPolicyPeers admitted to every role except the dashboard,
+  # e.g. an ipBlock for a cloud load balancer that sends traffic to pod IPs
+  # directly (an ALB with target-type ip, a GKE container-native load
+  # balancer).
+  extraFrom: []
+  # NetworkPolicyPeers admitted to the dashboard only. A load balancer that
+  # targets pod IPs directly needs its ranges here as well as in extraFrom
+  # to reach the dashboard. With no ingressController selectors and nothing
+  # here, the dashboard's policy admits nothing. Under trusted_header the
+  # chart still requires both ingressController selectors, and refuses a
+  # peer here unless dashboardExtraFromTrustedAcknowledged is true: a peer
+  # that does not pass the proxy can set the header as any user.
+  dashboardExtraFrom: []
+  # Under dashboard auth mode trusted_header the dashboard believes a header
+  # the proxy sets, and a pod that skips the proxy can set it itself. The
+  # chart refuses trusted_header unless enabled is true or this is true.
+  # Set it only when something other than this chart's NetworkPolicy keeps
+  # other pods away from the dashboard.
+  trustedHeaderWithoutPolicyAcknowledged: false
+  # Under trusted_header with enabled true, the chart refuses a non-empty
+  # dashboardExtraFrom unless this is true. Setting it asserts that every
+  # peer in dashboardExtraFrom strips the header from what it forwards and
+  # cannot be a source of it: a proxy that strips it, or a load balancer
+  # that targets pod IPs and strips it itself, with an ipBlock that holds
+  # nothing else.
+  dashboardExtraFromTrustedAcknowledged: false
+
+# A PodDisruptionBudget would be wrong here. Every role runs one replica by
+# design, so a budget of minAvailable: 1 blocks node drains permanently and
+# a budget of 0 does nothing. Drains take the verdict server down; that is
+# what `observe` mode and the circuit breaker are for.
+
+# On every pod. A podLabels key under app.kubernetes.io/, helm.sh/ or
+# azure.workload.identity/, and a podAnnotations key setting an AppArmor or
+# seccomp profile, are refused.
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""

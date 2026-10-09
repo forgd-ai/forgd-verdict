@@ -1,0 +1,55 @@
+forgd-verdict {{ .Chart.AppVersion }} installed as {{ .Release.Name }}.
+
+{{ if .Values.ingress.enabled -}}
+Configure Anthropic against:
+
+  inference hook   https://{{ .Values.ingress.host }}/hook
+  OTLP endpoint    https://{{ .Values.ingress.host }}
+
+The OTLP value is the BASE url, with no path. An OTLP exporter appends
+/v1/logs or /v1/traces itself depending on the signal, so pasting either of
+those into the admin console yields /v1/logs/v1/logs and a 404 the exporter
+reports as a delivery failure. Claude Code and Cowork send logs; the office
+agents send traces; all three take the same base.
+{{- if .Values.dashboard.enabled }}
+  dashboard        https://{{ default .Values.ingress.host .Values.ingress.dashboard.host }}/
+{{- end }}
+{{- if .Values.connector.enabled }}
+  Claude connector {{ include "forgd-verdict.connectorResource" . }}
+
+The connector URL goes into Claude as a custom connector, with OAuth against
+your identity provider (docs/CONNECTOR.md). Anything Claude reads through it
+enters your Claude conversations, where the Compliance API retains it and
+the inference hook scans it.
+{{- end }}
+{{ if .Values.ingress.diagnostics.enabled }}
+  health           https://{{ .Values.ingress.host }}/healthz    (verdict)
+                   https://{{ .Values.ingress.host }}/health     (collector)
+{{ if and .Values.dashboard.enabled (not .Values.ingress.dashboard.host) }}
+The dashboard shares the public hostname, so its /healthz is not reachable:
+that path belongs to the verdict server and /health to the collector. Set
+ingress.dashboard.host to give it a name of its own -- that also lifts the
+refusal on server-scoped annotations and gives it its own certificate.
+{{ end -}}
+{{ end -}}
+{{- else -}}
+No ingress. Port-forward to reach a role:
+
+  kubectl port-forward svc/{{ include "forgd-verdict.fullname" . }}-verdict 8000:{{ .Values.verdict.port }}
+{{ end }}
+Check the roll landed, rather than assuming it:
+
+  kubectl rollout status deploy/{{ include "forgd-verdict.fullname" . }}-verdict
+
+{{ if not .Values.secrets.existingSecret -}}
+This release holds the signing secret, the hash salt{{ if .Values.ingest.enabled }} and the
+Compliance Access Key{{ end }} in a chart-managed Secret, so `helm get values` shows
+them. Point secrets.existingSecret at external-secrets or the CSI driver
+for anything but a lab.
+{{ end -}}
+{{- if and .Values.dashboard.enabled (not .Values.ingress.dashboard.annotations) (not (include "forgd-verdict.gke" .)) }}
+The dashboard has no auth proxy in front of it. It will refuse every
+request until policy.yaml configures auth.mode -- oidc_jwt to verify tokens
+itself, or trusted_header behind a proxy that provably strips inbound
+copies of the header it reads.
+{{- end }}

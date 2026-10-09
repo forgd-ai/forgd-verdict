@@ -1,0 +1,39 @@
+.venv/
+.git/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# Secret- and state-bearing paths from .gitignore. .dockerignore patterns
+# are anchored at the context root, so `**/` matches them at any depth
+# the way an unanchored .gitignore pattern does.
+**/.env
+**/.env.*
+!**/.env.example
+**/policy.local.yaml
+**/policy.local.json
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+**/*.tfvars.json
+**/gha-creds-*.json
+**/credentials
+**/credentials.json
+**/kubeconfig
+**/.kube/
+**/*.pem
+**/*.key
+**/id_rsa
+**/id_ecdsa
+**/id_ed25519
+**/id_dsa
+**/.terraform/
+**/*.jsonl.gz
+findings/
+**/archive/
+**/timings.csv
+**/compliance-state.json
+**/.claude/
+**/.playwright-mcp/
+**/dist/
+**/build/

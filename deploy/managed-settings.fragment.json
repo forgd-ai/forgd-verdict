@@ -1,0 +1,156 @@
+{
+  "_comment": [
+    "forgd-verdict adapter 2, as a managed hook. Merge this fragment into",
+    "your existing managed settings -- do not replace them -- in the",
+    "HIGHEST-RANKED managed source the organization deploys (remote, then an",
+    "MDM plist or HKLM, then managed-settings.json). Claude Code uses only",
+    "that source by default and ignores the rest without a warning, hooks",
+    "and allowManagedHooksOnly included, unless it sets",
+    "managedSourcesBehavior: \"merge\". See deploy/MDM.md.",
+    "",
+    "File locations (verified 2026-10-04 against code.claude.com/docs/en/managed-settings):",
+    "  macOS        /Library/Application Support/ClaudeCode/managed-settings.json",
+    "  Linux, WSL   /etc/claude-code/managed-settings.json",
+    "  Windows      C:\\Program Files\\ClaudeCode\\managed-settings.json",
+    "               (the legacy C:\\ProgramData\\ClaudeCode path is NOT read)",
+    "",
+    "allowManagedHooksOnly restricts which hooks run at all. Without it, a",
+    "developer can add or remove hooks in their own settings and the DLP hook",
+    "is advisory. Under the default first-wins it is read from the selected",
+    "source only, so it goes in the same source as the hooks. Under",
+    "managedSourcesBehavior: \"merge\" it is a lock, and the strictest value any",
+    "source sets wins. Setting it true also disables command plugin sources",
+    "unless disableCommandPluginSources is explicitly false.",
+    "",
+    "timeout is in SECONDS. Claude Code defaults a command hook to 600, and to",
+    "30 on UserPromptSubmit. 10 is generous for a local scan with a <200ms",
+    "p95 budget and leaves room for a cold interpreter start. SessionEnd hooks",
+    "share a 1.5 s budget, which a longer per-hook timeout raises to match, up",
+    "to 60.",
+    "",
+    "THE FOUR HOOKS BELOW DO DIFFERENT JOBS:",
+    "  UserPromptSubmit / UserPromptExpansion / PreToolUse -- synchronous,",
+    "    and must be. They decide whether to block, and the exit code is part",
+    "    of the contract, so Claude Code waits for them. They append findings",
+    "    to a local spool, which is a sub-millisecond file write.",
+    "  SessionEnd -- async: true. Drains that spool to a central store. The",
+    "    session is already over, so it blocks nobody and costs the decision",
+    "    path nothing. Remove this entry to keep findings on the laptop.",
+    "",
+    "The hook does not see content attached from an `@` file reference.",
+    "Add permissions.deny Read(...) rules for your sensitive paths, such as",
+    "\"Read(.env)\", \"Read(.env.*)\" and \"Read(secrets/**)\", to this same",
+    "source. They deny Claude's file reads of those paths, and Claude Code",
+    "applies them to @ file mentions on a best-effort basis. See deploy/MDM.md."
+  ],
+  "allowManagedHooksOnly": true,
+  "permissions": {
+    "deny": [
+      "Read(//etc/forgd/**)",
+      "Read(~/.local/state/forgd-verdict/device-salt)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "/opt/forgd/venv/bin/python",
+              "-I",
+              "-X",
+              "forgd_verdict_hook",
+              "-m",
+              "forgd_verdict.cli",
+              "hook",
+              "--policy",
+              "/etc/forgd/policy.yaml"
+            ],
+            "timeout": 10,
+            "statusMessage": "Scanning prompt for restricted content"
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "/opt/forgd/venv/bin/python",
+              "-I",
+              "-X",
+              "forgd_verdict_hook",
+              "-m",
+              "forgd_verdict.cli",
+              "hook",
+              "--policy",
+              "/etc/forgd/policy.yaml"
+            ],
+            "timeout": 10,
+            "statusMessage": "Scanning command for restricted content"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "/opt/forgd/venv/bin/python",
+              "-I",
+              "-X",
+              "forgd_verdict_hook",
+              "-m",
+              "forgd_verdict.cli",
+              "hook",
+              "--policy",
+              "/etc/forgd/policy.yaml"
+            ],
+            "timeout": 10,
+            "statusMessage": "Scanning tool input for restricted content"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "/opt/forgd/venv/bin/python",
+              "-I",
+              "-X",
+              "forgd_verdict_hook",
+              "-m",
+              "forgd_verdict.cli",
+              "hook-ship",
+              "--policy",
+              "/etc/forgd/policy.yaml",
+              "--quiet"
+            ],
+            "timeout": 60,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

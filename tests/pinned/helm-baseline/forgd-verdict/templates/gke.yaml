@@ -1,0 +1,72 @@
+{{- if include "forgd-verdict.gke" . }}
+{{- $full := include "forgd-verdict.fullname" . }}
+{{/*
+GKE mode's per-backend settings. One BackendConfig per routed Service,
+named as the Service and attached by its cloud.google.com/backend-config
+annotation (_helpers.tpl).
+
+Each health check is GET /healthz on the role's serving port. IAP is on
+for the dashboard's backend and set off explicitly on every other backend,
+the connector's included: it authenticates each request itself.
+The collector's backend timeout is ingress.gke.collectorTimeoutSec; the
+others keep GCE's 30 s default.
+*/}}
+{{- $roles := list }}
+{{- if .Values.verdict.enabled }}{{ $roles = append $roles "verdict" }}{{ end }}
+{{- if .Values.collector.enabled }}{{ $roles = append $roles "collector" }}{{ end }}
+{{- if .Values.intake.enabled }}{{ $roles = append $roles "intake" }}{{ end }}
+{{- if .Values.dashboard.enabled }}{{ $roles = append $roles "dashboard" }}{{ end }}
+{{- if .Values.connector.enabled }}{{ $roles = append $roles "connector" }}{{ end }}
+{{- range $role := $roles }}
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ $full }}-{{ $role }}
+  labels:
+    {{- include "forgd-verdict.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /healthz
+    port: {{ (index $.Values $role).port }}
+  {{- if eq $role "collector" }}
+  timeoutSec: {{ $.Values.ingress.gke.collectorTimeoutSec }}
+  {{- end }}
+  iap:
+    {{- if eq $role "dashboard" }}
+    enabled: true
+    {{- with $.Values.ingress.gke.iap.oauthclientCredentials.secretName }}
+    oauthclientCredentials:
+      secretName: {{ . | quote }}
+    {{- end }}
+    {{- else }}
+    enabled: false
+    {{- end }}
+{{- end }}
+{{- if .Values.ingress.gke.managedCertificate }}
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+spec:
+  domains:
+    {{- range concat (list .Values.ingress.host) (.Values.ingress.extraHosts | default list) }}
+    - {{ . | quote }}
+    {{- end }}
+    {{- with .Values.ingress.dashboard.host }}
+    {{- if and $.Values.dashboard.enabled (ne . $.Values.ingress.host) }}
+    - {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.ingress.connector.host }}
+    {{- if and $.Values.connector.enabled (ne . $.Values.ingress.host) }}
+    - {{ . | quote }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

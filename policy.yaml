@@ -1,0 +1,1079 @@
+# forgd-verdict policy. One definition for every control point.
+#
+# Shared sections (detectors, scan, privacy, deny) drive the scan core and
+# apply to every adapter. Adapter-specific settings live in their own
+# sections: server:, hook:, compliance:, intake:, otel: and sinks:.
+
+detectors:
+  # T0 -- built-in regex set. Stdlib, microseconds per KB.
+  t0_regex:
+    enabled: true
+    severity: block
+
+  # T1 -- gitleaks subprocess. `auto` = on when the binary is found.
+  # Invocation is `gitleaks stdin` (`--no-git --pipe` was deprecated in
+  # gitleaks v8.19.0).
+  gitleaks:
+    # `auto` = on when the binary is found; when it is not, every adapter
+    # records gitleaks in each verdict's tiers_dropped, and with
+    # `on_tier_dropped: deny` denies. The laptop hook runs only an
+    # absolute `binary` unless `hook.project_overrides: true`, because a
+    # project can set PATH; with none it does not run T1, says so in the
+    # session and follows `hook.on_error`. Elsewhere an unset `binary` is
+    # looked up on PATH. Laptops and the audit job use the subprocess; the
+    # verdict server overrides this to `true` with a daemon under `server:`
+    # below.
+    enabled: auto
+    severity: block
+    # An admin-owned path. /usr/local/bin is user-writable under Homebrew
+    # on Intel Macs, so a user could replace the binary the hook trusts.
+    # binary: /opt/forgd/bin/gitleaks
+    # config: /opt/forgd/etc/gitleaks.toml
+    timeout_ms: 2000
+    # redact: true masks matched values in gitleaks' report, which is read
+    # from its stdout and never written to disk, at the cost of
+    # excerpt_hash fidelity.
+    redact: false
+
+  # T2 -- ML/NER PII. Expensive; budget-gated and off by default.
+  # Install with: pip install 'forgd-verdict[ml]'
+  llmguard_pii:
+    enabled: false
+    severity: warn
+  presidio_pii:
+    enabled: false
+    severity: warn
+    score_threshold: 0.6
+
+  # Local-only. Adapter 2 sees Bash command strings before they run.
+  # Never loaded by the server; warn severity, so it never blocks.
+  shell_exfil:
+    enabled: true
+    severity: warn
+
+scan:
+  # Slice of the org verdict timeout that scanning may consume. Past this,
+  # T2 detectors are skipped and the frame is decided on T0/T1.
+  budget_ms: 1500
+  session_cache:
+    ttl_hours: 24
+    max_sessions: 5000
+
+privacy:
+  # A deployment secret, and load-bearing. `excerpt_hash` is
+  # sha256(salt + matched_text), so with an EMPTY salt a findings export can
+  # be brute-forced back to the value: an SSN has ~1e9 possibilities and a
+  # PAN fewer once Luhn is applied. An unsalted hash of a low-entropy secret
+  # IS that secret to anyone willing to spend the compute, which makes the
+  # store's "findings, never content" claim untrue for exactly the values
+  # that matter most.
+  #
+  # Every process that WRITES a finding must share it or their hashes will
+  # not compare: the verdict server, the collector, the intake and the
+  # ingest jobs. Each of them refuses to start with an empty salt, with or
+  # without a store, unless this section sets `allow_unsalted: true`. It is
+  # not distributed to laptops -- see `hook` below.
+  #
+  # Rotating it orphans history. Losing it loses nothing recoverable, since
+  # nothing is decrypted from it, but every hash written before is
+  # incomparable with every hash written after.
+  hash_salt: $FORGD_HASH_SALT
+
+  # Adapter 2 does NOT use the value above, and does not use an empty one
+  # either.
+  #
+  # The hook runs on a laptop, so the deployment secret must not reach it:
+  # it would leak with the first lost machine. But hashing with EMPTY, which
+  # is what happened before, left adapter-2 rows in an export brute-forceable
+  # back to the matched secret -- the exposure this whole section exists to
+  # close, surviving for a subset of the data.
+  #
+  # The hook generates a PER-DEVICE salt on first run and keeps it beside
+  # its spool, mode 0600. So: the deployment secret stays server-side, a
+  # lost laptop leaks one laptop's salt for its own findings only, and no
+  # hash anywhere is a bare sha256.
+  #
+  # The cost is that hashes from two laptops, or from a laptop and a server,
+  # are not comparable. Every record therefore carries `salt_namespace` -- a
+  # stable id for the salt that hashed it, and never the salt -- so a reader
+  # can say "these are not comparable with those" rather than silently
+  # unioning them and reporting one leaked key as several. Empty means the
+  # deployment salt, which is every server-side writer.
+  #
+  # See hook/device.py.
+
+deny:
+  # The org's standing message is configured Anthropic-side (Custom blocked
+  # prompt message, <=500 chars, appended after a blank line). Keep reasons
+  # self-contained and leave this empty unless you need a second line.
+  contact_line: ""
+
+server:
+  # The inline profile. These override the top-level `detectors:` for
+  # adapter 1 only -- see Policy.for_profile.
+  #
+  # gitleaks runs through the sidecar here and nowhere else. The CLI
+  # recompiles its rule set on every exec: a fixed 477 ms per frame,
+  # measured in this server on Azure Container Apps at 1 vCPU, which no body
+  # size, core count or cache reduces. In-image at
+  # 1 vCPU the daemon is 0.21 ms against the subprocess's 182 ms.
+  #
+  # Setting `daemon` marks the tier required here, so an unreachable sidecar
+  # is a startup failure rather than a tier that quietly disappears. With the
+  # variable unset -- a laptop running `serve` -- this is plain `auto` and the
+  # subprocess handles it.
+  detectors:
+    gitleaks:
+      daemon: $FORGD_GITLEAKS_SOCKET
+    # Behavioural: a sending action -- an upload, a POST, a message to
+    # a recipient -- aimed at a destination that first appeared in a tool
+    # result or attachment and never in the user's own words. The shape a
+    # prompt injection leaves. Fetching a link a search returned is not
+    # sending, and is not reported.
+    #
+    # `warn`, so it records and never denies. It sees each action one frame
+    # after it ran -- the hook gets the input to a model call, never the
+    # response -- so a deny here would halt the agent's next step, not stop
+    # the request. Measure how often it fires before making it `block`.
+    provenance:
+      enabled: true
+      severity: warn
+      # Destinations this organisation's agents may send to whatever a page
+      # says, e.g. its own ticketing or storage hosts. Subdomains included.
+      allow_hosts: []
+    # Behavioural: a sending action carrying data the DLP tiers found
+    # in something the agent READ -- the value itself, or the file it came
+    # from (`curl -F f=@~/.aws/credentials`, where the secret is not in the
+    # command at all). Joined on the DLP findings' digests and on the paths
+    # whose reads returned them. Not reported when every destination is one
+    # the user or operator named: sending your own credentials to your own
+    # vault is a request. `warn` for the same reason as provenance.
+    taint:
+      enabled: true
+      severity: warn
+
+  # observe  -- always allow, still scan + log (server-side shadow)
+  # enforce  -- real verdicts
+  # archive  -- always allow, persist frames AFTER responding
+  #
+  # Overridable with FORGD_VERDICT_MODE so flipping observe -> enforce is a
+  # deployment-config change, reversible in seconds, rather than an image
+  # rebuild. Same for FORGD_VERDICT_LOG_LEVEL and FORGD_VERDICT_BUDGET_MS.
+  # Deliberately an allowlist: no env var can weaken a detector.
+  mode: observe
+  host: 0.0.0.0
+  port: 8000
+  # Every secret a signature may verify against. A `$VAR` that is unset is
+  # dropped, so a _PREVIOUS slot outside a rotation costs nothing. With one
+  # signing secret per org (the chart's verdict.signingOrgs), list each
+  # org's pair instead:
+  #   - $WEBHOOK_SECRET_PROD
+  #   - $WEBHOOK_SECRET_PROD_PREVIOUS
+  secrets:
+    - $WEBHOOK_SECRET
+    - $WEBHOOK_SECRET_PREVIOUS
+  require_signature: true
+  # Protocol allows up to 64 MiB. Your reverse proxy must agree.
+  max_body_bytes: 67108864
+  # The body is read before its signature can be verified, so anyone who
+  # can reach the hook URL can make the server read one. This caps the
+  # bytes held across every body not yet verified; past it, 503 without a
+  # read. At least max_body_bytes. Up to twice this is held while bodies
+  # are joined, so raise it only with the memory limit (2 GiB shipped).
+  # See docs/SERVER.md#memory.
+  preauth_body_budget_bytes: 268435456
+  # Anthropic's verdict timeout is at most 10 s for the whole exchange.
+  body_read_timeout_s: 15
+  # Passed to uvicorn: connections and requests past it get 503.
+  limit_concurrency: 1024
+  idempotency_ttl_s: 900
+  idempotency_max: 10000
+  archive_dir: ./archive
+  csv_path: ./timings.csv
+  log_level: INFO
+  # Bearer token for GET /metrics. EMPTY MEANS DISABLED (404).
+  # deploy/Caddyfile blocks /metrics at the proxy, but platforms with
+  # all-or-nothing ingress (Container Apps, Cloud Run, App Runner) have no
+  # equivalent, so the app enforces it. /metrics carries no matched content,
+  # but it does expose traffic volume, which Claude surfaces are in use, and
+  # your deny rate -- none of which belongs on the open internet.
+  metrics_token: $FORGD_METRICS_TOKEN
+  # Optional second factor: the static custom request headers configured on
+  # the Anthropic side (up to 16). Never a substitute for the signature.
+  required_headers: {}
+  #   x-forgd-shared: $FORGD_SHARED_HEADER
+  # enforce mode only: `fail` returns a non-200 on an internal scan error so
+  # the org's own failure handling decides; `allow` silently allows.
+  on_internal_error: fail
+
+  # What to do when a BLOCKING detector did not run -- dropped for budget,
+  # or failed outright.
+  #
+  # `allow` is right for the shipped policy, where no blocking detector
+  # sits in T2: llmguard_pii and presidio_pii both ship disabled at warn.
+  #
+  # A deployment that puts a blocking detector in T2 wants `deny`.
+  # Otherwise a caller fills the budget with benign volume -- 8 MB of
+  # filler costs 2,060 ms against a 1,500 ms budget -- and the tier that
+  # would have denied never runs, which nothing acted on.
+  #
+  # A value over the scan size limit (`unscanned:oversize`) and a scan
+  # that stopped at the unit cap (`unscanned:capped`) deny whenever a
+  # detector is at `block`, whatever this is set to.
+  on_tier_dropped: allow
+  # Durable findings store. Empty disables it, and verdict history then
+  # lives only as long as the replica -- the CSV is on ephemeral disk and
+  # /metrics is in-process. A path, or an Azure Blob URL:
+  #   ./findings
+  #   https://<account>.blob.core.windows.net/findings
+  # Holds findings only, never prompt content. Override with
+  # FORGD_VERDICT_STORE.
+  store: $FORGD_VERDICT_STORE
+
+hook:
+  # ADAPTER 2 RUNS ON A LAPTOP, so it does not get the deployment salt. A
+  # secret copied to every developer machine is a secret that leaks with the
+  # first lost laptop, and a laptop is the least trusted place this code
+  # runs.
+  #
+  # The consequence, stated rather than discovered: the hook's
+  # `excerpt_hash` values are in a different namespace from the server's, so
+  # the same leaked key found by both is counted as two distinct values.
+  #
+  # That affects the headline distinct-value count, the per-detector unique
+  # counts and the detector-family counts. The reconciliation join is
+  # unaffected, because it draws only on the inference hook.
+  #
+  # It remains a better trade than putting the deployment salt where it
+  # will escape. Adapter 2's hashes are not bare sha256: the hook salts them
+  # with a random per-device salt (`privacy:` above, and hook/device.py), so
+  # shipped rows are no easier to reverse than the server's.
+  #
+  # Hooks run synchronously in the developer's flow.
+  budget_ms: 200
+
+  # The same daemon override the server profile carries, because this
+  # profile is what /scan builds its detectors from -- and the socket
+  # existing in the pod does nothing on its own. The CLI's per-exec
+  # compile measured 1.12 s in a Helm deployment's intake container,
+  # under a 500m CPU limit, against the 200 ms budget
+  # below, so every remote scan timed out and the laptop fell back to
+  # scanning locally.
+  #
+  # On a laptop the variable is unset, this is plain `auto`, and the
+  # subprocess runs `binary`, the path deploy/MDM.md installs gitleaks at.
+  detectors:
+    gitleaks:
+      daemon: $FORGD_GITLEAKS_SOCKET
+      binary: /opt/forgd/bin/gitleaks
+  enabled_events:
+    - UserPromptSubmit
+    # Fires when a slash command or MCP prompt expands, and is blockable.
+    # The hook scans its `prompt` and `command_args`. The payload carries
+    # no expanded content, so what the command adds is not scanned; use
+    # `expansions` below to refuse commands by name or source. An event not
+    # listed here scans nothing.
+    - UserPromptExpansion
+    - PreToolUse
+  # Expansion control: refuse a UserPromptExpansion by the command it names,
+  # before any scan. A match in `deny` blocks, then a match in `allow`
+  # passes, then `default` decides. A rule sets one or more of
+  # command_source, expansion_type (slash_command | mcp_prompt) and
+  # command_name, and matches when every key it sets is equal. An
+  # expansion that passes is still scanned. The deny reason names the
+  # command only.
+  #
+  # expansions:
+  #   default: allow
+  #   deny:
+  #     - command_source: plugin
+  #     - expansion_type: mcp_prompt
+  #       command_name: export
+  #   allow: []
+
+  # allow = a scanner crash is a non-blocking error (fail open)
+  # block = a scanner crash blocks the action (fail closed)
+  on_error: allow
+
+  # SCAN REMOTELY. Absent by default, and then the hook scans on the
+  # laptop exactly as it always has.
+  #
+  # Set these and adapter 2 posts the hook payload to the scan service
+  # and uses the verdict it returns. The laptop then installs no gitleaks
+  # binary, and gets the tiers it could not practically install at all --
+  # Presidio wants spaCy and about 500 MB.
+  #
+  # The real reason is not the install. Scanning locally means adapter 2
+  # builds its own detector set from its own profile, so "what is a
+  # violation" has two implementations that can drift. One control plane
+  # is the point; the binary is a side effect.
+  #
+  # ITS OWN ROUTE AND ITS OWN CREDENTIAL. The verdict server's /hook
+  # authenticates Anthropic by signature, and that signing secret must
+  # never reach a laptop -- which is exactly why adapter 2 cannot just
+  # call it. `/scan` on the intake service takes the fleet's bearer, with
+  # each device denied on its own by id, and has no read path.
+  #
+  # A FAILURE IS NOT A DECISION. Timeout, 503, DNS failure on a train --
+  # every one of them falls back to a local scan and says so on stderr.
+  # The alternatives are worse: failing open is a control that silently
+  # stops, and failing closed turns a network blip into an outage for
+  # everyone. The wait is `scan_timeout_ms`, below.
+  #
+  # Set the endpoint and token here as literals. A project's
+  # .claude/settings.json `env` block reaches the hook, so a value taken
+  # from the environment (FORGD_VERDICT_SCAN_*, or a $VAR placeholder here)
+  # is used only with project_overrides: true, and the same holds for the
+  # ship settings. Set it true only where the hook is not a managed control.
+  # The endpoint must be https:// (http:// for loopback only). The hook
+  # uses no proxy, refuses redirects, and trusts ca_file (an absolute path)
+  # when set, else OpenSSL's built-in CA locations.
+  #
+  # project_overrides: false
+  # ca_file: /etc/forgd/ca.pem
+  #
+  # scan_endpoint: https://intake.example.com/scan
+  # scan_token: <the fleet token, written into this file by MDM>
+  #
+  # How long to wait for the service before scanning locally. Separate
+  # from budget_ms, which bounds the local scan: a cold call from a laptop
+  # can take over 200 ms, about half of it DNS, so waiting only budget_ms
+  # would send the first prompt of every session to the fallback. A
+  # refused connection returns at once; this is only spent when the
+  # service is slow or the network drops packets. Capped at 5000, half
+  # the 10 s hook timeout in every shipped config -- past that, Claude
+  # Code kills the hook and the prompt goes through unscanned.
+  #
+  # scan_timeout_ms: 1000
+  #
+  # How long the hook has to decide, from its start: policy load, the
+  # remote wait and the local scan together. Past it the hook stops and
+  # follows on_error -- block exits 2; allow lets the prompt through with a
+  # systemMessage saying it was not scanned. Must be below 10000, the 10 s
+  # hook timeout in every shipped config, which Claude Code enforces by
+  # killing the hook and letting the prompt through unscanned. Not
+  # settable from the environment.
+  #
+  # watchdog_ms: 8000
+  #
+  # The laptop's device id: the id the intake records on each shipped row
+  # and the one `forgd-verdict overrides deny-device` refuses. Set it to a
+  # salt file MDM writes once per machine, root-owned and not writable by
+  # the user (deploy/MDM.md, "Provisioning the device salt"). Unset, the id
+  # comes from a per-user salt in the user's home directory, said on stderr
+  # whenever it ships or scans remotely, and deleting that file gives the laptop a new device id,
+  # so a denied laptop comes back as a new device. Set and unfit (a
+  # symlink, writable by the user, not 64 hex characters), the hook sends
+  # no device id and the intake refuses it with `device_required`. Read
+  # from this file only, never from the environment. On Windows the path
+  # is C:\ProgramData\forgd\device-salt.
+  #
+  # device_salt_path: /etc/forgd/device-salt
+
+compliance:
+  # The post-hoc profile. These override the top-level `detectors:` and
+  # `scan:` for adapter 3 only -- see Policy.for_profile.
+  #
+  # T2 runs here and nowhere else. Presidio costs 16 ms at 1 KB but 3.2 s at
+  # 200 KB (measured on a 1-vCPU container), and an M365 transcript can
+  # run to 160 KB. On the inference hook that would spend most of the
+  # org's verdict timeout on one frame, and a timeout there is a webhook
+  # failure rather than a deny -- strictly worse than not running the tier.
+  # The ingest job is a six-hourly cron with nobody waiting, so the same
+  # cost buys coverage for free.
+  detectors:
+    presidio_pii:
+      # `auto`: on when the extra is installed. The ingest image installs it
+      # and asserts at build time that the model loads, so "auto" cannot
+      # quietly mean "off" in production the way it would if the assertion
+      # were only at runtime.
+      enabled: auto
+      # Post-hoc detection never denies anything -- there is nothing left to
+      # deny -- so severity only ranks the finding.
+      severity: warn
+      # NER entities ONLY. Presidio's structured recognizers are worse than
+      # T0 here, not better: its US_SSN recognizer carries a hardcoded
+      # blocklist of placeholder values, so it skips exactly the numbers a
+      # tester reaches for first. T0 owns structured; this tier owns the
+      # unstructured PII no pattern can express.
+      #
+      # Identifiers verified against Presidio's supported-entities docs.
+      # DATE_TIME and IP_ADDRESS are deliberately absent: every timestamp
+      # and address in an engineering transcript matches, and noise at this
+      # volume is what makes people stop reading findings.
+      entities:
+        - PERSON
+        - LOCATION
+        - EMAIL_ADDRESS
+        - PHONE_NUMBER
+        - NRP
+      # 0.6 is a context gate, not an arbitrary floor, and PHONE_NUMBER is the
+      # entity that shows why. Presidio scores a bare number valid in some
+      # region at 0.40, and its context enhancer lifts that to 0.75 when a
+      # trigger word -- phone, mobile, fax, number -- sits nearby. So 0.6
+      # passes a labelled phone number and rejects a naked run of digits,
+      # which is the same principle as T0's `ssn-labeled` rule.
+      #
+      # The cost is that "number" is itself a trigger, so "order number
+      # 4915551234" scores 0.75 and is reported, at warn severity, in a
+      # post-hoc view nobody is blocked by. Worth it.
+      #
+      # The NER entities land at 0.85 and the email recognizer at 1.00, so for
+      # those 0.6 is slack rather than a decision.
+      score_threshold: 0.6
+    # The behavioural checks adapter 1 runs, over every session after
+    # the fact: a session the inference hook allowed, or never saw, is still
+    # judged, and the checks get a backlog of real transcripts to be
+    # measured against. `warn`: post-hoc findings never deny anything.
+    provenance:
+      enabled: true
+      severity: warn
+      allow_hosts: []
+    taint:
+      enabled: true
+      severity: warn
+  scan:
+    # Forty times the inline budget, because the constraint here is the job's
+    # replica timeout (1800 s) rather than anyone's patience. Sized against a
+    # measurement, not a guess: a 223 KB frame -- larger than the 160 KB M365
+    # transcripts actually seen -- costs 8.4 s with the NER entities enabled.
+    # The earlier 3.2 s figure was Presidio's structured recognizers, which
+    # are regex and cheap; PERSON and LOCATION run the model over every token
+    # and cost roughly triple. The deployed container is slower than the
+    # machine that was measured on, and a budget miss here does not fail
+    # loudly -- it drops T2 and records `detectors_skipped`, which looks
+    # exactly like "nothing to find". Leave the headroom.
+    budget_ms: 60000
+
+  # One entry per organization this deployment scans.
+  #
+  # Each entry needs its own key, scoped to that single organization; see
+  # docs/PLATFORM.md#which-organizations-a-compliance-access-key-reads.
+  # Orgs are scanned serially: the client is already
+  # rate-limited and the limits are per-org, but a parallel pass on a
+  # six-hourly cron with nobody waiting buys nothing.
+  #
+  # `state_path` must have a different file name per org, compared without
+  # case: in a store the cursor is named by the file name alone. Two orgs
+  # sharing a cursor file is silent data loss -- a pass that fails midway
+  # advances the cursor for an org it never scanned, and those sessions are
+  # never looked at again. The
+  # loader refuses a configuration that would do this. Left explicit here
+  # because renaming a cursor that already exists looks like a first run
+  # and rescans everything.
+  #
+  # Compliance API is ENTERPRISE ONLY. A Team org has no transcripts to
+  # pull, so it belongs in `otel.orgs` and not here.
+  orgs:
+    - id: $FORGD_ORG_ID_PRIMARY
+      api_key: $ANTHROPIC_COMPLIANCE_ACCESS_KEY
+      # A NAME, not really a path, when a store is configured: the cursor
+      # is kept in the findings store and only the basename is used as its
+      # key. The ingest job's replica is destroyed when a pass finishes, so
+      # a cursor on the container filesystem is gone before the next run
+      # reads it -- and every pass would re-walk the same window.
+      state_path: ./compliance-state.json
+    # - id: $FORGD_ORG_ID_OTHER
+    #   api_key: $ANTHROPIC_COMPLIANCE_ACCESS_KEY_OTHER
+    #   # state_path derived from the org id when omitted.
+
+  # The single-org form below also works and means exactly one org. `orgs`
+  # wins when both are set.
+  #   org_id: $FORGD_ORG_ID_PRIMARY
+  #   api_key: $ANTHROPIC_COMPLIANCE_ACCESS_KEY
+  #   state_path: ./compliance-state.json
+
+  # https:// only (http:// to a loopback host for a local fake): the Access
+  # Key goes with every request. A host other than api.anthropic.com is
+  # logged as a warning.
+  base_url: https://api.anthropic.com
+  anthropic_version: "2023-06-01"
+  page_limit: 100
+  lookback_minutes: 10
+
+dashboard:
+  # The dashboard reads the store and nothing else: no signing secret, no
+  # Compliance Access Key. That separation is why ingest and presentation
+  # are different services.
+  #
+  # True refuses to start: configure `auth` below instead, with
+  # mode: trusted_header, header and stripped_by.
+  require_principal: false
+
+  auth:
+    # none            -- no check. Only correct behind a trusted network.
+    # trusted_header  -- a header the platform's auth proxy injects. ONLY an
+    #                    authentication check where that proxy strips inbound
+    #                    copies of the header. Container Apps EasyAuth does.
+    #                    Anywhere the container is directly reachable, the
+    #                    caller sets the header themselves and this is no
+    #                    check at all.
+    # oidc_jwt        -- verify a signed token against the issuer's JWKS:
+    #                    signature, exp, iss, aud. Trusts an assertion rather
+    #                    than a network position, so it is the mode that
+    #                    ports. Needs forgd-verdict[dashboard].
+    mode: trusted_header
+    # Supplied, like the oidc values below, because the right header depends
+    # on what is in front of the dashboard: Container Apps EasyAuth injects
+    # x-ms-client-principal-name, oauth2-proxy passes the token in
+    # authorization. Unset falls back to x-ms-client-principal-name, so a
+    # Container Apps deployment that sets nothing is unchanged.
+    #
+    # In oidc_jwt mode this is the header the BEARER TOKEN arrives in, not a
+    # name -- so it is almost always `authorization` there.
+    header: $FORGD_DASHBOARD_HEADER
+
+    # REQUIRED for trusted_header, and deliberately unset here.
+    #
+    # Any nonempty value of `header` becomes an authenticated principal
+    # with no validation, so this mode is an authentication check only
+    # where something in front strips inbound copies of that header.
+    # Anywhere the container is directly reachable, the caller sets the
+    # header themselves.
+    #
+    # Name the proxy you have CHECKED does the stripping -- "Container
+    # Apps EasyAuth", "oauth2-proxy with auth-response-headers". The
+    # dashboard refuses to start in this mode without it, which is the
+    # guard the Helm chart already applied and Terraform did not.
+    stripped_by: $FORGD_DASHBOARD_STRIPPED_BY
+
+    # For oidc_jwt. `platform` picks the header the proxy in front injects,
+    # so an operator names a proxy rather than remembering a header:
+    # container_apps, cloud_run, oauth2_proxy (with
+    # --pass-authorization-header), cloudflare_access, pomerium, alb_oidc,
+    # or iap. Anything else, an Istio or Envoy JWT filter for one, sets
+    # `header` directly.
+    #
+    # cloud_run is the ID token of whoever invoked the service, not a
+    # signed-in person. On GCP a person signs in through Identity-Aware
+    # Proxy: iap takes `audience` only (the backend service IAP protects),
+    # verifies against IAP's own issuer and keys, and cannot be combined
+    # with entitlements, because IAP tokens carry no groups.
+    #
+    # alb_oidc is verified differently. An AWS ALB publishes no JWKS and puts
+    # no `aud` in its token, so it takes `alb_arn` (the load balancer that
+    # must have signed it), `issuer` (the IdP behind the ALB) and `audience`
+    # (the IdP client id, matched against the token's `client` header).
+    # FORGD_DASHBOARD_ALB_ARN, or the chart's dashboard.auth.albArn.
+    #
+    # platform: container_apps
+
+    # Read from the environment, so switching a deployment to oidc_jwt is a
+    # variable change rather than an edit to this file -- and so a fork can
+    # point the same policy at its own identity provider. Unused while mode
+    # is trusted_header; validated at startup when it is not, because an
+    # unset audience would accept tokens minted for a different application.
+    #
+    #   FORGD_DASHBOARD_JWKS_URL   https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys
+    #   FORGD_DASHBOARD_ISSUER     https://login.microsoftonline.com/<tenant>/v2.0
+    #   FORGD_DASHBOARD_AUDIENCE   <application client id>
+    #
+    # A tenant and an application id are not secrets, but they name a
+    # customer's directory, so they are supplied rather than committed --
+    # the same treatment org ids get.
+    jwks_url: $FORGD_DASHBOARD_JWKS_URL
+    issuer: $FORGD_DASHBOARD_ISSUER
+    audience: $FORGD_DASHBOARD_AUDIENCE
+
+    # More identity providers, for a deployment fronted by two, or moving
+    # from one to another and accepting both for a while. A token's `iss`
+    # picks which entry's keys to verify it against; the signature still
+    # decides. Each entry needs all three, and `audience` may be a list.
+    #
+    # issuers:
+    #   - issuer: $FORGD_DASHBOARD_ISSUER_OKTA
+    #     jwks_url: $FORGD_DASHBOARD_JWKS_URL_OKTA
+    #     audience: [$FORGD_DASHBOARD_AUDIENCE_OKTA]
+    #     groups_claim: groups      # this issuer's own; defaults to the one below
+    #
+    # With more than one, every entitlements.map entry must name its
+    # `issuer`. A bare group name would match a group of that name from
+    # either provider, so an admin of one could create it and read the orgs
+    # it grants.
+
+    # The claim that carries group membership, for entitlements below.
+    # Providers disagree more here than anywhere: Entra ID sends group
+    # object ids in `groups`, Okta sends names, Auth0 a namespaced custom
+    # claim such as `https://example.com/groups`, and Google Workspace
+    # sends none at all without an intermediate IdP to map them.
+    #
+    # groups_claim: groups
+
+  # Optional. Restrict which of this customer's orgs a viewer may read.
+  #
+  # Absent or empty means every viewer sees every org, which is correct for
+  # almost every deployment: one company owns all the orgs in its own store
+  # and its staff are entitled to them. Turn this on only when segregation
+  # is wanted -- an EU org restricted to EU staff, dev hidden from an
+  # auditor reviewing prod.
+  #
+  # Requires `auth.mode: oidc_jwt`. A group membership we cannot verify is
+  # one the caller can choose, so the loader refuses this under `none` or
+  # `trusted_header` rather than serving a control that looks enforced.
+  #
+  # Once a map IS configured, a viewer matching no group sees nothing: at
+  # that point an unmatched viewer is someone the operator did not list.
+  #
+  # Entra ID leaves `groups` out of a token for users in more groups than it
+  # holds (about 200), pointing at Microsoft Graph instead. Such a viewer is
+  # refused with `groups_unavailable` and a reason, not shown an empty
+  # page. Configure the app registration to emit only groups assigned to the
+  # application, or use app roles with `groups_claim: roles`.
+  # An entry grants orgs by id under `orgs` and Managed Agents workspaces by
+  # key under `workspaces`. Intake records file under an org, so an org
+  # grant reads them.
+  # entitlements:
+  #   map:
+  #     - group: <Entra ID group object id>
+  #       orgs: [$FORGD_ORG_ID_PRIMARY]
+  #       issuer: $FORGD_DASHBOARD_ISSUER   # required with more than one issuer
+
+  # Name, logo, favicon, footer and colours. Unset, the dashboard is neutral.
+  # See docs/PLATFORM.md "Branding".
+  # branding:
+  #   name: Acme
+  #   logo: data:image/png;base64,...   # or an absolute path; PNG, SVG or WebP
+  #   footer: {text: acme.example, link: https://acme.example}
+  #   theme:
+  #     "--bg-card": "#0C1F3A"
+
+# --- organizations --------------------------------------------------------
+#
+# The registry. One entry per Claude organization this deployment serves,
+# and the only place an org is NAMED.
+#
+# Findings in the store carry a pseudonym, never a label or a real
+# organization id. The dashboard resolves names from here at render time,
+# which means a label change is a config change and never a data migration.
+#
+# The one exception is the org registry: the verdict server, the collector
+# and the intake each write `state/org-registry-<role>.json` at startup,
+# holding each org's id, pseudonym and label. Readers of the store, the
+# dashboard among them, are not given the salt, so they merge those files to
+# resolve entitlements and labels.
+#
+# Adapter credentials stay in their own sections: an org's OTel token is in
+# `otel.orgs`, and its Compliance Access Key is in `compliance`.
+# This list is identity only, so it carries nothing secret.
+# Ids come from the environment, never from this file. An organization UUID
+# is a tenant identifier: it is not a credential, but it names a customer,
+# and a repo is the wrong place to enumerate which organizations a
+# deployment serves. Labels are fine here -- a display name addresses
+# nothing.
+orgs:
+  - id: $FORGD_ORG_ID_PRIMARY
+    label: primary
+
+# --- adapter 4: OTel collection ------------------------------------------
+#
+# Receives OpenTelemetry from Claude Cowork, the office agents (Excel, Word,
+# PowerPoint, Outlook) and Claude Code. Detection only: OTel arrives after
+# the work has happened, so there is no verdict to return and nothing to
+# prevent. Enforcement on these surfaces is adapter 2.
+#
+# It matters commercially because the Compliance API is Enterprise-only
+# while Cowork and office agent telemetry reach Team plans. For a Team
+# customer this is the only fleetwide visibility that exists.
+# Adapter 6: Claude Managed Agents session histories, read after the fact by
+# the ingest job. A managed agent runs on Anthropic's infrastructure
+# with no inference hook, no Claude Code hook and no documented OTel export,
+# so this and the client-side gate in docs/AGENT-BUILDERS.md are all there
+# is. Uses the compliance profile's detectors.
+#
+# One entry per workspace. The key is a workspace API key, and NO READ-ONLY
+# SCOPE IS DOCUMENTED for one: it can create and delete sessions as well as
+# read them. Give the ingest job a key from a workspace that holds only the
+# agents to be scanned, and rotate it like the Compliance Access Key.
+#
+# There is no updated-since filter on the session list, so each pass walks
+# newest first and stops at the first session created before `window_days`.
+# A session created earlier and still running is not reached.
+#
+# `key` names the workspace's findings partition and cursor. It is required,
+# must never change, and must never be reused by another workspace. `label`
+# is what the dashboard and the logs show, and can be renamed freely.
+#
+# managed_agents:
+#   window_days: 30
+#   workspaces:
+#     - key: support-agents
+#       label: support-agents
+#       api_key: $FORGD_MANAGED_AGENTS_KEY_SUPPORT_AGENTS
+
+# Adapter 2's receiving end. See forgd_verdict/intake/.
+#
+# Without this every laptop running the hook needs data-plane WRITE access
+# to the findings container, and the writer's credential can replace
+# findings -- so a developer machine could alter findings in a tool whose
+# output is evidence. A bearer token can only append.
+#
+# Separate from the verdict server and the dashboard on purpose: the verdict
+# server must never grow a second auth scheme, and the dashboard must stay
+# read-only so the thing humans sign into holds no write credential.
+intake:
+  port: 8200
+  # Records from /scan are written through one batching writer: a store
+  # object per 500 records or per 60 s, whichever comes first, and what is
+  # queued is written on shutdown. A full queue or a write that still fails
+  # after two retries is dropped and counted under `store` in /stats. A
+  # batch shipped to /intake is written before it is answered: a 200 means
+  # it is in the store. A store failure, a write past its 10 s timeout, or a
+  # full write pool is a 503 that leaves the batch in the laptop's spool,
+  # and a body of more than 5,000 non-empty lines is a 413.
+  # store_batch_size: 500
+  # store_flush_s: 60
+  # A clean allow (no finding, no dropped tier) from /scan or in a shipped
+  # batch is counted into a tally row per day, org, client, device,
+  # session and surface instead of being written as a record; denies and
+  # findings are always records. Tally rows are queued every tally_flush_s
+  # and on shutdown, so a crash loses at most that long of allow counts.
+  # tally_flush_s: 600
+  # A managed fleet shares one bearer per fleet, distributed by MDM
+  # (deploy/MDM.md). Each laptop names itself in the X-Forgd-Device header;
+  # the id is a field on every record, a filter in the Event Log, and what
+  # one device is denied by (`forgd-verdict overrides deny-device`).
+  # `tokens` holds the current token and, while a rotation is under way,
+  # the previous one. Generate them; never choose them. They do not go in
+  # git -- a placeholder is refused, like adapter 4's, or the value in this
+  # repository would be a working credential for anyone who read it.
+  #
+  # Records file under the credential's `org`, else the deployment's only
+  # org, else the unattributed partition. A fleet or client name is a
+  # filter in the Event Log and never an org. An `org` whose variable is
+  # unset refuses to start.
+  #
+  # `name` is required: a lowercase letter, then up to 39 lowercase
+  # letters, digits or hyphens. Any other name refuses to start.
+  #
+  # `routes` scopes a token to `intake` (append spooled records), `scan`
+  # (ask /scan for a verdict), or both, which is the default. A laptop
+  # that scans remotely with hook.ship_mode off needs only `scan`: /scan
+  # writes the record itself, so the token has no reason to be able to
+  # add records too. An unknown route name refuses to start.
+  #
+  # A `$VAR` in `tokens` that is unset is dropped; a fleet whose tokens are
+  # all unset is skipped. One fleet per org, with its own token pair (the
+  # chart's intake.fleet.orgs):
+  #
+  #  - name: laptops-prod
+  #    tokens: [$FORGD_INTAKE_FLEET_TOKEN_PROD, $FORGD_INTAKE_FLEET_TOKEN_PROD_PREVIOUS]
+  #    org: $FORGD_ORG_ID_PROD
+  #
+  # Or one fleet whose developers work in several orgs: `orgs` instead of
+  # `org`. Nothing a laptop sends names its org, so each record files under
+  # the fleet's own partition, `fleet-<name>`, and the dashboard attributes
+  # it to the one org whose Claude Code OTel export carries the same
+  # session id. That needs Claude Code's OTel export configured on the
+  # laptops (`otel.orgs`, with `id`/`ids` set). A record no export
+  # attributes is shown as org pending, to viewers of every org listed
+  # here and to readers with no entitlement map. See docs/POLICY.md.
+  #
+  #  - name: laptops
+  #    tokens: [$FORGD_INTAKE_FLEET_TOKEN, $FORGD_INTAKE_FLEET_TOKEN_PREVIOUS]
+  #    orgs: [$FORGD_ORG_ID_PROD, $FORGD_ORG_ID_DEV, $FORGD_ORG_ID_TEAM]
+  fleet:
+    - name: laptops
+      tokens: [$FORGD_INTAKE_FLEET_TOKEN, $FORGD_INTAKE_FLEET_TOKEN_PREVIOUS]
+      org: $FORGD_ORG_ID_PRIMARY
+  # `clients` holds one token per agent, or per laptop outside a fleet. A
+  # per-laptop client logs a startup warning; move those laptops to
+  # `fleet`. `org` binds a client as it binds a fleet.
+  #
+  # An agent you build gets its own client, scoped to `scan`
+  # (docs/AGENT-BUILDERS.md). `agent: true` files the Claude Code hook
+  # payloads its SDK callbacks post as `agent:<name>` instead of with the
+  # laptops under claude-code-local. `labels` lists the
+  # `source.application` values a frame from it may use as a label under
+  # that surface; anything else it sends there is ignored.
+  #
+  #  - name: invoice-bot
+  #    token: $FORGD_INTAKE_TOKEN_INVOICE_BOT
+  #    routes: [scan]
+  #    agent: true
+  #    labels: [triage]
+  clients: []
+
+  # Where it writes. Defaults to server.store, because a deployment with two
+  # findings stores is a dashboard that shows half the picture.
+  # store: $FORGD_VERDICT_STORE
+
+  # /intake bodies. A /scan body has its own, smaller cap: a scan holds the
+  # interpreter through each pass over its text, so while one large body
+  # is scanned every laptop's small /scan waits. A /scan over it is a 413,
+  # and the hook scans that payload locally.
+  max_body_bytes: 8388608
+  # scan_max_body_bytes: 2097152
+
+otel:
+  host: 0.0.0.0
+  port: 8100
+  # Anthropic pushes to this service, so the paths are OTLP's own:
+  # POST /v1/logs   -- Claude Code and Cowork
+  # POST /v1/traces -- the office agents
+  #
+  # 8 MiB rather than the verdict server's 64 MiB. That is a full transcript
+  # there and a batch of events here; raw API bodies are truncated at 60 KB
+  # by the sender, so a batch this large is a misconfiguration, not a big
+  # session.
+  max_body_bytes: 8388608
+  # Exports decoded and scanned at once. Past it an export is answered 503
+  # busy with Retry-After before its body is read, and the exporter
+  # retries. Each holds up to max_body_bytes and a worker thread.
+  export_workers: 4
+
+  # One entry per organization. The token is BOTH the authentication and
+  # the routing key: it is what we issued, so it decides which org a batch
+  # is filed under. `organization.id` on the payload is only an assertion
+  # by the sender and is cross-checked against this, never trusted instead
+  # of it.
+  #
+  # Generate tokens, do not choose them. They never go in git.
+  # Origins allowed to export from a browser context.
+  #
+  # Office add-ins are HTML/JS in an embedded WebView -- inside desktop
+  # Excel, Word and PowerPoint -- and a WebView enforces CORS like a
+  # browser. Their exporter sends an OPTIONS preflight before any POST, and
+  # a collector that refuses it never receives the POST at all: the failure
+  # is total and silent, and reads as a surface nobody configured.
+  #
+  # `*` because there is nothing for an origin restriction to protect. CORS
+  # guards a browser user against a page acting with their AMBIENT
+  # credentials; the bearer token here is a header a caller must supply, so
+  # a page without it gets 401 whatever its origin. Narrowing this buys
+  # nothing the token does not, and getting it wrong costs every export.
+  cors_origins:
+    - "*"
+
+  orgs:
+    - id: $FORGD_ORG_ID_PRIMARY
+      label: primary
+      token: $FORGD_OTEL_TOKEN_PRIMARY
+    # One exporter token for several orgs, such as every laptop's Claude
+    # Code exporter in a fleet that spans orgs: `ids` instead of `id`, each
+    # an org id reference. The chart's otelFleets and the modules'
+    # otel_fleets wire the token.
+    # - label: laptops
+    #   ids: [$FORGD_ORG_ID_PROD, $FORGD_ORG_ID_DEV]
+    #   token: $FORGD_OTEL_TOKEN_LAPTOPS
+
+  # `id` is not optional in practice. With it empty the cross-check against
+  # `organization.id` cannot run, so a batch from any org is accepted on a
+  # valid token -- which is the whole failure this check exists to stop.
+  #
+  # An Agent SDK agent on a Developer Platform API key sends no
+  # `organization.id` at all (measured), so for those batches the token is
+  # the only thing binding them to an org. Give such agents their own
+  # `orgs` entry and token rather than sharing a developer org's.
+
+  # Service names that are this deployment's own agents. Each gets its own
+  # coverage row, `agent:<name>`. The Agent SDK reports `service.name:
+  # claude-code` unless the agent sets `OTEL_SERVICE_NAME`, and a name it
+  # does set is otherwise filed by substring as a product (`email-triage`
+  # as Outlook) or, through the `claude_code.` event prefix, as Claude
+  # Code. Exact names, lowercase; a product's own name refuses to start.
+  #
+  # agents:
+  #   - support-triage-agent
+
+  scan:
+    # Between the inference hook's 200 ms and the post-hoc scanner's 60 s.
+    # An exporter will wait, but it also retries, and a batch that takes
+    # longer than the exporter's timeout is re-sent while the first copy is
+    # still being scanned.
+    budget_ms: 5000
+
+  detectors:
+    # The daemon, for the same reason the server and hook profiles carry
+    # it. The chart gives this role the socket and the socket alone does
+    # nothing: `daemon` is what stops the detector shelling out. Without
+    # it the collector paid the CLI's per-exec compile -- 1.12 s in this
+    # container -- on every batch, on a path an exporter is waiting on.
+    gitleaks:
+      daemon: $FORGD_GITLEAKS_SOCKET
+    # T2 stays off here. Same argument as the inference hook rather than the
+    # ingest job: this path is online and a Cowork batch can be large, so
+    # Presidio's cost at size would be paid while an exporter waits.
+    presidio_pii:
+      enabled: false
+
+  # Tiers built for adapter 5's REDACTION only, and run by each sink's own
+  # worker after the export has been acknowledged -- so Presidio's cost
+  # lands after the 200, not on the path an exporter waits on. Findings from
+  # these tiers mask the forwarded copy; they are not written to the store,
+  # which keeps adapter 4's detection exactly as above.
+  #
+  # Only a sink whose `redact` asks for a `presidio:` id, or omits `redact`
+  # and so redacts everything available, gets the extra pass. Nothing is
+  # built when no sink is configured: loading the model costs seconds and
+  # about a gigabyte.
+  #
+  # `auto` needs the `ml` extra and its model, which the ingest image
+  # carries and the base image does not; see collector.useIngestImage in
+  # the chart. On the base image this is simply absent, and a sink naming
+  # `presidio:*` refuses to start rather than forwarding the value.
+  #
+  # A pass that fails masks every attribute of that batch whole. It never
+  # forwards a value it could not look at.
+  sink_detectors:
+    presidio_pii:
+      enabled: auto
+      severity: warn
+      # The same NER set adapter 3 uses, for the same reasons -- see the
+      # compliance profile. Structured PII (SSN, card) is T0's and is
+      # already masked inline.
+      entities:
+        - PERSON
+        - LOCATION
+        - EMAIL_ADDRESS
+        - PHONE_NUMBER
+        - NRP
+      score_threshold: 0.6
+
+# --- the dashboard's delivery diagram -------------------------------------
+#
+# Optional. Without it the diagram judges the continuous control points
+# against 07:00-20:00 UTC, which is a GUESS ABOUT YOUR WORKING DAY and
+# almost certainly wrong outside that zone: a team in Los Angeles gets
+# alerts through its evening and silence through its morning.
+#
+# The window only suppresses alerts when nobody is expected to be
+# working. It does not change what is detected or stored.
+#
+# dashboard:
+#   topology:
+#     working_hours:
+#       start: 9
+#       end: 17
+#       # Minutes east of UTC. -480 is US Pacific, 60 is CET.
+#       utc_offset_minutes: -480
+
+# --- adapter 5: outbound sinks --------------------------------------------
+#
+# One Azure Monitor destination, configured by environment. With
+# FORGD_SINK_ENDPOINT_AZMON unset the sink is skipped with a warning and
+# nothing is built for it, so a deployment that does not use it needs no
+# change here. The commented block further down is the full reference.
+sinks:
+  - name: azure-monitor
+    type: azure-monitor
+    # The DCR logs-ingestion URI, rule id and stream included. An env
+    # reference, not a literal: it names the deployment's own Azure
+    # resources. `terraform output -raw azure_monitor_sink_endpoint`
+    # produces it; the Helm release sets the variable.
+    endpoint: $FORGD_SINK_ENDPOINT_AZMON
+    # NO TOKEN, and setting one is refused. The sink authenticates as the
+    # deployment's managed identity, which holds Monitoring Metrics
+    # Publisher on the rule and the endpoint.
+    #
+    # `redact` omitted deliberately: everything the running core finds is
+    # masked, and the prose around each match survives. The table holds
+    # the conversation without the secret that was in it.
+    metadata:
+      env: prod
+
+#
+# OPTIONAL, and absent by default. A deployment that configures no sink
+# builds nothing and runs nothing -- there is no queue, no thread and no
+# egress.
+#
+# A1-A4 answer "something arrived, what do we do about it". This answers
+# "something is leaving, what should it look like": Claude exports OTLP to
+# the collector, verdict scans the RAW content, and a redacted copy is
+# forwarded to a destination the customer runs. They get realtime detection
+# here and their own reporting and retention there, with one place to
+# manage what passes through.
+#
+# Scanning happens on the original, so censoring the outbound stream costs
+# nothing in what verdict detects or stores.
+#
+# A LIST with a `type` on each entry, because "Splunk for security, blob for
+# retention" is the same request arriving twice.
+#
+# Two types are built. `otlp` emits to the customer's own OpenTelemetry
+# Collector, which fans out to Splunk HEC, CloudWatch or Datadog better
+# than we would. `azure-monitor` posts to the Logs Ingestion API, because
+# Azure Monitor does not accept an OTLP export into a Log Analytics
+# workspace and routing through a collector to get there is a hop that
+# earns nothing.
+#
+# sinks:
+#   - name: siem
+#     type: otlp
+#     # A BASE url. The exporter appends /v1/logs, the same way Anthropic's
+#     # exporter appends the signal path on the way in.
+#     endpoint: https://otel-collector.example.com:4318
+#     # A credential. Supplied, never committed -- like every other one here.
+#     token: $FORGD_SINK_TOKEN_SIEM
+#
+#     # Which findings are masked on the way out, by finding id. A bare
+#     # tier name (`regex`) means everything that tier finds.
+#     #
+#     # OMITTING THIS REDACTS EVERYTHING. Redacting nothing by default would
+#     # mean a sink with an endpoint and no `redact` forwards every
+#     # matched secret verbatim while looking configured. The list is
+#     # still the feature -- an org narrowing it to keys-and-emails and
+#     # leaving NRP alone is a reasonable answer -- but the state you fall
+#     # into by not deciding is the safe one.
+#     #
+#     # To forward raw, say so: `redact: [none]`.
+#     #
+#     # A name no running detector can produce REFUSES TO START. Adapter 3
+#     # degrading is right -- it under-reports. Adapter 5 degrading is a
+#     # leak: the data leaves anyway, uncensored, and the counter that
+#     # would tell you is in someone else's system.
+#     redact:
+#       - regex:aws-access-key
+#       - regex:private-key-pem
+#       - presidio:email_address
+#
+#     # Event names dropped entirely. Splunk licenses per GB ingested, so
+#     # this is a line item rather than tidiness.
+#     drop_events: [token_usage]
+#
+#     # `otel.orgs[].label` values this sink forwards for; omit for every
+#     # org. Prod to the SIEM and dev nowhere is one sink with `orgs: [prod]`.
+#     # A label that is not in otel.orgs, or is there twice, refuses to
+#     # start -- a scope nobody can match is a sink that receives nothing.
+#     # Records outside the scope count as `out_of_scope` on /stats, apart
+#     # from `dropped`.
+#     orgs: [primary]
+#
+#     # Stamped on every event, so the SIEM does not have to infer them.
+#     metadata:
+#       env: prod
+#       business_unit: platform
+#
+#     # Bounded. A downstream outage must never reach Anthropic: the queue
+#     # drops the OLDEST batch with a counter rather than blocking ingest,
+#     # because a non-200 here is an export failure and sustained failures
+#     # trip the circuit breaker.
+#     max_queue: 10000
+#     timeout_s: 10
+#
+#   # Azure Monitor Logs. Same redaction machinery, different wire.
+#   - name: azure-monitor
+#     type: azure-monitor
+#     # The DCR's own logs-ingestion URI, rule id and stream included. A
+#     # DCR created with `kind: Direct` generates one and no separate Data
+#     # Collection Endpoint resource is needed. The host on its own is
+#     # what the portal shows and it is NOT enough -- the sink refuses it
+#     # at startup rather than 404ing on the first export.
+#     endpoint: https://dcr-xxxx.centralus-1.ingest.monitor.azure.com/dataCollectionRules/dcr-0123456789abcdef/streams/Custom-Verdict_CL
+#
+#     # NO TOKEN, and setting one is refused. Azure access tokens expire
+#     # in about an hour, so a value pasted into the cluster Secret works
+#     # for an hour and then 401s on every send. The sink uses
+#     # the deployment's managed identity -- the same credential the
+#     # findings store uses -- and caches the token until just before it
+#     # expires.
+#     #
+#     # Grant that identity **Monitoring Metrics Publisher** on the DCR.
+#     # That is the whole configuration, and it means the deployment holds
+#     # no Azure Monitor credential at all.
+#
+#     # Omitted on purpose here: everything the running core can find is
+#     # masked. The prose around each match survives, so the table holds
+#     # the conversation without the secret that was in it -- which is the
+#     # point of sending it at all.
+#     metadata:
+#       env: prod

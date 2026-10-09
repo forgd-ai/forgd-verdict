@@ -1,0 +1,210 @@
+{{- if .Values.collector.enabled }}
+{{- if and (gt (int .Values.collector.replicas) 1) (not .Values.collector.sharedStateAcknowledged) }}
+{{- fail "collector.replicas > 1: the store sink queue is per-process, and backpressure -- the 503 that makes an exporter hold its batch rather than drop it -- only means anything with a single queue. Set collector.sharedStateAcknowledged: true if you have accepted that" }}
+{{- end }}
+{{/*
+An OTel token must have an org id beside it.
+
+policy.yaml pairs each token with `otel.orgs[].id`, and the id is what the
+payload's `organization.id` is cross-checked against. The check is
+`if claimed and org["id"] and claimed != org["id"]` -- see otel/app.py -- so
+with the id EMPTY it cannot fire at all, and a batch from any organization
+is accepted on a valid token. That is the whole failure the check exists to
+stop, and nothing reports it: the records store successfully, attributed to
+the wrong org.
+
+The reverse is legitimate and is not refused: an org served only by the
+Compliance API or the inference hook has no OTel token. A Team workspace is
+the opposite case -- no Compliance API, so adapter 4 is its only fleetwide
+visibility -- and it still has an org UUID.
+*/}}
+{{- $orgKeys := dict }}
+{{- range $name, $id := .Values.orgIds }}
+{{- $_ := set $orgKeys (upper (replace "-" "_" $name)) $id }}
+{{- end }}
+{{- range $name, $token := .Values.secrets.otelTokens }}
+{{- $key := upper (replace "-" "_" $name) }}
+{{- if not (hasKey $orgKeys $key) }}
+{{- fail (printf "secrets.otelTokens.%s has no matching entry in orgIds: the collector would accept a batch from ANY organization on that token, because the cross-check against the payload's organization.id cannot run without an id to compare. Add orgIds.%s." $name $name) }}
+{{- end }}
+{{- if not (index $orgKeys $key) }}
+{{- fail (printf "orgIds.%s is empty while secrets.otelTokens.%s is set: same failure as omitting it. The cross-check against the payload's organization.id cannot run, so any organization's batch is accepted on that token." $name $name) }}
+{{- end }}
+{{- end }}
+{{/*
+Adapter 4. Anthropic pushes OTLP IN, authenticated by a bearer header.
+
+MUST NOT sit behind an auth proxy, for the same reason as the verdict
+server: an exporter reads a redirect as a delivery failure and drops or
+retries the batch. It reaches the app's own token check or it reaches
+nothing.
+
+Serves logs on /v1/logs and traces on /v1/traces, and the SIGNAL COMES FROM
+THE PATH. It cannot come from the body: resource_logs and resource_spans are
+both protobuf field 1, scope_logs and scope_spans both field 2, log_records
+and spans both field 2 -- so a decoder handed a body with no path would read
+one signal as the other and silently mis-attribute every record.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-collector
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  replicas: {{ .Values.collector.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: collector
+  template:
+    metadata:
+      labels:
+        {{- include "forgd-verdict.labels" . | nindent 8 }}
+        app.kubernetes.io/component: collector
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        checksum/policy: {{ include (print $.Template.BasePath "/configmap-policy.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "forgd-verdict.writerServiceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      # Long enough for the sink queue to drain. A collector killed with a
+      # full queue loses batches the exporter already saw acknowledged, and
+      # an exporter does not resend those.
+      terminationGracePeriodSeconds: {{ .Values.collector.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: collector
+          {{- include "forgd-verdict.workingDir" $ | nindent 10 }}
+          {{- if .Values.collector.useIngestImage }}
+          image: {{ include "forgd-verdict.ingestImage" . }}
+          {{- else }}
+          image: {{ include "forgd-verdict.image" . }}
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "forgd-verdict.securityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.collector.port }}
+          env:
+            - name: FORGD_ROLE
+              value: collect
+            - name: PORT
+              value: {{ .Values.collector.port | quote }}
+            - name: FORGD_GITLEAKS_SOCKET
+              value: /run/forgd/gitleaksd.sock
+            {{- range $name, $id := .Values.orgIds }}
+            # One token per org, so a leaked token attributes records to the
+            # org it was issued for and no other.
+            #
+            # Generated from orgIds rather than from secrets.otelTokens, so a
+            # deployment using secrets.existingSecret does not have to list
+            # token-shaped values in values.yaml just to get the variable
+            # names -- which would put the secrets back in the release the
+            # existingSecret was chosen to keep them out of.
+            #
+            # optional, because an org served only by the Compliance API or
+            # the inference hook has no OTel token. That fails CLOSED: an org
+            # whose token resolves to nothing is skipped by _token_map
+            # entirely -- "an org with no real token is simply not
+            # configured" -- rather than accepting an empty bearer.
+            - name: FORGD_OTEL_TOKEN_{{ $name | upper | replace "-" "_" }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" $ }}
+                  key: otel-token-{{ $name | lower }}
+                  optional: true
+            {{- end }}
+            {{- if or .Values.secrets.metricsToken .Values.secrets.existingSecret }}
+            # Guards /stats. Without a token the endpoint does not exist,
+            # and "nothing arrived" becomes indistinguishable from "arrived
+            # and was rejected" -- successful exports are not logged, on
+            # purpose, because logging this service's bodies is how prompt
+            # text escapes.
+            - name: FORGD_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" . }}
+                  key: metrics-token
+                  optional: true
+            {{- end }}
+            {{- with .Values.serviceAccounts.writer.clientId }}
+            - name: AZURE_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- include "forgd-verdict.hashSaltEnv" . | nindent 12 }}
+            {{- include "forgd-verdict.commonEnv" . | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          resources: {{- toYaml .Values.collector.resources | nindent 12 }}
+          volumeMounts:
+            - name: policy
+              mountPath: {{ .Values.policy.mountPath }}
+              readOnly: true
+            {{- include "forgd-verdict.scratchMounts" . | nindent 12 }}
+      volumes:
+        {{- include "forgd-verdict.policyVolume" . | nindent 8 }}
+        {{- include "forgd-verdict.scratchVolumes" . | nindent 8 }}
+      {{- with .Values.collector.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collector.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collector.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-collector
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+  {{- with include "forgd-verdict.gkeServiceAnnotations" (list . "collector") }}
+  {{- . | nindent 2 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.collector.port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+{{- end }}

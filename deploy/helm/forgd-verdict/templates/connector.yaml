@@ -1,0 +1,190 @@
+{{- if .Values.connector.enabled }}
+{{- $c := .Values.connector }}
+{{- $resource := include "forgd-verdict.connectorResource" . }}
+{{- if not (hasPrefix "https://" $resource) }}
+{{- fail (printf "connector.resource must be an https URL; got %q" $resource) }}
+{{- end }}
+{{- if ne $resource (lower $resource) }}
+{{- fail "connector.resource must be lowercase: Claude sends the canonical form, lowercase host included, and the app refuses anything else" }}
+{{- end }}
+{{- if not (hasSuffix "/mcp" $resource) }}
+{{- fail "connector.resource must end in /mcp, the path the connector serves and the ingress routes" }}
+{{- end }}
+{{- if and .Values.ingress.enabled $c.resource (ne $c.resource (printf "https://%s/mcp" (include "forgd-verdict.connectorHost" .))) }}
+{{- fail (printf "connector.resource is %q but the ingress serves the connector at https://%s/mcp. Claude checks the metadata's resource against the URL it was given, so the two must match; leave connector.resource empty to derive it." $c.resource (include "forgd-verdict.connectorHost" .)) }}
+{{- end }}
+{{- $policy := .Values.policy.inline | fromYaml }}
+{{- if not (or $c.requiredScope (dig "connector" "required_scope" "" $policy)) }}
+{{- fail "connector.requiredScope is empty. Without it any token whose audience matches is accepted, including an ID token or a dashboard token from the same app registration. Set it to the scope your identity provider issues for the connector, for example findings.read." }}
+{{- end }}
+{{- if $c.auth.issuers }}
+{{- range $n, $i := $c.auth.issuers }}
+{{- range $k := list "issuer" "jwksUrl" "audience" }}
+{{- if not (index $i $k) }}
+{{- fail (printf "connector.auth.issuers[%d].%s is empty; the connector refuses to start without it, because an unset audience would accept tokens minted for another application" $n $k) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- else }}
+{{- range $k := list "issuer" "jwksUrl" "audience" }}
+{{- if not (index $c.auth $k) }}
+{{- fail (printf "connector.enabled but connector.auth.%s is empty. The connector accepts only tokens from your identity provider and refuses to start without issuer, jwksUrl and audience." $k) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{/*
+The findings connector: a read-only MCP server over the store, reached by
+Claude from Anthropic's cloud.
+
+It authenticates every request itself, from a bearer token issued by the
+customer's identity provider, so nothing may sit in front of it that signs
+anyone in: a proxy's redirect or 401 reaches Claude before the connector's
+own 401, which is how Claude finds the identity provider. Like the
+dashboard it runs on the READER service account and gets no hash salt.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-connector
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: connector
+spec:
+  replicas: {{ $c.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: connector
+  template:
+    metadata:
+      labels:
+        {{- include "forgd-verdict.labels" . | nindent 8 }}
+        app.kubernetes.io/component: connector
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        checksum/policy: {{ include (print $.Template.BasePath "/configmap-policy.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "forgd-verdict.connectorServiceAccountName" . }}
+      # No role calls the Kubernetes API. Workload identity's token is a
+      # separate projected volume and is mounted either way.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: connector
+          {{- include "forgd-verdict.workingDir" $ | nindent 10 }}
+          image: {{ include "forgd-verdict.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "forgd-verdict.securityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ $c.port }}
+          env:
+            - name: FORGD_ROLE
+              value: connector
+            - name: PORT
+              value: {{ $c.port | quote }}
+            {{- with .Values.serviceAccounts.reader.clientId }}
+            # The READER client id, as for the dashboard.
+            - name: AZURE_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            - name: FORGD_CONNECTOR_ENABLED
+              value: "true"
+            - name: FORGD_CONNECTOR_RESOURCE
+              value: {{ $resource | quote }}
+            - name: FORGD_CONNECTOR_AUTH_MODE
+              value: oidc_jwt
+            {{- with $c.scopes }}
+            - name: FORGD_CONNECTOR_SCOPES
+              value: {{ . | toJson | quote }}
+            {{- end }}
+            {{- with $c.requiredScope }}
+            - name: FORGD_CONNECTOR_REQUIRED_SCOPE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $c.allowedOrigins }}
+            - name: FORGD_CONNECTOR_ALLOWED_ORIGINS
+              value: {{ . | toJson | quote }}
+            {{- end }}
+            {{- with $c.auth.issuer }}
+            - name: FORGD_CONNECTOR_ISSUER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $c.auth.jwksUrl }}
+            - name: FORGD_CONNECTOR_JWKS_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $c.auth.audience }}
+            # JSON, because an environment variable cannot carry a list.
+            - name: FORGD_CONNECTOR_AUDIENCE
+              value: {{ (kindIs "slice" .) | ternary . (list .) | toJson | quote }}
+            {{- end }}
+            {{- with $c.auth.groupsClaim }}
+            - name: FORGD_CONNECTOR_GROUPS_CLAIM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $c.auth.issuers }}
+            {{- $list := list }}
+            {{- range . }}
+            {{- $list = append $list (dict "issuer" .issuer "jwks_url" .jwksUrl "audience" .audience "groups_claim" (default "" .groupsClaim)) }}
+            {{- end }}
+            - name: FORGD_CONNECTOR_ISSUERS
+              value: {{ $list | toJson | quote }}
+            {{- end }}
+            # NO FORGD_HASH_SALT, as for the dashboard.
+            {{- include "forgd-verdict.commonEnv" . | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: {{ include "forgd-verdict.readyPath" . }}, port: http }
+            periodSeconds: 10
+          resources: {{- toYaml $c.resources | nindent 12 }}
+          volumeMounts:
+            - name: policy
+              mountPath: {{ .Values.policy.mountPath }}
+              readOnly: true
+            {{- include "forgd-verdict.scratchMounts" . | nindent 12 }}
+      volumes:
+        {{- include "forgd-verdict.policyVolume" . | nindent 8 }}
+        {{- include "forgd-verdict.scratchVolumes" . | nindent 8 }}
+      {{- with $c.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-connector
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: connector
+  {{- with include "forgd-verdict.gkeServiceAnnotations" (list . "connector") }}
+  {{- . | nindent 2 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ $c.port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: connector
+{{- end }}

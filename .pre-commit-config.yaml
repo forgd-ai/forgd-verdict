@@ -1,0 +1,29 @@
+# Optional. `pre-commit install` (or `uvx pre-commit install`) runs these
+# on each commit, before anything reaches GitHub, whose secret scanning
+# reports a credential shape as soon as a push lands. CI runs the same
+# checks, after the push.
+#
+# Each hook runs a tool already on your machine rather than one pre-commit
+# downloads: gitleaks (https://github.com/gitleaks/gitleaks, the release
+# CI pins in .github/workflows/ci.yml) and python3.
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (staged changes)
+        entry: gitleaks git --pre-commit --staged --redact --no-banner --log-level warn
+        language: system
+        pass_filenames: false
+
+      - id: credential-shapes
+        name: credential shapes secret scanning reports
+        entry: python3 scripts/credential_shapes.py
+        language: system
+        types: [text]
+
+      - id: binaries
+        name: binary files are listed in tests/allowed-binaries.txt
+        entry: python3 scripts/check_binaries.py
+        language: system
+        pass_filenames: false
+        always_run: true

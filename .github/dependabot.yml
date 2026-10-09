@@ -1,0 +1,99 @@
+version: 2
+
+# Weekly version updates. Minor and patch updates are grouped into one pull
+# request per ecosystem; a major update gets a pull request of its own.
+updates:
+  - package-ecosystem: pip
+    directories:
+      - /
+      - /packaging/forgd-verdict-hook
+    schedule:
+      interval: weekly
+    # A pull request only when the latest release falls outside the declared
+    # range. The default raised the floor of every range to the latest
+    # release, which a fork's own constraints then have to meet.
+    versioning-strategy: increase-if-necessary
+    ignore:
+      # The hook pins the core exactly; scripts/cut_release.sh moves the pin.
+      - dependency-name: forgd-verdict
+    groups:
+      pip-minor-and-patch:
+        update-types: [minor, patch]
+      pip-major:
+        update-types: [major]
+
+  - package-ecosystem: gomod
+    directories:
+      - /sidecar/gitleaksd
+      - /deploy/gitleaks-cli
+    schedule:
+      interval: weekly
+    groups:
+      gomod-minor-and-patch:
+        update-types: [minor, patch]
+      gomod-major:
+        update-types: [major]
+
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/install-gitleaks
+    schedule:
+      interval: weekly
+    groups:
+      github-actions-minor-and-patch:
+        update-types: [minor, patch]
+      github-actions-major:
+        update-types: [major]
+
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+    ignore:
+      # The python image's minor version is the interpreter; it moves with
+      # the CI test matrix, by hand.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: golang
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    groups:
+      docker-minor-and-patch:
+        update-types: [minor, patch]
+      docker-major:
+        update-types: [major]
+
+  - package-ecosystem: terraform
+    directories:
+      - /deploy/terraform/modules/app-aca
+      - /deploy/terraform/modules/app-cloudrun
+      - /deploy/terraform/modules/app-ecs
+      - /deploy/terraform/modules/ci-aws
+      - /deploy/terraform/modules/ci-gcp
+      - /deploy/terraform/modules/cluster-aks
+      - /deploy/terraform/modules/cluster-eks
+      - /deploy/terraform/modules/cluster-gke
+      - /deploy/terraform/modules/monitor-azure
+      - /deploy/terraform/modules/store-azure
+      - /deploy/terraform/modules/store-gcs
+      - /deploy/terraform/modules/store-s3
+      - /deploy/terraform/examples/aks
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # Dependabot opened `~> 4.0` to `~> 5.8` for azurerm despite the entry
+      # above. These stop each provider at the major its modules declare;
+      # moving a module to the next major moves its entry here.
+      - dependency-name: hashicorp/azurerm
+        versions: [">= 5.0"]
+      - dependency-name: hashicorp/aws
+        versions: [">= 7.0"]
+      - dependency-name: hashicorp/google
+        versions: [">= 9.0"]
+      - dependency-name: Azure/azapi
+        versions: [">= 3.0"]
+    groups:
+      terraform-minor-and-patch:
+        update-types: [minor, patch]

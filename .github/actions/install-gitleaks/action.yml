@@ -1,0 +1,65 @@
+name: Install gitleaks
+description: >
+  Install a pinned, checksum-verified gitleaks binary, with caching and
+  retries. Shared by every job that needs T1 so there is one place to bump
+  the version.
+
+inputs:
+  version:
+    description: gitleaks release version, without the leading v
+    required: true
+  sha256:
+    description: >
+      Expected SHA-256 of gitleaks_<version>_linux_x64.tar.gz, taken from the
+      release's checksums.txt. Required: this binary makes security decisions,
+      so it is verified rather than trusted on first use.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Cache first: the release CDN returned intermittent 500s when four jobs
+    # pulled the same asset at once, and a cache hit avoids the network
+    # entirely on subsequent runs. The cache holds the release tarball, which
+    # the next step checks against the pinned SHA-256 on every run.
+    - name: Restore cached gitleaks tarball
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/.cache/gitleaks/
+        key: gitleaks-tarball-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}-${{ inputs.sha256 }}
+
+    - name: Download
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        url="https://github.com/gitleaks/gitleaks/releases/download/v${{ inputs.version }}/gitleaks_${{ inputs.version }}_linux_x64.tar.gz"
+        mkdir -p "$HOME/.cache/gitleaks"
+
+        # --retry-all-errors is what makes this survive a 500; plain --retry
+        # ignores HTTP error responses.
+        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+          --connect-timeout 15 --max-time 180 \
+          -o "$HOME/.cache/gitleaks/gitleaks.tar.gz" "$url"
+
+    - name: Verify and install
+      shell: bash
+      run: |
+        set -euo pipefail
+        tarball="$HOME/.cache/gitleaks/gitleaks.tar.gz"
+        echo "${{ inputs.sha256 }}  $tarball" | sha256sum --check --strict
+
+        sudo tar -xzf "$tarball" -C /usr/local/bin gitleaks
+        sudo chmod +x /usr/local/bin/gitleaks
+
+    - name: Verify it runs and is the pinned version
+      shell: bash
+      run: |
+        set -euo pipefail
+        got="$(gitleaks version)"
+        if [ "$got" != "${{ inputs.version }}" ]; then
+          echo "::error::expected gitleaks ${{ inputs.version }}, got $got"
+          exit 1
+        fi
+        echo "gitleaks $got verified"

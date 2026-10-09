@@ -1,0 +1,850 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+  # Weekly, for the dependency audit and the secret scan of the default
+  # branch's full history. Dependabot does not read deploy/constraints/*.txt,
+  # so an advisory against a pinned package would otherwise wait for the next
+  # push. Every other job skips this event.
+  schedule:
+    - cron: "23 5 * * 1"
+
+# A new push to a pull request cancels that pull request's run in progress.
+# Every other event gets a group of its own, so a run on main, a schedule or
+# a release is never cancelled.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: true
+
+# No repository secrets are required by this workflow. Every test is
+# offline: the ASGI app is driven in-process, and signatures are generated
+# from secrets minted inside the job. See CREDENTIALS.md.
+permissions:
+  contents: read
+
+env:
+  # The gitleaks release the test, sidecar and secret-scan jobs install.
+  # deploy/Dockerfile builds the same version from source, and its
+  # GITLEAKS_VERSION ARG moves with this one.
+  GITLEAKS_VERSION: "8.30.1"
+  # SHA-256 of gitleaks_8.30.1_linux_x64.tar.gz from the release's
+  # checksums.txt. Bump it with GITLEAKS_VERSION.
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  # Helm 3, deliberately, though the chart also renders under 4: 3 is what a
+  # fork is most likely to have, and the tests assert what Kubernetes
+  # receives rather than what the CLI prints.
+  HELM_VERSION: "3.19.0"
+  HELM_SHA256: "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496"
+  # Must equal the Terraform version you apply with: validating on a
+  # different one is not the check that gates the merge.
+  TERRAFORM_VERSION: "1.9.8"
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }})
+    if: github.event_name != 'schedule'
+    # CI_RUNS_ON, a repository variable holding a JSON runs-on value, moves
+    # this job onto self-hosted runners. Unset, it runs on GitHub's.
+    runs-on: ${{ vars.CI_RUNS_ON && fromJSON(vars.CI_RUNS_ON) || 'ubuntu-latest' }}
+    timeout-minutes: 220
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+          enable-cache: true
+
+      # Installed so the T1 tests run instead of being skipped. Without it
+      # the suite passes with the gitleaks detector untested.
+      - name: Install gitleaks
+        uses: ./.github/actions/install-gitleaks
+        with:
+          version: ${{ env.GITLEAKS_VERSION }}
+          sha256: ${{ env.GITLEAKS_SHA256 }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          # The version you APPLY with. 1.9 rejects things 1.5 accepted --
+          # `for_each = [1]` among them -- so validating on anything else is
+          # not the check that gates the merge.
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Install helm
+        # tests/test_helm_chart.py renders the chart with the real binary.
+        # Pinned and checksummed for the same reason gitleaks is: an
+        # unpinned install script is a third party deciding what runs here.
+        run: |
+          set -eux
+          tgz=/tmp/helm.tar.gz
+          curl -fsSL -o "$tgz" \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  $tgz" | sha256sum --check --strict
+          tar -xzf "$tgz" -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: Install project
+        run: uv venv --python ${{ matrix.python }} && uv pip install -e '.[dev]'
+
+      # GitHub rejects duplicate keys; PyYAML keeps the last one. A broken
+      # deploy.yml therefore passed review and failed at startup with no
+      # jobs, no log and the file path where its name should be.
+      - name: Validate workflow files
+        run: uv run python scripts/check_workflows.py
+
+      - name: Lint
+        run: uv run ruff check src tests loadtest.py deploy/assert_presidio.py
+
+      # Upward dependencies only. Sideways coupling is reported, not failed on.
+      - name: Check the layering
+        run: uv run python scripts/import_graph.py --check
+
+      # Validate, not apply. A module nobody applied this week still has to
+      # parse and type-check, and that is cheap; applying costs money and
+      # changes real infrastructure, so it stays manual. What proves a real
+      # deployment is scripts/verify_deployment.sh, not a green plan.
+      - name: Validate Terraform
+        run: |
+          # Fails when terraform is missing. This step used to exit 0 with
+          # a notice when the binary was absent, and once ubuntu-latest
+          # stopped shipping terraform it validated nothing, for every
+          # stack. The step above installs it.
+          command -v terraform >/dev/null || {
+            echo "::error::terraform is not installed; the install step regressed"
+            exit 1; }
+          terraform version
+          terraform fmt -check -recursive deploy/terraform
+          # Every module AND every root stack, by glob. The loop once
+          # named a stack explicitly and so did not validate the next one
+          # added, which then went unchecked until its first plan.
+          for d in deploy/terraform/modules/*/ deploy/terraform/examples/*/; do
+            echo "== $d"
+            terraform -chdir="$d" init -backend=false -input=false >/dev/null
+            terraform -chdir="$d" validate
+          done
+
+      - name: Test
+        env:
+          FORGD_FULL_DIFFERENTIAL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '' }}
+        run: |
+          uv run pytest -q -n auto -m "not serial"
+          uv run pytest -q -m serial
+
+      - name: Lint the Helm chart
+        run: |
+          # `helm template`, not just `helm lint`. LINT DOWNGRADES A FAILED
+          # `required` TO A WARNING and still exits 0, so a lint-only step
+          # passes a values set the chart refuses to render, with
+          # `level=WARN msg="missing required values"` in its log.
+          #
+          # The values below are therefore a configuration the chart
+          # ACCEPTS, not the shortest one lint tolerates.
+          # An ARRAY, not a string. One of these values contains a space,
+          # and unquoted word-splitting turned it into two chart arguments
+          # -- helm then linted a directory called `fixture` and reported
+          # "3 chart(s) linted, 2 failed" for a chart that is fine.
+          VALUES=(
+            --set store.url=https://acct.blob.core.windows.net/findings
+            --set image.repository=reg/forgd-verdict
+            --set image.tag=ci
+            --set ingest.image.repository=reg/forgd-verdict
+            --set ingest.image.tag=ci-ingest
+            --set serviceAccounts.writer.clientId=00000000-0000-0000-0000-000000000001
+            --set serviceAccounts.reader.clientId=00000000-0000-0000-0000-000000000002
+            --set secrets.hashSalt=ci --set secrets.webhookSecret=whsec_ci
+            --set secrets.complianceKey=ci --set ingress.host=verdict.ci.test
+            --set ingress.tls.clusterIssuer=letsencrypt
+            --set "dashboard.trustedHeaderStrippedBy=the CI lint fixture"
+            --set networkPolicy.enabled=true
+            --set networkPolicy.ingressController.namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name=app-routing-system
+            --set networkPolicy.ingressController.podSelector.matchLabels.app=nginx
+            --set-file policy.inline=policy.yaml
+          )
+          helm lint deploy/helm/forgd-verdict "${VALUES[@]}"
+          helm template ci deploy/helm/forgd-verdict "${VALUES[@]}" >/dev/null
+
+      - name: Assert the chart tests were not skipped
+        run: |
+          # Every chart test skipif's on a missing helm. If the install step
+          # above regresses, the invariants that keep the hash salt away
+          # from the dashboard and auth annotations away from /hook would
+          # stop being checked, and the suite would stay green.
+          uv run pytest tests/test_helm_chart.py -q | tee /tmp/helm.txt
+          if grep -qi "skipped" /tmp/helm.txt; then
+            echo "::error::chart tests were skipped; helm is missing"
+            exit 1
+          fi
+
+      - name: Assert the gitleaks tests were not skipped
+        run: |
+          set -o pipefail
+          # The T1 tests skipif on a missing binary. If the install step
+          # regresses, the suite would go green having tested nothing.
+          uv run pytest tests/test_detectors.py -q -k gitleaks \
+            | tee /tmp/t1.txt
+          uv run pytest tests/test_metadata_gitleaks.py -q \
+            | tee -a /tmp/t1.txt
+          if grep -qi "skipped" /tmp/t1.txt; then
+            echo "::error::gitleaks tests were skipped; the binary is missing"
+            exit 1
+          fi
+
+      - name: CLI smoke test
+        run: |
+          set -eux
+          # Deny path exits 1 and must name the detector class, not the value.
+          printf 'deploy with AKIAQYLPMN5HGZTHX4UQ' | uv run forgd-verdict scan - > /tmp/out.json || true
+          uv run python - <<'PY'
+          import json
+          d = json.load(open("/tmp/out.json"))
+          assert d["action"] == "deny", d
+          assert "AKIAQYLPMN5HGZTHX4UQ" not in json.dumps(d), "secret leaked into verdict"
+          assert d["reference_id"].startswith("fv_"), d
+          PY
+          # Hook allow path must be silent: emitting permissionDecision
+          # "allow" on PreToolUse would auto-approve the tool call.
+          out=$(echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+            | uv run forgd-verdict hook --policy tests/data/ci-hook-policy.yaml)
+          test -z "$out" || { echo "::error::hook emitted output on the allow path: $out"; exit 1; }
+
+  sidecar:
+    name: gitleaks sidecar
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.26'
+          cache-dependency-path: sidecar/gitleaksd/go.sum
+
+      - name: Build, vet and format-check
+        working-directory: sidecar/gitleaksd
+        run: |
+          set -eux
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::gofmt"; exit 1; }
+          go vet ./...
+          go build -o "$RUNNER_TEMP/gitleaksd" .
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      - name: Install gitleaks
+        uses: ./.github/actions/install-gitleaks
+        with:
+          version: ${{ env.GITLEAKS_VERSION }}
+          sha256: ${{ env.GITLEAKS_SHA256 }}
+
+      - name: The daemon and the subprocess must agree
+        run: |
+          set -eux
+          uv venv --python 3.13 && uv pip install -e '.[dev]'
+          FORGD_GITLEAKSD_BIN="$RUNNER_TEMP/gitleaksd" \
+            uv run pytest tests/test_gitleaksd.py tests/test_liveness.py -q | tee /tmp/out
+          # These tests skipif on a missing binary, so a broken build would
+          # otherwise leave the job green having asserted nothing.
+          grep -qE "[0-9]+ passed" /tmp/out
+          if grep -q "skipped" /tmp/out; then
+            echo "::error::daemon tests skipped; the sidecar did not build"
+            exit 1
+          fi
+
+  bare-install:
+    name: bare install (no extras)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      # The test job installs '.[dev]', which carries PyYAML and uvicorn.
+      # This job installs the base dependency set only.
+      - name: Install with no extras
+        run: uv tool install .
+
+      - name: The documented first command runs
+        run: |
+          set -eux
+          rc=0
+          printf 'ship it with AKIAIOSFODNN7EXAMPLE' \
+            | forgd-verdict scan - > /tmp/bare.json || rc=$?
+          test "$rc" -eq 1
+          # A crash also exits 1, so check stdout carries a verdict.
+          test -s /tmp/bare.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/bare.json"))
+          assert d["action"] == "deny", d
+          assert d["detectors_run"], d
+          PY
+          # UserPromptSubmit blocks with {"decision": "block"}; PreToolUse
+          # blocks with hookSpecificOutput.permissionDecision.
+          # `prompt` is the documented field. An earlier revision read
+          # `user_input` only and allowed every prompt, so CI exercises the
+          # real field rather than the legacy alias.
+          # The contact line is set only by the CI policy, so a block on
+          # the built-in defaults does not pass.
+          out=$(echo '{"hook_event_name":"UserPromptSubmit","prompt":"key AKIAIOSFODNN7EXAMPLE"}' \
+            | forgd-verdict hook --policy tests/data/ci-hook-policy.yaml)
+          echo "$out" | grep -q '"decision": "block"'
+          echo "$out" | grep -q 'Contact the forgd-verdict CI policy owner.'
+          forgd-verdict policy > /dev/null
+
+      - name: serve names its missing extra instead of tracebacking
+        run: |
+          set -eux
+          out=$(FORGD_HASH_SALT=ci-salt-not-a-deployment-secret \
+            forgd-verdict serve --policy policy.yaml 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "forgd-verdict\[server\]"
+          echo "$out" | grep -q "Traceback" && exit 1 || true
+
+  wheels:
+    name: two wheels, one release
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      - name: Build forgd-verdict and forgd-verdict-hook
+        run: scripts/build_wheels.sh
+
+      - name: Both wheels carry the root LICENSE and NOTICE
+        run: |
+          set -eux
+          for whl in dist/forgd_verdict-*.whl dist/forgd_verdict_hook-*.whl; do
+            dist_info="$(basename "$whl" | cut -d- -f1-2).dist-info"
+            for f in LICENSE NOTICE; do
+              unzip -p "$whl" "$dist_info/licenses/$f" | cmp - "$f"
+            done
+          done
+          # The copies made for the hook's build were removed.
+          test -z "$(git status --porcelain --ignored packaging/)"
+
+      # Both wheels by path, so the hook's exact pin resolves against its
+      # sibling and never against an index.
+      - name: Install the hook wheel against the core wheel
+        run: |
+          set -eux
+          uv venv /tmp/hookvenv
+          uv pip install --python /tmp/hookvenv/bin/python \
+            dist/forgd_verdict-*.whl dist/forgd_verdict_hook-*.whl
+          # The core must have come from the sibling wheel, not an index.
+          uv pip freeze --python /tmp/hookvenv/bin/python \
+            | grep -q '^forgd-verdict @ file://'
+          out=$(echo '{"hook_event_name":"UserPromptSubmit","prompt":"key AKIAIOSFODNN7EXAMPLE"}' \
+            | /tmp/hookvenv/bin/forgd-verdict-hook --policy policy.yaml)
+          echo "$out" | grep -q '"decision": "block"'
+
+  pip-audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Pinned: the files record uv's output, so a different uv could
+      # rewrite them with nothing in pyproject.toml having changed.
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      # Re-resolves with the committed pins as the starting point, so it
+      # fails when pyproject.toml asks for something the files do not pin,
+      # not when a newer release appears.
+      - name: The constraint files match pyproject.toml
+        run: scripts/compile_constraints.sh --check
+
+      # What the images install, audited as pinned. --require-hashes makes
+      # pip-audit read the files without resolving anything.
+      - name: Audit the build backend
+        run: uvx pip-audit==2.10.1 -r deploy/constraints/build.txt --require-hashes --disable-pip
+
+      - name: Audit the base image's packages
+        run: uvx pip-audit==2.10.1 -r deploy/constraints/base.txt --require-hashes --disable-pip
+
+      - name: Audit the hook's laptop dependencies
+        run: uvx pip-audit==2.10.1 -r deploy/constraints/hook.txt --require-hashes --disable-pip
+
+      # The spaCy model is a URL requirement, which pip-audit skips; it is
+      # not on PyPI, so no advisory names it. Any other skip fails the step.
+      - name: Audit the ingest image's packages
+        run: |
+          set -euo pipefail
+          uvx pip-audit==2.10.1 -r deploy/constraints/ingest.txt --require-hashes --disable-pip \
+            -f json -o /tmp/ingest-audit.json
+          python3 - <<'PY'
+          import json
+          deps = json.load(open("/tmp/ingest-audit.json"))["dependencies"]
+          skipped = sorted(d["name"] for d in deps if "skip_reason" in d)
+          assert skipped == ["en-core-web-lg"], skipped
+          assert len(deps) > 1, deps
+          PY
+
+      # Source mode over gitleaksd's modules, so an advisory published
+      # against one surfaces on the weekly run. The docker job's govulncheck
+      # needs the built image and does not run on the schedule. check-latest
+      # takes the newest 1.26 patch, the line the image's golang:1.26 tracks.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache-dependency-path: sidecar/gitleaksd/go.sum
+
+      - name: govulncheck gitleaksd
+        working-directory: sidecar/gitleaksd
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+      # Binary mode over the gitleaks CLI both images ship, built from the
+      # Dockerfile's gitleaks stage alone. Weekly and on a manual dispatch of
+      # ci itself only: a workflow that calls this one passes its own event
+      # and its own github.workflow.
+      - name: govulncheck the gitleaks the images ship
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.workflow == 'ci')
+        run: |
+          set -euo pipefail
+          docker build -f deploy/Dockerfile --target gitleaks -t forgd-verdict-gitleaks:ci .
+          docker run --rm --entrypoint cat forgd-verdict-gitleaks:ci /out/gitleaks > /tmp/gitleaks
+          chmod +x /tmp/gitleaks
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 -mode=binary /tmp/gitleaks
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Deliberately the gitleaks binary, not gitleaks/gitleaks-action:
+      # the Action is not under a standard OSS licence and requires a
+      # (free but registration-gated) GITLEAKS_LICENSE for organization-owned
+      # repos. The binary itself is MIT.
+      - name: Install gitleaks
+        uses: ./.github/actions/install-gitleaks
+        with:
+          version: ${{ env.GITLEAKS_VERSION }}
+          sha256: ${{ env.GITLEAKS_SHA256 }}
+
+      # Uses the repo's own .gitleaks.toml, which allowlists the planted
+      # test fixtures by literal value. Exit non-zero on a real finding.
+      - name: Scan working tree
+        run: gitleaks dir . --no-banner --redact --exit-code 1 --log-level warn
+
+      # The commits this event brought, against this commit's config. With
+      # no --log-opts gitleaks walks `git log --all`, every fetched branch.
+      # A push whose `before` is all zeros or not an ancestor of the pushed
+      # commit (a new branch, a force-push) scans the commit's whole ancestry.
+      - name: Scan this event's commits
+        if: github.event_name != 'schedule'
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request)
+              range="$PR_BASE..$PR_HEAD" ;;
+            push)
+              if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+                  && git merge-base --is-ancestor "$BEFORE" "$SHA" 2>/dev/null; then
+                range="$BEFORE..$SHA"
+              else
+                range="$SHA"
+              fi ;;
+            *)
+              range=HEAD ;;
+          esac
+          echo "scanning $range"
+          gitleaks git . --no-banner --redact --exit-code 1 --log-level warn --log-opts="$range"
+
+      - name: Scan the default branch's full history
+        if: github.event_name == 'schedule'
+        run: gitleaks git . --no-banner --redact --exit-code 1 --log-level warn --log-opts=HEAD
+
+      # Shapes GitHub secret scanning reports with no provider pattern, which
+      # gitleaks does not look for. GitHub has already scanned the push by
+      # now; this keeps the shape off the default branch.
+      - name: Scan for credential shapes
+        run: python3 scripts/credential_shapes.py
+
+      - name: Check tracked binaries are listed
+        run: python3 scripts/check_binaries.py
+
+  docker:
+    name: docker build + smoke
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Build
+        # --target base: the online image (server + dashboard). The ingest
+        # target adds ~600 MB of spaCy model that this smoke test does not
+        # exercise; the docker-ingest job builds and asserts that one.
+        run: docker build -f deploy/Dockerfile --target base -t forgd-verdict:ci .
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      # The image resolves its dependencies with pip, so this audits what
+      # pip actually installed in it rather than a separate resolution.
+      - name: Audit the packages installed in the image
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python forgd-verdict:ci -m pip freeze --all \
+            | grep -v -i '^forgd-verdict' > /tmp/image-freeze.txt
+          test -s /tmp/image-freeze.txt
+          uvx pip-audit==2.10.1 -r /tmp/image-freeze.txt --disable-pip --no-deps
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.26'
+          cache: false
+
+      # The module list and the distribution list come from the binary and
+      # from pip, not from the bundle's own indexes.
+      - name: Check the third-party licence bundle
+        run: |
+          set -euo pipefail
+          CID=$(docker create forgd-verdict:ci)
+          trap 'docker rm -f "$CID" >/dev/null' EXIT
+          docker cp "$CID:/usr/share/licenses/forgd-verdict/third-party" /tmp/licences
+          docker cp "$CID:/usr/local/bin/gitleaksd" /tmp/gitleaksd
+          go version -m /tmp/gitleaksd > /tmp/gitleaksd-version-m.txt
+          docker cp "$CID:/usr/local/bin/gitleaks" /tmp/gitleaks
+          go version -m /tmp/gitleaks > /tmp/gitleaks-version-m.txt
+          docker run --rm --entrypoint python forgd-verdict:ci -m pip freeze --all \
+            > /tmp/licence-freeze.txt
+          python3 deploy/check_licence_bundle.py /tmp/licences /tmp/licence-freeze.txt \
+            /tmp/gitleaksd-version-m.txt /tmp/gitleaks-version-m.txt
+          # The base image's own licences stay where Debian and CPython put
+          # them; NOTICE names both paths.
+          docker run --rm --entrypoint sh forgd-verdict:ci -c \
+            'test -s /usr/local/lib/python3.13/LICENSE.txt && test "$(ls /usr/share/doc/*/copyright | wc -l)" -gt 20'
+
+      # Source mode, run with the Go toolchain the image built gitleaksd
+      # with (read from the binary), so the standard library it checks is
+      # the one that ships. GOTOOLCHAIN makes go fetch that exact release.
+      - name: govulncheck the gitleaksd the image ships
+        working-directory: sidecar/gitleaksd
+        run: |
+          set -euo pipefail
+          toolchain=$(go version /tmp/gitleaksd | awk '{print $2}')
+          case "$toolchain" in go1.*) ;; *) echo "::error::no Go version in gitleaksd: $toolchain"; exit 1 ;; esac
+          GOTOOLCHAIN="$toolchain" go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+      # Binary mode over the gitleaks CLI the licence step copied out of the image.
+      - name: govulncheck the gitleaks the image ships
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 -mode=binary /tmp/gitleaks
+
+      - name: Smoke test the container
+        run: |
+          set -eux
+          SECRET="whsec_$(python3 -c 'import base64,os;print(base64.b64encode(os.urandom(32)).decode())')"
+          CID=$(docker run -d -p 8000:8000 -e WEBHOOK_SECRET="$SECRET" \
+            -e FORGD_HASH_SALT=ci-salt-not-a-deployment-secret \
+            -e FORGD_VERDICT_STORE=/tmp/findings forgd-verdict:ci)
+          trap 'docker logs "$CID" || true; docker rm -f "$CID" || true' EXIT
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/healthz && break
+            sleep 1
+          done
+
+          # gitleaks must be present in the image, or T1 is silently dead
+          # in production.
+          docker exec "$CID" gitleaks version
+
+          # The image's gitleaks, through the detector, must report every
+          # family in tests/data/gitleaks-t1.json. The golden frame below
+          # carries a key T0 also catches, so it cannot show a T1 miss.
+          docker exec -i -e FIXTURES="$(cat tests/data/gitleaks-t1.json)" "$CID" python - <<'PY'
+          import json, os, sys
+          from forgd_verdict.detectors.gitleaks import GitleaksDetector
+          from forgd_verdict.models import ScanUnit
+          fixtures = {k: "".join(v) for k, v in json.loads(os.environ["FIXTURES"]).items()
+                      if not k.startswith("_")}
+          detector = GitleaksDetector(timeout_s=60.0)
+          missed = []
+          for rule, value in sorted(fixtures.items()):
+              unit = ScanUnit("t", None, f"the deploy notes had {value} pasted into them")
+              found = {f.detector for f in detector.scan([unit])}
+              print(f"{rule}: {'found' if f'gitleaks:{rule}' in found else 'MISSED'}")
+              if f"gitleaks:{rule}" not in found:
+                  missed.append(rule)
+          if missed:
+              print(f"::error::the image's gitleaks missed {', '.join(missed)}")
+              sys.exit(1)
+          PY
+
+          # A signed golden frame must come back 200 with a verdict.
+          SECRET="$SECRET" python3 - <<'PY'
+          import base64, hashlib, hmac, json, os, time, urllib.request
+          secret = os.environ["SECRET"]
+          fx = json.load(open("tests/golden/02-text-with-secret.json"))
+          body = json.dumps(fx["frame"]).encode()
+          wid, ts = fx["frame"]["request_id"], str(int(time.time()))
+          key = base64.b64decode(secret.removeprefix("whsec_"))
+          sig = "v1," + base64.b64encode(
+              hmac.new(key, f"{wid}.{ts}.".encode() + body, hashlib.sha256).digest()
+          ).decode()
+          req = urllib.request.Request(
+              "http://127.0.0.1:8000/hook", data=body, method="POST",
+              headers={"content-type": "application/json",
+                       "user-agent": "anthropic-dlp/1",
+                       "webhook-id": wid, "webhook-timestamp": ts,
+                       "webhook-signature": sig})
+          with urllib.request.urlopen(req, timeout=10) as r:
+              assert r.status == 200, r.status
+              verdict = json.load(r)
+          # policy.yaml ships mode: observe, so this allows while recording.
+          assert verdict["action"] == "allow", verdict
+          assert verdict["findings_count"] >= 1, "frame carried a secret but nothing was found"
+          print("container verdict OK:", verdict)
+          PY
+
+          # An unsigned request must be refused, not silently allowed.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' -d '{"type":"prompt"}' \
+            http://127.0.0.1:8000/hook)
+          test "$code" = "401" || { echo "::error::unsigned request got $code, expected 401"; exit 1; }
+
+      - name: Serve a policy supplied through the environment
+        # The step above runs on the policy baked into the image, so it never
+        # touches the FORGD_POLICY_INLINE_GZ branch of the entrypoint -- which
+        # is the branch every deployment takes. That gap shipped a default
+        # policy directory the container could not create: it ran as uid 10001,
+        # mkdir at the filesystem root was denied, and the app exited before
+        # serving. Nothing in CI ran as that user with that variable set.
+        #
+        # tests/test_entrypoint.py checks the default against the Dockerfile
+        # statically; only running the image proves the uid can write there.
+        run: |
+          set -eux
+          SECRET="whsec_$(python3 -c 'import base64,os;print(base64.b64encode(os.urandom(32)).decode())')"
+          # The real file, compressed the way the deploy compresses it.
+          GZ=$(gzip -c policy.yaml | base64 -w0)
+          CID=$(docker run -d -p 8001:8000 \
+            -e WEBHOOK_SECRET="$SECRET" \
+            -e FORGD_HASH_SALT=ci-salt-not-a-deployment-secret \
+            -e FORGD_VERDICT_STORE=/tmp/findings \
+            -e FORGD_POLICY_INLINE_GZ="$GZ" \
+            forgd-verdict:ci)
+          trap 'docker logs "$CID" || true; docker rm -f "$CID" || true' EXIT
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8001/healthz && break
+            sleep 1
+          done
+          # Not just "it answered" -- a container that exited leaves the port
+          # closed and the loop above falls through without failing.
+          curl -fsS http://127.0.0.1:8001/healthz > /dev/null
+
+          docker logs "$CID" 2>&1 | grep -q 'policy: from the environment' || {
+            echo "::error::the inline policy was not used; the entrypoint skipped or failed its decode"
+            exit 1
+          }
+
+          # And it landed at the default directory as the runtime uid, which
+          # is the exact thing /config could not do. Checked by path rather
+          # than through $FORGD_VERDICT_POLICY: docker exec sees the image's
+          # ENV, not the export the entrypoint made in the serving process.
+          docker exec "$CID" test -r /run/forgd/policy/policy.yaml
+          docker exec "$CID" id -u | grep -qx 10001
+
+      - name: Refuse a policy that does not decode
+        # The entrypoint must fail loudly rather than fall back to the baked
+        # policy: a truncated gzip stream yields a valid YAML prefix, so a
+        # silent fallback and a silent partial load look identical from here.
+        run: |
+          set -eux
+          CID=$(docker run -d -e WEBHOOK_SECRET=whsec_AAAA \
+            -e FORGD_HASH_SALT=ci-salt-not-a-deployment-secret \
+            -e FORGD_POLICY_INLINE_GZ="bm90IGd6aXA=" forgd-verdict:ci)
+          trap 'docker rm -f "$CID" || true' EXIT
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Running}}' "$CID")" = "false" ] && break
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.ExitCode}}' "$CID")" = "1" || {
+            echo "::error::a policy that does not decode did not stop the container"
+            exit 1
+          }
+          docker logs "$CID" 2>&1 | grep -q 'did not decode'
+
+      - name: Refuse a findings store that was never configured
+        # policy.yaml names the store as $FORGD_VERDICT_STORE. Unset, it
+        # used to open a directory with that literal name inside the
+        # container: writes succeeded, /healthz passed, and the findings
+        # went nowhere anyone would look.
+        run: |
+          set -eux
+          CID=$(docker run -d -e WEBHOOK_SECRET=whsec_AAAA \
+            -e FORGD_HASH_SALT=ci-salt-not-a-deployment-secret forgd-verdict:ci)
+          trap 'docker rm -f "$CID" || true' EXIT
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Running}}' "$CID")" = "false" ] && break
+            sleep 1
+          done
+          test "$(docker inspect -f '{{.State.Running}}' "$CID")" = "false" || {
+            echo "::error::the server started with no findings store configured"
+            exit 1
+          }
+          docker logs "$CID" 2>&1 | grep -q 'FORGD_VERDICT_STORE is not set'
+
+      - name: Smoke test the intake role, which now scans
+        # The role serves /scan for adapter 2, so a Claude Code hook waits
+        # on it inside a 200 ms budget. Nothing else in CI starts this
+        # role -- the steps above only ever run the server -- so an
+        # entrypoint that failed to start gitleaksd here would first be
+        # seen in the cluster.
+        run: |
+          set -eux
+          TOK="$(python3 -c 'import base64,os;print(base64.b64encode(os.urandom(32)).decode())')"
+
+          # The shipped policy, unmodified: its one fleet reads
+          # FORGD_INTAKE_FLEET_TOKEN and is bound to FORGD_ORG_ID_PRIMARY, and
+          # clients_configured below fails this step if that fleet is renamed
+          # or removed.
+          CID=$(docker run -d -p 8200:8200 \
+            -e FORGD_ROLE=intake \
+            -e FORGD_GITLEAKS_SOCKET=/run/forgd/gitleaksd.sock \
+            -e FORGD_INTAKE_FLEET_TOKEN="$TOK" \
+            -e FORGD_ORG_ID_PRIMARY=ci-org \
+            -e FORGD_HASH_SALT=ci-salt-not-a-deployment-secret \
+            -e FORGD_VERDICT_STORE=/tmp/findings \
+            -e FORGD_POLICY_INLINE_GZ="$(gzip -c policy.yaml | base64 -w0)" \
+            forgd-verdict:ci)
+          trap 'docker logs "$CID" || true; docker rm -f "$CID" || true' EXIT
+
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8200/healthz && break
+            sleep 1
+          done
+          # A container that exited leaves the port closed and the loop
+          # above falls through without failing.
+          curl -fsS http://127.0.0.1:8200/healthz | grep -q '"clients_configured": 1'
+          docker exec "$CID" test -S /run/forgd/gitleaksd.sock
+
+          # A planted key must come back denied, and the daemon is what
+          # makes that answer arrive in time: the CLI recompiles ~220
+          # regexes per exec, which against the hook's budget is a
+          # timeout rather than a slow scan.
+          TOK="$TOK" python3 - <<'PY_SCAN'
+          import json, os, time, urllib.request
+          body = json.dumps({
+              "hook_event_name": "UserPromptSubmit",
+              "user_input": "AKIAIOSFODNN7EXAMPLE and wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+          }).encode()
+          def post():
+              req = urllib.request.Request(
+                  "http://127.0.0.1:8200/scan", data=body, method="POST",
+                  headers={"content-type": "application/json",
+                           "authorization": "Bearer " + os.environ["TOK"],
+                           "x-forgd-device": "d0123456789ab"})
+              t0 = time.time()
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  return json.load(r), (time.time() - t0) * 1000
+          post()  # the first call builds the store client; that is not what this measures
+          verdict, elapsed_ms = post()
+          assert verdict["action"] == "deny", verdict
+          assert "regex:aws-access-key" in verdict["detectors"], verdict
+          # The daemon answers in about 4 ms; a subprocess exec of the
+          # CLI is 180 ms on a laptop and over a second on a throttled
+          # vCPU. This bound distinguishes those two, which is the whole
+          # point -- it is not a measurement of the cluster.
+          assert elapsed_ms < 150, f"a warm /scan took {elapsed_ms:.0f} ms"
+          print(f"intake /scan OK in {elapsed_ms:.0f} ms")
+          PY_SCAN
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' \
+            -d '{"hook_event_name":"UserPromptSubmit","user_input":"hi"}' \
+            http://127.0.0.1:8200/scan)
+          test "$code" = "401" || { echo "::error::an untokened /scan got $code, expected 401"; exit 1; }
+
+  docker-ingest:
+    name: docker build, ingest target
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The ingest target is what the ingest jobs run: the base image plus
+      # the ml-pii set and the spaCy model, all from hashed constraints. Its
+      # build runs deploy/assert_presidio.py, so a model or Presidio that
+      # does not load fails here.
+      - name: Build
+        run: docker build -f deploy/Dockerfile --target ingest -t forgd-verdict:ci-ingest .
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      - name: Audit the packages installed in the image
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python forgd-verdict:ci-ingest -m pip freeze --all \
+            | grep -v -i '^forgd-verdict' > /tmp/image-freeze.txt
+          test -s /tmp/image-freeze.txt
+          uvx pip-audit==2.10.1 -r /tmp/image-freeze.txt --disable-pip --no-deps
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.26'
+
+      - name: Check the third-party licence bundle
+        run: |
+          set -euo pipefail
+          CID=$(docker create forgd-verdict:ci-ingest)
+          trap 'docker rm -f "$CID" >/dev/null' EXIT
+          docker cp "$CID:/usr/share/licenses/forgd-verdict/third-party" /tmp/licences
+          docker cp "$CID:/usr/local/bin/gitleaksd" /tmp/gitleaksd
+          go version -m /tmp/gitleaksd > /tmp/gitleaksd-version-m.txt
+          docker cp "$CID:/usr/local/bin/gitleaks" /tmp/gitleaks
+          go version -m /tmp/gitleaks > /tmp/gitleaks-version-m.txt
+          docker run --rm --entrypoint python forgd-verdict:ci-ingest -m pip freeze --all \
+            > /tmp/licence-freeze.txt
+          python3 deploy/check_licence_bundle.py /tmp/licences /tmp/licence-freeze.txt \
+            /tmp/gitleaksd-version-m.txt /tmp/gitleaks-version-m.txt
+
+      # The seed is tldextract's cache, written at build from the snapshot
+      # its wheel bundles; this checks that snapshot against
+      # deploy/psl/tld_set_snapshot.sha256, that the seed holds its parse
+      # and nothing fetched from elsewhere, and that the Public Suffix List's
+      # licence is in the bundle.
+      - name: Check the Public Suffix List seed and its licence
+        run: |
+          docker run --rm --network none -v "$PWD/deploy:/check:ro" \
+            --entrypoint python forgd-verdict:ci-ingest \
+            /check/check_psl_seed.py /check/psl/tld_set_snapshot.sha256

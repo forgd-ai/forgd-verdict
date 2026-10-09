@@ -1,0 +1,219 @@
+{{- if .Values.verdict.enabled }}
+{{- include "forgd-verdict.checkOrgSecretNames" (dict "root" . "list" .Values.verdict.signingOrgs "listKey" "verdict.signingOrgs" "inline" .Values.secrets.webhookSecrets "inlineKey" "secrets.webhookSecrets" "prefix" "WEBHOOK_SECRET" "previous" true) }}
+{{- $headerKeys := list }}
+{{- range include "forgd-verdict.sharedHeaderNames" . | fromJsonArray }}{{ if . }}{{ $headerKeys = append $headerKeys (include "forgd-verdict.keySuffix" .) }}{{ end }}{{ end }}
+{{- range $key, $_ := .Values.secrets.sharedHeaders }}
+{{- if not (has $key $headerKeys) }}
+{{- fail (printf "secrets.sharedHeaders.%s matches no $FORGD_SHARED_HEADER_<NAME> in the policy's server.required_headers: nothing would read it." $key) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.secrets.sharedHeader (not (has "" (include "forgd-verdict.sharedHeaderNames" . | fromJsonArray))) }}
+{{- fail "secrets.sharedHeader is set but the policy's server.required_headers names no $FORGD_SHARED_HEADER: nothing would read it." }}
+{{- end }}
+{{- if and (gt (int .Values.verdict.replicas) 1) (not .Values.verdict.sharedStateAcknowledged) }}
+{{- fail "verdict.replicas > 1: the session cache and the webhook-id dedupe store are per-process, so a second replica makes the latency numbers meaningless and lets a retried webhook-id scan twice. Swap in a shared cache first, then set verdict.sharedStateAcknowledged: true" }}
+{{- end }}
+{{/*
+Adapter 1. Anthropic calls IN, authenticated by a webhook signature.
+
+MUST NOT sit behind an auth proxy. A non-200 is a webhook failure, not a
+deny, and repeated failures trip Anthropic's circuit breaker -- at which
+point nothing is governed at all. An auth redirect makes every governed
+prompt a failure.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-verdict
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: verdict
+spec:
+  replicas: {{ .Values.verdict.replicas }}
+  minReadySeconds: {{ .Values.verdict.minReadySeconds }}
+  strategy:
+    # The verdict timeout covers connection through response, so the old pod
+    # must keep answering until the new one is ready. With one replica that
+    # needs surge, and a rolling update that can go to zero available would
+    # drop frames Anthropic counts as failures.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: verdict
+  template:
+    metadata:
+      labels:
+        {{- include "forgd-verdict.labels" . | nindent 8 }}
+        app.kubernetes.io/component: verdict
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+        {{- with .Values.podLabels }}{{- toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        checksum/policy: {{ include (print $.Template.BasePath "/configmap-policy.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "forgd-verdict.writerServiceAccountName" . }}
+      # No role calls the Kubernetes API. Workload identity's token is a
+      # separate projected volume and is mounted either way.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        # gitleaksd is not a sidecar: the entrypoint starts it in this
+        # container and health-checks the socket before the app binds, so
+        # the app can never come up believing the secrets tier is present
+        # when it is not. A sidecar would need its own readiness gate to
+        # make the same promise.
+        - name: verdict
+          {{- include "forgd-verdict.workingDir" $ | nindent 10 }}
+          image: {{ include "forgd-verdict.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "forgd-verdict.securityContext" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.verdict.port }}
+          env:
+            - name: FORGD_ROLE
+              value: server
+            - name: PORT
+              value: {{ .Values.verdict.port | quote }}
+            - name: FORGD_VERDICT_MODE
+              value: {{ .Values.verdict.mode | quote }}
+            - name: FORGD_GITLEAKS_SOCKET
+              value: /run/forgd/gitleaksd.sock
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" . }}
+                  key: webhook-secret
+                  {{- if .Values.verdict.signingOrgs }}
+                  # Optional beside per-org secrets, which can replace it.
+                  optional: true
+                  {{- end }}
+            # The outgoing secret during a rotation. policy.yaml lists both,
+            # so both are accepted while Anthropic is switched over.
+            # Optional: absent outside a rotation, and a missing key would
+            # otherwise stop the pod from starting.
+            - name: WEBHOOK_SECRET_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" . }}
+                  key: webhook-secret-previous
+                  optional: true
+            {{- range $name := .Values.verdict.signingOrgs }}
+            {{- $var := upper (replace "-" "_" $name) }}
+            # This org's Inference hook signing secret, and its outgoing
+            # one during that org's rotation.
+            - name: WEBHOOK_SECRET_{{ $var }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" $ }}
+                  key: webhook-secret-{{ $name | lower }}
+            - name: WEBHOOK_SECRET_{{ $var }}_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" $ }}
+                  key: webhook-secret-{{ $name | lower }}-previous
+                  optional: true
+            {{- end }}
+            {{- if or .Values.secrets.metricsToken .Values.secrets.existingSecret }}
+            - name: FORGD_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" . }}
+                  key: metrics-token
+                  optional: true
+            {{- end }}
+            {{- range $name := include "forgd-verdict.sharedHeaderNames" . | fromJsonArray }}
+            # A static header value the policy's server.required_headers
+            # checks beside the signature.
+            - name: FORGD_SHARED_HEADER{{ if $name }}_{{ $name }}{{ end }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forgd-verdict.secretName" $ }}
+                  key: shared-header{{ if $name }}-{{ include "forgd-verdict.keySuffix" $name }}{{ end }}
+            {{- end }}
+            {{- with .Values.serviceAccounts.writer.clientId }}
+            - name: AZURE_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- include "forgd-verdict.hashSaltEnv" . | nindent 12 }}
+            {{- include "forgd-verdict.commonEnv" . | nindent 12 }}
+          # /livez answers 503 only when gitleaksd stops answering; a restart
+          # restarts the daemon with the app. /healthz stays 200 while the
+          # app is up and reports the daemon's state in its body.
+          #
+          # Tolerant on purpose: about a minute of consecutive failures. The
+          # probe is served on the same event loop as the verdict path, and
+          # under the load that makes that path slow a liveness restart is
+          # what turns slowness into an outage. A dead daemon is not
+          # transient, so waiting a minute to restart for it costs little.
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: { path: {{ include "forgd-verdict.readyPath" . }}, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: {{ include "forgd-verdict.readyPath" . }}, port: http }
+            # gitleaksd compiles its rule set before the socket appears.
+            periodSeconds: 2
+            failureThreshold: 30
+          resources: {{- toYaml .Values.verdict.resources | nindent 12 }}
+          volumeMounts:
+            - name: policy
+              mountPath: {{ .Values.policy.mountPath }}
+              readOnly: true
+            {{- include "forgd-verdict.scratchMounts" . | nindent 12 }}
+      volumes:
+        {{- include "forgd-verdict.policyVolume" . | nindent 8 }}
+        {{- include "forgd-verdict.scratchVolumes" . | nindent 8 }}
+      {{- with .Values.verdict.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.verdict.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.verdict.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "forgd-verdict.fullname" . }}-verdict
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: verdict
+  {{- with include "forgd-verdict.gkeServiceAnnotations" (list . "verdict") }}
+  {{- . | nindent 2 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.verdict.port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: {{ include "forgd-verdict.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: verdict
+{{- end }}

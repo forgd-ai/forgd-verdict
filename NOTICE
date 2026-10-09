@@ -1,0 +1,74 @@
+forgd-verdict
+Copyright 2026 Forgd, Inc.
+
+This product is licensed under the Apache License, Version 2.0; see LICENSE.
+
+The forgd-verdict wheel, and so both container images, includes these
+fonts in src/forgd_verdict/dashboard/assets/fonts/, each under the SIL Open
+Font License, Version 1.1, whose text is beside it. The forgd-verdict-hook
+wheel and the Helm chart carry this NOTICE but include neither the fonts nor
+the components the images bundle:
+
+- Inter (https://github.com/rsms/inter), Copyright (c) 2016 The Inter
+  Project Authors; the latin subset, unmodified. See OFL-Inter.txt.
+- Roboto Mono (https://github.com/googlefonts/robotomono), Copyright 2015
+  The Roboto Mono Project Authors; the latin subset, unmodified. See
+  OFL-RobotoMono.txt.
+
+The container images built from deploy/Dockerfile bundle the third-party
+components below. Each bundled component stays under its own license. The
+images carry those license files under
+/usr/share/licenses/forgd-verdict/third-party/, with an index of the Python
+distributions in python/index.json and of the Go modules in go/index.tsv
+(gitleaksd) and go-gitleaks/index.tsv (the gitleaks CLI), except the base
+image's own, which stay where Debian and CPython install them.
+
+Both images (--target base and --target ingest):
+
+- gitleaks 8.30.1 (https://github.com/gitleaks/gitleaks), MIT License,
+  the CLI built from the github.com/zricethezav/gitleaks/v8 module source
+  by deploy/gitleaks-cli. It statically links the Go standard library
+  (BSD 3-Clause License) and the modules gitleaks depends on, each under
+  its own license. `go version -m` on the binary lists the modules it was
+  built with.
+- gitleaksd, built from sidecar/gitleaksd. It statically links
+  github.com/zricethezav/gitleaks/v8 (MIT License), github.com/spf13/viper
+  (MIT License), the Go standard library (BSD 3-Clause License) and the
+  modules those depend on, each under its own license. `go version -m`
+  on the binary lists the modules it was built with.
+- The python:3.13-slim base image: Debian packages, each under its own
+  license in /usr/share/doc/<package>/copyright, and CPython, under the
+  Python Software Foundation License in
+  /usr/local/lib/python3.13/LICENSE.txt.
+- The Python packages installed for the server, azure, aws, gcp, dashboard
+  and connector extras in pyproject.toml, and their dependencies, each
+  under its own license.
+
+The ingest image only:
+
+- The Python packages installed for the ml-pii extra: Microsoft Presidio
+  (presidio-analyzer, MIT License), spaCy (MIT License), which
+  presidio-analyzer requires, and their dependencies, each under its own
+  license.
+- The spaCy model en_core_web_lg 3.8.0, installed from its release wheel,
+  MIT License.
+  Its model card lists the data it was trained on and their licenses.
+- The Public Suffix List (https://publicsuffix.org/), Mozilla Public
+  License, Version 2.0, as bundled unmodified in the tldextract 5.3.2
+  wheel at
+  /usr/local/lib/python3.13/site-packages/tldextract/.tld_set_snapshot,
+  and the same list as parsed by tldextract in the cache seed under
+  /opt/forgd/tldextract-seed. Its source form is
+  https://github.com/publicsuffix/list. The license text and this
+  attribution are in public-suffix-list/ under the third-party directory.
+
+The Terraform modules in the source tree include one file from another
+project. It ships with the modules only; neither wheel, the Helm chart nor
+either container image includes it:
+
+- deploy/terraform/modules/cluster-eks/iam_policy.json is
+  docs/install/iam_policy.json from the AWS Load Balancer Controller
+  (https://github.com/kubernetes-sigs/aws-load-balancer-controller at tag
+  v3.5.0), unmodified, by the aws-load-balancer-controller authors, under
+  the Apache License, Version 2.0 (see LICENSE). That project names no
+  copyright holder and has no NOTICE file at that tag.

@@ -1,0 +1,166 @@
+# forgd-verdict on EKS, with the findings store in S3.
+#
+# Every account id, ARN, hostname and issuer below is a placeholder. Replace
+# them; do not commit the real ones.
+#
+# From the repository root:
+#
+#   helm upgrade --install forgd-verdict deploy/helm/forgd-verdict \
+#     -f deploy/helm/forgd-verdict/values-eks.example.yaml \
+#     --set-file policy.inline=policy.yaml \
+#     --set-string 'orgIds.prod=<organization-uuid>'
+#
+# The bucket and both roles come from Terraform (modules/store-s3). Its
+# `store_url` output is store.url.
+
+# One repository, tagged twice by CI: <sha> and <sha>-ingest.
+image:
+  repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/forgd-verdict
+  tag: "0123abc"
+
+store:
+  url: s3://example-forgd-findings/verdict
+
+# Azure workload identity off. On EKS the role comes from EKS Pod Identity
+# or from IRSA, and the AWS SDK picks up either without any client id in the
+# pod.
+workloadIdentity:
+  enabled: false
+
+# No service account annotations. Under modules/cluster-eks's default
+# identity_mode, pod_identity, a Pod Identity association binds each role to
+# its service account. An eks.amazonaws.com/role-arn annotation there makes
+# the EKS webhook inject a web identity token, which the AWS SDK tries before
+# Pod Identity's credentials, and every call to S3 fails.
+#
+# Only with identity_mode = "irsa", annotate both, with store-s3's role ARNs
+# (the module's helm_values_hint output sets them):
+#
+#   serviceAccounts:
+#     writer:
+#       annotations:
+#         eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/forgd-verdict-writer
+#     reader:
+#       annotations:
+#         eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/forgd-dashboard-reader
+
+# Created outside the chart, so no credential lands in the release. See
+# deploy/helm/README.md for the keys it must hold.
+secrets:
+  existingSecret: forgd-verdict
+
+# The shipped policy's trusted_header mode relies on Container Apps
+# stripping the header. Here the ALB signs the user in (the auth-*
+# annotations on ingress.dashboard below) and the dashboard verifies the
+# token the ALB signed, in x-amzn-oidc-data, against the ALB's key.
+#
+# albArn is the ARN of the ALB the controller creates for the ingress group
+# below, which does not exist until the first install. Install with this
+# placeholder, then look up the ALB by the hostname the controller writes
+# into the Ingress status, set the real ARN and upgrade:
+#
+#   host=$(kubectl get ingress -n <namespace> -l app.kubernetes.io/instance=forgd-verdict \
+#     -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+#   aws elbv2 describe-load-balancers \
+#     --query "LoadBalancers[?DNSName=='$host'].LoadBalancerArn" --output text
+#
+# If the controller ever recreates the ALB (the group is renamed, or its
+# last Ingress is deleted and recreated), the ARN changes and every sign-in
+# fails until albArn is set to the new one.
+dashboard:
+  auth:
+    mode: oidc_jwt
+    platform: alb_oidc
+    albArn: arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/forgd-verdict/0123456789abcdef
+    issuer: https://idp.example.com/oauth2/default
+    # The IdP client id the ALB signs in with. ALB tokens carry no aud; the
+    # dashboard checks this against the token's `client` header instead.
+    audience: forgd-dashboard
+
+ingest:
+  image:
+    repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/forgd-verdict
+    tag: "0123abc-ingest"
+
+# The AWS Load Balancer Controller (modules/cluster-eks installs its role;
+# `lb_controller_install_command` installs it). The chart's three Ingress
+# objects join one ALB through a shared group.name.
+#
+# ALB evaluates rules in priority order, not by longest prefix, and the
+# dashboard's `/` becomes `/*`, which matches /hook and /v1 too. group.order
+# puts the dashboard's rules last. Left at the default, the controller
+# orders ties by Ingress name, `-dashboard` sorts first, and every governed
+# prompt is redirected to sign in.
+#
+# TLS comes from ACM through certificate-arn, not from cert-manager, so
+# ingress.tls is off and there is no clusterIssuer. The scheme, target type,
+# listener, certificate, TLS policy and group annotations are repeated on all
+# three objects because the controller builds the group's settings from
+# every member.
+#
+# No load-balancer-name, so the controller generates one, starting k8s-.
+# ALB names are unique per account and region, and a fixed name here would
+# collide with any other deployment of this file there. To choose a name,
+# make it per deployment and put it on all three objects:
+#
+#   alb.ingress.kubernetes.io/load-balancer-name: forgd-verdict-prod
+ingress:
+  className: alb
+  host: verdict.example.com
+  tls:
+    enabled: false
+  # The public object: /hook, /v1, /intake, /scan. No auth-* key: the chart
+  # refuses one here.
+  annotations:
+    alb.ingress.kubernetes.io/group.name: forgd-verdict
+    alb.ingress.kubernetes.io/group.order: "10"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000000
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    # Every backend here answers /healthz; the controller's default is /.
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+  diagnostics:
+    annotations:
+      alb.ingress.kubernetes.io/group.name: forgd-verdict
+      alb.ingress.kubernetes.io/group.order: "20"
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000000
+      alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+  # The findings connector, when connector.enabled. Public like /hook: no
+  # auth annotation, which the chart refuses here. Ordered before the
+  # dashboard's catch-all.
+  #
+  #   connector:
+  #     annotations:
+  #       alb.ingress.kubernetes.io/group.name: forgd-verdict
+  #       alb.ingress.kubernetes.io/group.order: "30"
+  #       alb.ingress.kubernetes.io/scheme: internet-facing
+  #       alb.ingress.kubernetes.io/target-type: ip
+  #       alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+  #       alb.ingress.kubernetes.io/certificate-arn: <the certificate above>
+  #       alb.ingress.kubernetes.io/healthcheck-path: /healthz
+  # The only object that signs in. secretName is a Kubernetes secret in this
+  # namespace holding the IdP client's clientID and clientSecret, created
+  # outside the chart like secrets.existingSecret.
+  # The controller may read it only after modules/cluster-eks's
+  # lb_controller_namespace_command has run; if it cannot, it builds no
+  # ALB for any host in the group.
+  dashboard:
+    annotations:
+      alb.ingress.kubernetes.io/group.name: forgd-verdict
+      alb.ingress.kubernetes.io/group.order: "100"
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000000
+      alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+      alb.ingress.kubernetes.io/auth-type: oidc
+      alb.ingress.kubernetes.io/auth-idp-oidc: '{"issuer":"https://idp.example.com/oauth2/default","authorizationEndpoint":"https://idp.example.com/oauth2/default/v1/authorize","tokenEndpoint":"https://idp.example.com/oauth2/default/v1/token","userInfoEndpoint":"https://idp.example.com/oauth2/default/v1/userinfo","secretName":"forgd-dashboard-oidc"}'
+      alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
+      alb.ingress.kubernetes.io/auth-scope: openid email groups

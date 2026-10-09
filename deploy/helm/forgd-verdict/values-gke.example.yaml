@@ -1,0 +1,137 @@
+# forgd-verdict on GKE, with the findings store in Google Cloud Storage.
+#
+# Every project id, email, hostname and address name below is a
+# placeholder. Replace them; do not commit the real ones.
+#
+# 1. Terraform. Apply modules/store-gcs, then modules/cluster-gke with
+#    store-gcs's `writer_email` and `reader_email` as its inputs of the same
+#    names. cluster-gke binds each account to one Kubernetes service
+#    account, forgd/forgd-verdict-writer and forgd/forgd-verdict-reader by
+#    default, which are the names under serviceAccounts below.
+#
+#      store-gcs   store_url      -> store.url
+#      store-gcs   writer_email   -> serviceAccounts.writer.annotations
+#      store-gcs   reader_email   -> serviceAccounts.reader.annotations
+#      cluster-gke namespace      -> helm -n
+#
+#    Get credentials with cluster-gke's `kubeconfig_command` output. With
+#    the module's default private endpoint it adds --internal-ip, so run
+#    kubectl and helm from inside the VPC.
+#
+#    Reserve the load balancer's address and point the hostname at it
+#    before step 2; the ManagedCertificate provisions only once the name
+#    resolves to the load balancer:
+#
+#      gcloud compute addresses create forgd-verdict-ip --global
+#
+#    and enable IAP in the project:
+#
+#      gcloud services enable iap.googleapis.com
+#
+# 2. Install, with the placeholder audience below:
+#
+#      helm upgrade --install forgd-verdict deploy/helm/forgd-verdict \
+#        -n forgd --create-namespace \
+#        -f deploy/helm/forgd-verdict/values-gke.example.yaml \
+#        --set-file policy.inline=policy.yaml \
+#        --set-string 'orgIds.primary=<organization-uuid>'
+#
+#    The ingress creates the dashboard's backend service with IAP on. No
+#    IAP token carries project 0, so until step 5 the dashboard refuses
+#    every request. Its /healthz needs no sign-in, so the pod is ready and
+#    the load balancer's health check passes.
+#
+# 3. Once the ingress has created its backends, read the dashboard's
+#    backend service name and id, and the project number. GKE records the
+#    namespace/Service in each backend service's description, which is not
+#    truncated as the name can be:
+#
+#      gcloud compute backend-services list --global \
+#        --filter='description~forgd/forgd-verdict-dashboard' \
+#        --format='value(name,id,description)'
+#      gcloud projects describe example-project --format='value(projectNumber)'
+#
+#    Substitute your namespace and release name. Pick the line whose
+#    description names exactly that Service and port 8080; this procedure
+#    has not yet been run against a real GKE cluster.
+#
+# 4. Let people sign in:
+#
+#      gcloud iap web add-iam-policy-binding --resource-type=backend-services \
+#        --service=NAME --member=group:security@example.com \
+#        --role=roles/iap.httpsResourceAccessor
+#
+#    IAP's default Google-managed OAuth client admits only accounts in the
+#    project's Google Cloud organization. For others, create an OAuth client
+#    and name its secret in ingress.gke.iap.oauthclientCredentials.secretName.
+#
+# 5. Upgrade again with the real audience:
+#
+#      --set dashboard.auth.audience=/projects/NUMBER/global/backendServices/ID
+#
+# The public paths, /hook, /v1 and the diagnostics, go to backends with IAP
+# set off, and never pass through it; see templates/gke.yaml.
+
+# One repository, tagged twice by CI: <sha> and <sha>-ingest.
+image:
+  repository: europe-west2-docker.pkg.dev/example-project/forgd/forgd-verdict
+  tag: "0123abc"
+
+store:
+  url: gs://example-forgd-findings/verdict
+
+# Azure workload identity off. On GKE the pod gets a Google service
+# account's credentials from the GKE metadata server, through the
+# annotation on its Kubernetes service account, and the Google client
+# library picks them up through Application Default Credentials.
+workloadIdentity:
+  enabled: false
+
+# The names cluster-gke binds by default. The writer is store-gcs's writer,
+# with create and the conditioned delete on cursors and markers; the reader
+# is its reader, with get and list only.
+serviceAccounts:
+  writer:
+    name: forgd-verdict-writer
+    annotations:
+      iam.gke.io/gcp-service-account: forgd-verdict-writer@example-project.iam.gserviceaccount.com
+  reader:
+    name: forgd-verdict-reader
+    annotations:
+      iam.gke.io/gcp-service-account: forgd-dashboard-reader@example-project.iam.gserviceaccount.com
+
+# Created outside the chart, so no credential lands in the release. See
+# deploy/helm/README.md for the keys it must hold.
+secrets:
+  existingSecret: forgd-verdict
+
+# The app verifies IAP's signed header itself. IAP tokens carry no groups,
+# so the policy must not set dashboard.entitlements.map; the shipped one
+# does not.
+dashboard:
+  enabled: true
+  auth:
+    mode: oidc_jwt
+    platform: iap
+    # A placeholder no token carries, installed in step 2 above and
+    # replaced in step 5.
+    audience: /projects/0/global/backendServices/0
+
+ingest:
+  image:
+    repository: europe-west2-docker.pkg.dev/example-project/forgd/forgd-verdict
+    tag: "0123abc-ingest"
+
+# One GCE Ingress for every path, IAP on the dashboard's backend alone.
+ingress:
+  enabled: true
+  className: gce
+  host: verdict.example.com
+  # HTTP is off on the load balancer, so TLS is required: the
+  # ManagedCertificate below, or tls.secretName.
+  tls:
+    enabled: true
+  gke:
+    managedCertificate: true
+    # Reserved in step 1 with `gcloud compute addresses create ... --global`.
+    staticIpName: forgd-verdict-ip

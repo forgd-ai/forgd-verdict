@@ -1,0 +1,250 @@
+name: deploy
+
+# A template for deploying a fork to its own cloud. It does not run from
+# here: copy it to .github/workflows/deploy.yml in your fork, then set the
+# variables below on the GitHub environment each job names. Dependabot does
+# not read this file where it is, so its action pins are current only as of
+# this release; once the copy is under .github/workflows, Dependabot keeps
+# them current.
+#
+# A `v*` tag, or a manual run, builds the images on the runner, pushes them
+# to your registry and rolls your deployment on Azure, AWS, GCP or several.
+# The scripts it calls, scripts/deploy_azure.sh, scripts/deploy_aws.sh and
+# scripts/deploy_gcp.sh, run scripts/verify_deployment.sh against the
+# verdict server and stop the deploy if it fails.
+#
+# Each cloud's job deploys only when its marker variable is set on its
+# environment: AZURE_CD_CLIENT_ID on verdict-cd-azure, AWS_DEPLOY_ROLE_ARN on
+# verdict-cd-aws, GCP_WORKLOAD_IDENTITY_PROVIDER on verdict-cd-gcp. A run with
+# none of them set fails.
+#
+# Authentication is OIDC only, and the identity's trust must name the job's
+# environment. deploy/terraform/modules/ci-aws and ci-gcp create the AWS role
+# and the GCP service account for verdict-cd-aws and verdict-cd-gcp. On Azure,
+# give the CD identity a federated credential with the subject
+# `repo:<your-org>/<your-repo>:environment:verdict-cd-azure`, AcrPush on your
+# registry, Container Apps Contributor on the container apps and Container
+# Apps Jobs Contributor on the ingest job.
+#
+# On verdict-cd-azure, AZURE_DEPLOY_TARGET is required: `aca` rolls the
+# container apps and needs AZURE_CONTAINER_APP, and `k8s` pushes the images
+# and prints the helm upgrade for AKS. Anything else fails the deploy.
+#
+# Optional on every environment:
+#   FORGD_IMAGE_NAME   the image name within your registry (default forgd-verdict)
+#   FORGD_POLICY_FILE  the policy file deploy_azure.sh names (default policy.yaml)
+#
+# Any `v*` tag pushed to the fork deploys, and a tag runs this file as it is
+# in the tagged commit, so nothing in it limits who can deploy. Before
+# copying it, add a ruleset that limits `v*` tags to the people who may
+# deploy, limit the three environments to `v*` tags, and add required
+# reviewers to them for a deploy that waits for approval. docs/RELEASING.md
+# lists the settings.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: verdict-cd-azure
+    # Variables on an environment are not visible to a job-level `if`, so
+    # whether the cloud is configured is decided in the first step.
+    outputs:
+      configured: ${{ steps.cfg.outputs.configured }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Is Azure configured?
+        id: cfg
+        env:
+          MARKER: ${{ vars.AZURE_CD_CLIENT_ID }}
+        run: |
+          if [ -n "$MARKER" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Azure is not configured (AZURE_CD_CLIENT_ID is unset on its environment); skipping."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          client-id: ${{ vars.AZURE_CD_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy
+        if: steps.cfg.outputs.configured == 'true'
+        run: scripts/deploy_azure.sh "${GITHUB_SHA::12}"
+        env:
+          FORGD_IMAGE_NAME: ${{ vars.FORGD_IMAGE_NAME }}
+          FORGD_POLICY_FILE: ${{ vars.FORGD_POLICY_FILE }}
+          AZURE_DEPLOY_TARGET: ${{ vars.AZURE_DEPLOY_TARGET }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_ACR: ${{ vars.AZURE_ACR }}
+          AZURE_CONTAINER_APP: ${{ vars.AZURE_CONTAINER_APP }}
+          AZURE_DASHBOARD_APP: ${{ vars.AZURE_DASHBOARD_APP }}
+          # Unset or empty rolls ca-forgd-collector; none skips the collector.
+          AZURE_COLLECTOR_APP: ${{ vars.AZURE_COLLECTOR_APP }}
+          # Unset or empty: no intake.
+          AZURE_INTAKE_APP: ${{ vars.AZURE_INTAKE_APP }}
+          AZURE_CONNECTOR_APP: ${{ vars.AZURE_CONNECTOR_APP }}
+          FORGD_CONNECTOR_URL: ${{ vars.FORGD_CONNECTOR_URL }}
+          AZURE_INGEST_JOB: ${{ vars.AZURE_INGEST_JOB }}
+
+  deploy-aws:
+    runs-on: ubuntu-latest
+    environment: verdict-cd-aws
+    outputs:
+      configured: ${{ steps.cfg.outputs.configured }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Is AWS configured?
+        id: cfg
+        env:
+          MARKER: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -n "$MARKER" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AWS is not configured (AWS_DEPLOY_ROLE_ARN is unset on its environment); skipping."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The variables are ci-aws's `repository_variables` output.
+      - name: Deploy
+        if: steps.cfg.outputs.configured == 'true'
+        run: scripts/deploy_aws.sh "${GITHUB_SHA::12}"
+        env:
+          AWS_ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
+          AWS_DEPLOY_TARGET: ${{ vars.AWS_DEPLOY_TARGET }}
+          AWS_IMAGE_PLATFORM: ${{ vars.AWS_IMAGE_PLATFORM }}
+          AWS_ALLOW_CROSS_BUILD: ${{ vars.AWS_ALLOW_CROSS_BUILD }}
+          FORGD_VERDICT_URL: ${{ vars.FORGD_VERDICT_URL }}
+          FORGD_COLLECTOR_URL: ${{ vars.FORGD_COLLECTOR_URL }}
+          FORGD_DASHBOARD_URL: ${{ vars.FORGD_DASHBOARD_URL }}
+          FORGD_CONNECTOR_URL: ${{ vars.FORGD_CONNECTOR_URL }}
+          FORGD_INTAKE_URL: ${{ vars.FORGD_INTAKE_URL }}
+          AWS_ECS_CLUSTER: ${{ vars.AWS_ECS_CLUSTER }}
+          AWS_ECS_VERDICT_SERVICE: ${{ vars.AWS_ECS_VERDICT_SERVICE }}
+          AWS_ECS_VERDICT_FAMILY: ${{ vars.AWS_ECS_VERDICT_FAMILY }}
+          AWS_ECS_COLLECTOR_SERVICE: ${{ vars.AWS_ECS_COLLECTOR_SERVICE }}
+          AWS_ECS_COLLECTOR_FAMILY: ${{ vars.AWS_ECS_COLLECTOR_FAMILY }}
+          AWS_ECS_DASHBOARD_SERVICE: ${{ vars.AWS_ECS_DASHBOARD_SERVICE }}
+          AWS_ECS_DASHBOARD_FAMILY: ${{ vars.AWS_ECS_DASHBOARD_FAMILY }}
+          AWS_ECS_INTAKE_SERVICE: ${{ vars.AWS_ECS_INTAKE_SERVICE }}
+          AWS_ECS_INTAKE_FAMILY: ${{ vars.AWS_ECS_INTAKE_FAMILY }}
+          AWS_ECS_CONNECTOR_SERVICE: ${{ vars.AWS_ECS_CONNECTOR_SERVICE }}
+          AWS_ECS_CONNECTOR_FAMILY: ${{ vars.AWS_ECS_CONNECTOR_FAMILY }}
+          AWS_ECS_INGEST_FAMILY: ${{ vars.AWS_ECS_INGEST_FAMILY }}
+          AWS_INGEST_SCHEDULE: ${{ vars.AWS_INGEST_SCHEDULE }}
+          AWS_INGEST_SCHEDULE_GROUP: ${{ vars.AWS_INGEST_SCHEDULE_GROUP }}
+          AWS_EKS_CLUSTER: ${{ vars.AWS_EKS_CLUSTER }}
+          AWS_EKS_RELEASE: ${{ vars.AWS_EKS_RELEASE }}
+          AWS_EKS_NAMESPACE: ${{ vars.AWS_EKS_NAMESPACE }}
+          AWS_EKS_CHART: ${{ vars.AWS_EKS_CHART }}
+          AWS_EKS_REGION: ${{ vars.AWS_EKS_REGION }}
+
+  deploy-gcp:
+    runs-on: ubuntu-latest
+    environment: verdict-cd-gcp
+    outputs:
+      configured: ${{ steps.cfg.outputs.configured }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Is GCP configured?
+        id: cfg
+        env:
+          MARKER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        run: |
+          if [ -n "$MARKER" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GCP is not configured (GCP_WORKLOAD_IDENTITY_PROVIDER is unset on its environment); skipping."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db  # v3.0.1
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      # The variables are ci-gcp's `repository_variables` output.
+      - name: Deploy
+        if: steps.cfg.outputs.configured == 'true'
+        run: scripts/deploy_gcp.sh "${GITHUB_SHA::12}"
+        env:
+          FORGD_IMAGE_NAME: ${{ vars.FORGD_IMAGE_NAME }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_ARTIFACT_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
+          GCP_DEPLOY_TARGET: ${{ vars.GCP_DEPLOY_TARGET }}
+          GCP_IMAGE_PLATFORM: ${{ vars.GCP_IMAGE_PLATFORM }}
+          GCP_ALLOW_CROSS_BUILD: ${{ vars.GCP_ALLOW_CROSS_BUILD }}
+          FORGD_VERDICT_URL: ${{ vars.FORGD_VERDICT_URL }}
+          FORGD_COLLECTOR_URL: ${{ vars.FORGD_COLLECTOR_URL }}
+          FORGD_DASHBOARD_URL: ${{ vars.FORGD_DASHBOARD_URL }}
+          FORGD_CONNECTOR_URL: ${{ vars.FORGD_CONNECTOR_URL }}
+          FORGD_INTAKE_URL: ${{ vars.FORGD_INTAKE_URL }}
+          GCP_RUN_VERDICT_SERVICE: ${{ vars.GCP_RUN_VERDICT_SERVICE }}
+          GCP_RUN_COLLECTOR_SERVICE: ${{ vars.GCP_RUN_COLLECTOR_SERVICE }}
+          GCP_RUN_DASHBOARD_SERVICE: ${{ vars.GCP_RUN_DASHBOARD_SERVICE }}
+          GCP_RUN_INTAKE_SERVICE: ${{ vars.GCP_RUN_INTAKE_SERVICE }}
+          GCP_RUN_CONNECTOR_SERVICE: ${{ vars.GCP_RUN_CONNECTOR_SERVICE }}
+          GCP_RUN_INGEST_JOB: ${{ vars.GCP_RUN_INGEST_JOB }}
+          GCP_GKE_CLUSTER: ${{ vars.GCP_GKE_CLUSTER }}
+          GCP_GKE_LOCATION: ${{ vars.GCP_GKE_LOCATION }}
+          GCP_GKE_NAMESPACE: ${{ vars.GCP_GKE_NAMESPACE }}
+          GCP_GKE_RELEASE: ${{ vars.GCP_GKE_RELEASE }}
+          GCP_GKE_CHART: ${{ vars.GCP_GKE_CHART }}
+
+  no-deploy-target:
+    needs: [deploy, deploy-aws, deploy-gcp]
+    if: "!cancelled() && needs.deploy.outputs.configured != 'true' && needs.deploy-aws.outputs.configured != 'true' && needs.deploy-gcp.outputs.configured != 'true'"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse a run that deploys nothing
+        run: |
+          echo "::error::No deploy target is configured: set AZURE_CD_CLIENT_ID on the verdict-cd-azure environment (Azure), AWS_DEPLOY_ROLE_ARN on verdict-cd-aws (AWS) or GCP_WORKLOAD_IDENTITY_PROVIDER on verdict-cd-gcp (GCP)."
+          exit 1

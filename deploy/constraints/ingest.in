@@ -1,0 +1,4 @@
+# The spaCy model the ingest image installs. Its version must match the
+# spaCy that ingest.txt pins: en_core_web_lg 3.8.0 requires spacy
+# >=3.8.0,<3.9.0. The fragment is the wheel's sha256.
+en-core-web-lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl#sha256=293e9547a655b25499198ab15a525b05b9407a75f10255e405e8c3854329ab63

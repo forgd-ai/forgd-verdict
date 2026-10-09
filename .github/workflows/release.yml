@@ -1,0 +1,748 @@
+name: release
+
+# A tag `v<version>` builds and publishes one release: the two wheels to
+# PyPI, the base and ingest images to GHCR for linux/amd64 and linux/arm64,
+# and the Helm chart to oci://ghcr.io/forgd-ai/charts.
+#
+# A version that is already published, as an image tag or a chart version,
+# fails the release before anything is pushed. Each push step looks its
+# version up again first, so a re-run refuses a push that landed before its
+# job failed rather than repeating it. A release that fails after any push
+# is therefore not resumed: cut the next patch version. The wheels are
+# looked up on PyPI, where only a 404 counts as absent. A GHCR lookup counts
+# "not found" as absent. It also counts "denied" as absent, with a warning,
+# while the repository has no GitHub Release; after the first release a
+# "denied" fails the release, as does any other error.
+#
+# Each image is built once, for both platforms, and pushed with SBOM and
+# provenance attestations. The wheels get a build-provenance attestation
+# just before they go to PyPI. The chart gets one once it is pushed, for
+# its registry digest (stored in GHCR beside it) and for its package file. The image digests, the chart digest and the
+# wheels' sha256 sums are kept as artifacts of the run.
+#
+# Nothing is pushed until the tagged commit is on main and the full ci
+# workflow has passed on it. The images and chart jobs run in the `release`
+# environment, and the PyPI job in `pypi`.
+#
+# The last job creates the GitHub Release: notes generated from the merged
+# pull requests, preceded by the image and chart digests, the Helm values
+# that pin the images by digest and the wheels' sha256 sums, with the
+# wheels and those records attached. It refuses to
+# replace a release that already exists.
+#
+# workflow_dispatch publishes nothing and does not check the commit against
+# main. From a branch it runs ci and builds the wheels, and the images and
+# chart jobs are refused because their environment, `release`, allows only
+# `v*` tags, so the run ends failed. From a `v*` tag the images and chart
+# jobs wait for approval in `release` and build without pushing. Every
+# job is skipped outside this repository, so a fork that pushes a tag runs
+# nothing, and every publishing step requires this repository as well.
+#
+# These checks, the commit on main, the repository and the version lookups,
+# run from the workflow file in the tagged commit, so whoever can push a `v*`
+# tag can remove them. They are not the security boundary. The repository's
+# settings are: a ruleset that limits `v*` tags to release maintainers,
+# required reviewers on the `release` and `pypi` environments, and both
+# environments limited to `v*` tags. docs/RELEASING.md lists them, and what
+# they leave to write access on the repository.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/forgd-ai/forgd-verdict
+  CHART_REPO: oci://ghcr.io/forgd-ai/charts
+  CHART_DIR: deploy/helm/forgd-verdict
+  HELM_VERSION: "3.19.0"
+  HELM_SHA256: "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496"
+  # The images job's builders. Each image is a multi-arch index digest.
+  BINFMT_IMAGE: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+  BUILDX_VERSION: v0.37.2
+  BUILDKIT_IMAGE: moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+jobs:
+  on-main:
+    name: the tagged commit is on main
+    if: github.repository == 'forgd-ai/forgd-verdict'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the tagged commit is on main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          commit=$(git rev-parse "$GITHUB_SHA^{commit}")
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is $commit, which is not on main; tag a commit on main"
+            exit 1
+          fi
+          echo "$commit is on main"
+
+      - name: Main check skipped
+        if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
+        run: echo "::notice::not a tag push; nothing is published, so the commit was not checked against main"
+
+  ci:
+    name: ci
+    if: github.repository == 'forgd-ai/forgd-verdict'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  verify:
+    name: versions match the tag; nothing is published yet
+    if: github.repository == 'forgd-ai/forgd-verdict'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      chart: ${{ steps.version.outputs.chart }}
+      projects: ${{ steps.version.outputs.projects }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # On a tag the version is the tag without its `v`. On a dispatch there is
+      # no tag, so the core's version is the reference the others must match.
+      - name: Check the version sources
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          core=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          hook=$(python3 -c 'import tomllib; print(tomllib.load(open("packaging/forgd-verdict-hook/pyproject.toml", "rb"))["project"]["version"])')
+          core_name=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["name"])')
+          hook_name=$(python3 -c 'import tomllib; print(tomllib.load(open("packaging/forgd-verdict-hook/pyproject.toml", "rb"))["project"]["name"])')
+          pin=$(python3 -c '
+          import tomllib
+          deps = tomllib.load(open("packaging/forgd-verdict-hook/pyproject.toml", "rb"))["project"]["dependencies"]
+          print(next((d.split("==", 1)[1] for d in deps if d.startswith("forgd-verdict==")), ""))')
+          app=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' deploy/helm/forgd-verdict/Chart.yaml)
+          dunder=$(sed -n 's/^__version__ = "\([^"]*\)"$/\1/p' src/forgd_verdict/__init__.py)
+          if [ "$EVENT" = "push" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/v*) version="${GITHUB_REF_NAME#v}" ;;
+              *) echo "::error::not a v* tag: $GITHUB_REF"; exit 1 ;;
+            esac
+          else
+            version="$core"
+          fi
+          N='(0|[1-9][0-9]*)'
+          if ! [[ "$version" =~ ^$N\.$N\.$N$ ]]; then
+            echo "::error::version must be MAJOR.MINOR.PATCH, got '$version'"
+            exit 1
+          fi
+          fail=0
+          check() {
+            if [ "$2" != "$version" ]; then
+              echo "::error::$1 is '$2', expected '$version'"
+              fail=1
+            fi
+          }
+          check "pyproject.toml version" "$core"
+          check "packaging/forgd-verdict-hook/pyproject.toml version" "$hook"
+          check "packaging/forgd-verdict-hook/pyproject.toml forgd-verdict== pin" "$pin"
+          check "deploy/helm/forgd-verdict/Chart.yaml appVersion" "$app"
+          check "src/forgd_verdict/__init__.py __version__" "$dunder"
+          [ "$fail" = 0 ]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          chart=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' "$CHART_DIR/Chart.yaml")
+          [ -n "$chart" ]
+          echo "chart=$chart" >> "$GITHUB_OUTPUT"
+          echo "projects=$core_name $hook_name" >> "$GITHUB_OUTPUT"
+
+      - name: Install helm
+        run: |
+          set -eux
+          tgz=/tmp/helm.tar.gz
+          curl -fsSL -o "$tgz" \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  $tgz" | sha256sum --check --strict
+          tar -xzf "$tgz" -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      # A version already in the registry fails the release, so nothing
+      # published is ever replaced. "Not found" counts as absent. "Denied"
+      # counts as absent only while the repository has no GitHub Release,
+      # and prints a warning; once a release exists it fails the release.
+      # Any other failure of the lookup fails the release. The chart and
+      # images jobs repeat their lookup just before pushing, so a re-run of
+      # a failed job checks again.
+      - name: Check the chart version is new
+        id: chart
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHART_VERSION: ${{ steps.version.outputs.chart }}
+        run: |
+          set -euo pipefail
+          # Succeeds when $GITHUB_REPOSITORY has no GitHub Release; exits 1 if it cannot tell.
+          no_release_yet() {
+            local n
+            n=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq length) \
+              || { echo "::error::could not list the releases of $GITHUB_REPOSITORY"; exit 1; }
+            [ "$n" = 0 ]
+          }
+          echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          err=$(mktemp)
+          if helm show chart "$CHART_REPO/forgd-verdict" --version "$CHART_VERSION" >/dev/null 2>"$err"; then
+            echo "::error::chart forgd-verdict $CHART_VERSION is already in $CHART_REPO; bump version in $CHART_DIR/Chart.yaml"
+            exit 1
+          fi
+          out=$(cat "$err")
+          case "$out" in
+            *"${CHART_REPO#oci://}/forgd-verdict:$CHART_VERSION: not found"*)
+              echo "chart forgd-verdict $CHART_VERSION is not in $CHART_REPO" ;;
+            *[Dd]enied*|*DENIED*|*"403 Forbidden"*|*"status code 403"*)
+              if ! no_release_yet; then
+                echo "::error::could not tell whether chart forgd-verdict $CHART_VERSION is in $CHART_REPO: $out"
+                exit 1
+              fi
+              echo "::warning::GHCR denied the lookup of chart forgd-verdict $CHART_VERSION; $GITHUB_REPOSITORY has no release yet, so the chart is taken to be absent: $out" ;;
+            *)
+              echo "::error::could not tell whether chart forgd-verdict $CHART_VERSION is in $CHART_REPO: $out"
+              exit 1 ;;
+          esac
+
+      # The same rule for both image tags.
+      - name: Check the image tags are new
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Succeeds when $GITHUB_REPOSITORY has no GitHub Release; exits 1 if it cannot tell.
+          no_release_yet() {
+            local n
+            n=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq length) \
+              || { echo "::error::could not list the releases of $GITHUB_REPOSITORY"; exit 1; }
+            [ "$n" = 0 ]
+          }
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for tag in "$VERSION" "$VERSION-ingest"; do
+            err=$(mktemp)
+            if docker buildx imagetools inspect "$IMAGE:$tag" >/dev/null 2>"$err"; then
+              echo "::error::$IMAGE:$tag is already published; cut a new version"
+              exit 1
+            fi
+            out=$(cat "$err")
+            case "$out" in
+              *"not found"*) echo "$IMAGE:$tag is not published" ;;
+              *[Dd]enied*|*DENIED*|*"403 Forbidden"*|*"status code 403"*)
+                if ! no_release_yet; then
+                  echo "::error::could not tell whether $IMAGE:$tag is published: $out"
+                  exit 1
+                fi
+                echo "::warning::GHCR denied the lookup of $IMAGE:$tag; $GITHUB_REPOSITORY has no release yet, so the tag is taken to be absent: $out" ;;
+              *) echo "::error::could not tell whether $IMAGE:$tag is published: $out"; exit 1 ;;
+            esac
+          done
+
+      # PyPI answers 404 for a version it does not have, and for a project
+      # that does not exist yet; 200 means the version is published. Any
+      # other answer, or a curl failure, fails the release. The PyPI job
+      # repeats the lookup before attesting and publishing.
+      - name: Check the PyPI versions are new
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PROJECTS: ${{ steps.version.outputs.projects }}
+        run: |
+          set -euo pipefail
+          [ -n "$PROJECTS" ] || { echo "::error::no PyPI projects to look up"; exit 1; }
+          for name in $PROJECTS; do
+            url="https://pypi.org/pypi/$name/$VERSION/json"
+            err=$(mktemp)
+            if ! code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' "$url" 2>"$err"); then
+              echo "::error::could not tell whether $name $VERSION is on PyPI: curl failed: $(cat "$err")"
+              exit 1
+            fi
+            case "$code" in
+              404) echo "$name $VERSION is not on PyPI" ;;
+              200) echo "::error::$name $VERSION is already on PyPI; cut a new version"; exit 1 ;;
+              *) echo "::error::could not tell whether $name $VERSION is on PyPI: HTTP $code from $url"; exit 1 ;;
+            esac
+          done
+
+      - name: Chart version lookup skipped
+        if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict') }}
+        run: echo "::notice::not a tag push in forgd-ai/forgd-verdict; the chart version, image tags and PyPI versions were not looked up, so this run does not test the version lookups, the first-release \"denied\" path included"
+
+  wheels:
+    name: wheels
+    if: github.repository == 'forgd-ai/forgd-verdict'
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      - name: Build forgd-verdict and forgd-verdict-hook
+        run: scripts/build_wheels.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wheels
+          path: dist/*.whl
+          if-no-files-found: error
+
+      # Outside dist/, which the PyPI job publishes whole.
+      - name: Hash the wheels
+        run: (cd dist && sha256sum *.whl) > "$RUNNER_TEMP/wheel-sha256.txt"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: wheel-sha256
+          path: ${{ runner.temp }}/wheel-sha256.txt
+          if-no-files-found: error
+
+      # The hashed runtime dependencies deploy/MDM.md installs the wheels with.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: hook-constraints
+          path: deploy/constraints/hook.txt
+          if-no-files-found: error
+
+  images:
+    name: image (${{ matrix.target }})
+    if: github.repository == 'forgd-ai/forgd-verdict'
+    needs: [verify, on-main, ci]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: base
+            suffix: ""
+          - target: ingest
+            suffix: "-ingest"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+        with:
+          image: ${{ env.BINFMT_IMAGE }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check the image tag is still new
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.version }}${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          # Succeeds when $GITHUB_REPOSITORY has no GitHub Release; exits 1 if it cannot tell.
+          no_release_yet() {
+            local n
+            n=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq length) \
+              || { echo "::error::could not list the releases of $GITHUB_REPOSITORY"; exit 1; }
+            [ "$n" = 0 ]
+          }
+          err=$(mktemp)
+          if docker buildx imagetools inspect "$IMAGE:$TAG" >/dev/null 2>"$err"; then
+            echo "::error::$IMAGE:$TAG is already published; cut a new version"
+            exit 1
+          fi
+          out=$(cat "$err")
+          case "$out" in
+            *"not found"*) echo "$IMAGE:$TAG is not published" ;;
+            *[Dd]enied*|*DENIED*|*"403 Forbidden"*|*"status code 403"*)
+              if ! no_release_yet; then
+                echo "::error::could not tell whether $IMAGE:$TAG is published: $out"
+                exit 1
+              fi
+              echo "::warning::GHCR denied the lookup of $IMAGE:$TAG; $GITHUB_REPOSITORY has no release yet, so the tag is taken to be absent: $out" ;;
+            *) echo "::error::could not tell whether $IMAGE:$TAG is published: $out"; exit 1 ;;
+          esac
+
+      # One build for both platforms. It pushes only on a tag push in this
+      # repository, with SBOM and provenance attestations in the index.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          build-args: FORGD_BUILD_COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ needs.verify.outputs.version }}${{ matrix.suffix }}
+          provenance: mode=max
+          sbom: true
+          push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict' }}
+
+      - name: Record the image digest
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        env:
+          REF: ${{ env.IMAGE }}:${{ needs.verify.outputs.version }}${{ matrix.suffix }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$DIGEST" | grep -qxE 'sha256:[0-9a-f]{64}'; then
+            echo "::error::the build reported no digest for $REF: '$DIGEST'"
+            exit 1
+          fi
+          printf '%s %s\n' "$REF" "$DIGEST" > "$RUNNER_TEMP/image-digest.txt"
+
+      - if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: image-digest-${{ matrix.target }}
+          path: ${{ runner.temp }}/image-digest.txt
+          if-no-files-found: error
+
+  chart:
+    name: chart
+    if: github.repository == 'forgd-ai/forgd-verdict'
+    needs: [verify, on-main, ci]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install helm
+        run: |
+          set -eux
+          tgz=/tmp/helm.tar.gz
+          curl -fsSL -o "$tgz" \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  $tgz" | sha256sum --check --strict
+          tar -xzf "$tgz" -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      # The chart carries the repository's LICENSE and NOTICE, checked in the
+      # package against the files at the root.
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          cp LICENSE NOTICE "$CHART_DIR/"
+          helm lint "$CHART_DIR"
+          mkdir -p "$RUNNER_TEMP/chart"
+          helm package "$CHART_DIR" --destination "$RUNNER_TEMP/chart"
+          version=$(helm show chart "$CHART_DIR" | sed -n 's/^version: //p')
+          package="$RUNNER_TEMP/chart/forgd-verdict-$version.tgz"
+          # Listed once: under pipefail, grep -q closing the pipe early makes
+          # GNU tar fail with SIGPIPE on a match.
+          listing=$(tar -tzf "$package")
+          for f in LICENSE NOTICE; do
+            if ! grep -qx "forgd-verdict/$f" <<<"$listing"; then
+              echo "::error::$f is not in $package"
+              exit 1
+            fi
+            if ! tar -xzOf "$package" "forgd-verdict/$f" | cmp -s - "$f"; then
+              echo "::error::forgd-verdict/$f in $package differs from $f"
+              exit 1
+            fi
+          done
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Push
+        id: push
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ steps.package.outputs.package }}
+          CHART_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Succeeds when $GITHUB_REPOSITORY has no GitHub Release; exits 1 if it cannot tell.
+          no_release_yet() {
+            local n
+            n=$(gh release list -R "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 --json tagName --jq length) \
+              || { echo "::error::could not list the releases of $GITHUB_REPOSITORY"; exit 1; }
+            [ "$n" = 0 ]
+          }
+          echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          err=$(mktemp)
+          if helm show chart "$CHART_REPO/forgd-verdict" --version "$CHART_VERSION" >/dev/null 2>"$err"; then
+            echo "::error::chart forgd-verdict $CHART_VERSION is already in $CHART_REPO"
+            exit 1
+          fi
+          case "$(cat "$err")" in
+            *"${CHART_REPO#oci://}/forgd-verdict:$CHART_VERSION: not found"*) ;;
+            *[Dd]enied*|*DENIED*|*"403 Forbidden"*|*"status code 403"*)
+              if ! no_release_yet; then
+                echo "::error::could not tell whether chart forgd-verdict $CHART_VERSION is in $CHART_REPO: $(cat "$err")"
+                exit 1
+              fi
+              echo "::warning::GHCR denied the lookup of chart forgd-verdict $CHART_VERSION; $GITHUB_REPOSITORY has no release yet, so the chart is taken to be absent: $(cat "$err")" ;;
+            *) echo "::error::could not tell whether chart forgd-verdict $CHART_VERSION is in $CHART_REPO: $(cat "$err")"; exit 1 ;;
+          esac
+          out=$(helm push "$PACKAGE" "$CHART_REPO" 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          digest=$(printf '%s\n' "$out" | sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p')
+          if [ -z "$digest" ]; then
+            echo "::error::helm push printed no digest for $CHART_REPO/forgd-verdict:$CHART_VERSION"
+            exit 1
+          fi
+          printf '%s %s\n' "${CHART_REPO#oci://}/forgd-verdict:$CHART_VERSION" "$digest" \
+            > "$RUNNER_TEMP/chart-digest.txt"
+          echo "name=${CHART_REPO#oci://}/forgd-verdict" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: chart-digest
+          path: ${{ runner.temp }}/chart-digest.txt
+          if-no-files-found: error
+
+      # The chart as GHCR serves it, with the attestation stored in the
+      # registry beside it, keyed by the digest helm push printed.
+      - name: Attest the chart
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # The package file, which is the layer `helm pull` writes back.
+      - name: Attest the chart package
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.package }}
+
+  pypi:
+    name: publish to PyPI
+    needs: [verify, on-main, ci, wheels, images, chart]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: wheels
+          path: dist
+
+      - name: Check the PyPI versions are still new
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          PROJECTS: ${{ needs.verify.outputs.projects }}
+        run: |
+          set -euo pipefail
+          [ -n "$PROJECTS" ] || { echo "::error::no PyPI projects to look up"; exit 1; }
+          for name in $PROJECTS; do
+            url="https://pypi.org/pypi/$name/$VERSION/json"
+            err=$(mktemp)
+            if ! code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' "$url" 2>"$err"); then
+              echo "::error::could not tell whether $name $VERSION is on PyPI: curl failed: $(cat "$err")"
+              exit 1
+            fi
+            case "$code" in
+              404) echo "$name $VERSION is not on PyPI" ;;
+              200) echo "::error::$name $VERSION is already on PyPI; cut a new version"; exit 1 ;;
+              *) echo "::error::could not tell whether $name $VERSION is on PyPI: HTTP $code from $url"; exit 1 ;;
+            esac
+          done
+
+      # Here rather than in the wheels job, so only wheels that passed every
+      # gate and are about to be published get an attestation.
+      - name: Attest the wheels
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: dist/*.whl
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+
+  github-release:
+    name: GitHub Release
+    needs: [verify, on-main, ci, wheels, images, chart, pypi]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: wheels
+          path: dist
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: wheel-sha256
+          path: ${{ runner.temp }}/records/wheel-sha256
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: hook-constraints
+          path: ${{ runner.temp }}/records/hook-constraints
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: image-digest-base
+          path: ${{ runner.temp }}/records/image-digest-base
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: image-digest-ingest
+          path: ${{ runner.temp }}/records/image-digest-ingest
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: chart-digest
+          path: ${{ runner.temp }}/records/chart-digest
+
+      # Every record must name exactly what this release published, with a
+      # well-formed digest, and the wheels must match their sums.
+      - name: Write the release notes
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          CHART_VERSION: ${{ needs.verify.outputs.chart }}
+          RECORDS: ${{ runner.temp }}/records
+          OUT: ${{ runner.temp }}/release
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          check() {  # check FILE REF; sets $digest
+            local f=$1 ref=$2 got extra
+            digest=""
+            [ -s "$f" ] || fail "$f is missing or empty"
+            [ "$(wc -l < "$f" | tr -d ' ')" = 1 ] || fail "$f should hold one line"
+            read -r got digest extra < "$f" || true
+            if [ "$got" != "$ref" ] || [ -n "$extra" ]; then
+              fail "$f should be '$ref sha256:<digest>', is '$(cat "$f")'"
+            fi
+            printf '%s\n' "$digest" | grep -qxE 'sha256:[0-9a-f]{64}' \
+              || fail "$f: '$digest' is not a sha256 digest"
+          }
+
+          check "$RECORDS/image-digest-base/image-digest.txt" "$IMAGE:$VERSION"
+          base=$digest
+          check "$RECORDS/image-digest-ingest/image-digest.txt" "$IMAGE:$VERSION-ingest"
+          ingest=$digest
+          chart_ref="${CHART_REPO#oci://}/forgd-verdict:$CHART_VERSION"
+          check "$RECORDS/chart-digest/chart-digest.txt" "$chart_ref"
+          chart=$digest
+
+          sums="$RECORDS/wheel-sha256/wheel-sha256.txt"
+          [ -s "$sums" ] || fail "$sums is missing or empty"
+          if grep -qvE '^[0-9a-f]{64}  [^ ]+$' "$sums"; then
+            fail "$sums has a line that is not '<sha256>  <file>'"
+          fi
+          names=$(awk '{print $2}' "$sums" | LC_ALL=C sort | tr '\n' ' ')
+          want="forgd_verdict-$VERSION-py3-none-any.whl forgd_verdict_hook-$VERSION-py3-none-any.whl "
+          [ "$names" = "$want" ] || fail "$sums lists '$names', expected '$want'"
+          (cd dist && sha256sum --check --strict --quiet "$sums") \
+            || fail "the wheels do not match $sums"
+          hook="$RECORDS/hook-constraints/hook.txt"
+          [ -s "$hook" ] || fail "$hook is missing or empty"
+
+          mkdir -p "$OUT"
+          cp "$hook" "$OUT/hook.txt"
+          { cat "$sums"; (cd "$OUT" && sha256sum hook.txt); } > "$OUT/SHA256SUMS"
+          printf '%s %s\n%s %s\n' "$IMAGE:$VERSION" "$base" "$IMAGE:$VERSION-ingest" "$ingest" \
+            > "$OUT/image-digests.txt"
+          cp "$RECORDS/chart-digest/chart-digest.txt" "$OUT/chart-digest.txt"
+          {
+            echo "## Published artifacts"
+            echo
+            echo "Container images, linux/amd64 and linux/arm64:"
+            echo
+            echo "- \`$IMAGE:$VERSION@$base\`"
+            echo "- \`$IMAGE:$VERSION-ingest@$ingest\`"
+            echo
+            echo "Helm chart:"
+            echo
+            echo "- \`oci://$chart_ref@$chart\`"
+            echo
+            echo "To pin the chart's images by digest (the tags are then ignored):"
+            echo
+            echo '```sh'
+            echo "--set image.repository=$IMAGE \\"
+            echo "--set image.digest=$base \\"
+            echo "--set ingest.image.repository=$IMAGE \\"
+            echo "--set ingest.image.digest=$ingest"
+            echo '```'
+            echo
+            echo "Wheels, on PyPI and attached below, and hook.txt, the hashed dependencies"
+            echo "deploy/MDM.md installs them with (sha256, also in SHA256SUMS):"
+            echo
+            echo '```'
+            cat "$OUT/SHA256SUMS"
+            echo '```'
+            echo
+            echo "Verify a wheel's build provenance with \`gh attestation verify <wheel> --repo $GITHUB_REPOSITORY\`,"
+            echo "the chart's with \`gh attestation verify oci://$chart_ref --repo $GITHUB_REPOSITORY\`"
+            echo "or, on a pulled package, \`gh attestation verify forgd-verdict-$CHART_VERSION.tgz --repo $GITHUB_REPOSITORY\`,"
+            echo "and read an image's provenance with \`docker buildx imagetools inspect <image> --format '{{ json .Provenance }}'\`."
+          } > "$OUT/notes.md"
+          cat "$OUT/notes.md"
+
+      # Only "release not found" counts as absent; a release that already
+      # exists, or a lookup that fails any other way, fails the job.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          OUT: ${{ runner.temp }}/release
+        run: |
+          set -euo pipefail
+          if out=$(gh release view "$GITHUB_REF_NAME" 2>&1); then
+            echo "::error::a release for $GITHUB_REF_NAME already exists; it is not replaced"
+            exit 1
+          fi
+          case "$out" in
+            *"release not found"*) ;;
+            *) echo "::error::could not tell whether a release for $GITHUB_REF_NAME exists: $out"; exit 1 ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file "$OUT/notes.md" --generate-notes \
+            dist/*.whl "$OUT/hook.txt" "$OUT/SHA256SUMS" "$OUT/image-digests.txt" \
+            "$OUT/chart-digest.txt"

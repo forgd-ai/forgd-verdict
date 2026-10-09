@@ -1,0 +1,22 @@
+apiVersion: v2
+name: forgd-verdict
+description: |
+  The six forgd-verdict roles on Kubernetes, from one image: the verdict
+  server Anthropic calls into, the OTLP collector it pushes to, the read-only
+  findings dashboard, the ingest cron for the Compliance and Managed Agents
+  APIs, the intake endpoint for developer hooks, and the findings connector
+  for Claude.
+type: application
+# `version` is the chart's own version. appVersion names the image the
+# chart deploys.
+version: 0.1.0
+appVersion: "0.47.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/forgd-ai/forgd-verdict
+sources:
+  - https://github.com/forgd-ai/forgd-verdict
+keywords:
+  - dlp
+  - claude
+  - anthropic
+  - compliance

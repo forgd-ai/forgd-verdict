@@ -1,0 +1,63 @@
+# This repository deliberately contains structurally valid, non-functional
+# credentials as test fixtures. Without this allowlist, running gitleaks in
+# CI against forgd-verdict's own source reports findings that are all ours,
+# which trains people to ignore the tool.
+#
+# Scoped on the specific literal values rather than on whole paths, so a
+# genuine leak committed anywhere in this repo -- including inside the test
+# suite -- is still reported.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "forgd-verdict test fixtures: planted, non-functional credentials."
+# Applies across every rule, because one fixture value trips several rules
+# (a planted AWS key matches both `aws-access-token` and `generic-api-key`).
+regexes = [
+  # Not a credential: the class name in a type annotation,
+  # `signing_key: Ed25519PrivateKey | None`, which generic-api-key reads as a
+  # key followed by a value. The key itself is never in source.
+  '''Ed25519PrivateKey''',
+  # Planted in the golden frames, detector tests, MDM docs and the load
+  # generator. Not a real key and never has been.
+  '''AKIAQYLPMN5HGZTHX4UQ''',
+  '''ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8''',
+  # A metrics_token fixture in 059482aa's tests/test_protocol.py, replaced
+  # two commits later; history still carries it.
+  '''s3kr1t-0123456789abcdefgh''',
+  # AWS documentation example keys. gitleaks' default config already
+  # allowlists these; T0 flags them, which is the intended tier difference.
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''ASIAY34FZKBOKMUTVV7A''',
+  # Entropy-tier fixtures. These exist precisely because no rule enumerates
+  # their format, so gitleaks' generic-api-key rule catches them on shape --
+  # which is the point of the test and not a leak.
+  '''sk_9fJ2kLmNq8Xv3ZpR7tYw1BcD5eHgA4iO''',
+  '''aG9sZHRoaXNzZWNyZXR2YWx1ZWhlcmUxMjM0''',
+  '''Xk7Qp2Lm9Rt4Yw8Zn5Bv3Cd6Fg1Hj0A''',
+  # base64 of "key=" and the planted AWS key above: adapter 5's test for a
+  # wrapped key, which only the scan's decoded unit finds.
+  '''a2V5PUFLSUFRWUxQTU41SEdaVEhYNFVR''',
+  # The fixture for the gitleaks fail-open tests. It has to be a value
+  # real gitleaks actually matches, because the test asserts the
+  # difference between "ran and found it" and "could not run" -- a value
+  # the tool ignores would pass all three cases. The group keeps the token
+  # out of this file as one string, so GitHub push protection does not read it
+  # as a GitLab token.
+  '''glpat-(?:x7Kq2mNp9wRt4vZs8bLc)''',
+  # Not a credential: the literal word SECRET in an illustrative OTLP URL,
+  # `...?api_key=SECRET/v1/logs`. Listed for `gitleaks git`, which scans
+  # every commit, so a history that contains the example would otherwise
+  # report it.
+  # gitleaks matches an allowlist regex against the SECRET it
+  # extracted, not the whole match, and here that is
+  # `SECRET/v1/logs`.
+  '''SECRET/v1/logs''',
+]
+paths = [
+  # Build artefacts and virtualenvs are not source.
+  '''\.venv/''',
+  '''__pycache__/''',
+  '''\.pytest_cache/''',
+]
