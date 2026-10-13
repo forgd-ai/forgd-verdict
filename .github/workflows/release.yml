@@ -535,6 +535,16 @@ jobs:
           path: ${{ runner.temp }}/chart-digest.txt
           if-no-files-found: error
 
+      # `helm registry login` writes Helm's own credential store; the
+      # attestation is pushed with Docker's, so it needs this login too.
+      - name: Log in to GHCR for the attestation
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # The chart as GHCR serves it, with the attestation stored in the
       # registry beside it, keyed by the digest helm push printed.
       - name: Attest the chart
