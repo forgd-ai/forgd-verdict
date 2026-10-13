@@ -1,6 +1,6 @@
 [project]
 name = "forgd-verdict"
-version = "0.47.0"
+version = "1.0.0"
 description = "One OSS scan core, six thin adapters, for Claude Enterprise DLP control points."
 dynamic = ["readme"]
 requires-python = ">=3.11"
