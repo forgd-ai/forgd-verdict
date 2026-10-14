@@ -31,24 +31,22 @@ settings before the first `v*` tag is pushed.
    "Restrict updates" and "Restrict deletions". Its bypass list holds only
    the release maintainers. Nobody else can create, move or delete a `v*`
    tag.
-2. **Required reviewers on `release` and `pypi`.** Under Environments,
-   both environments list release maintainers as required reviewers, with
-   "Prevent self-review" on and "Allow administrators to bypass configured
-   protection rules" off. The images, chart and GitHub Release jobs run in
-   `release` and the PyPI job in `pypi`; none of them starts until a
-   reviewer other than the person who started the run approves it. A
-   release asks for three approvals, in this order: `release` (images and
-   chart), then `pypi`, then `release` again (GitHub Release). For
-   the images, chart and Release this holds only while the tagged
-   workflow names `release`, because the tag pusher chooses that file;
-   the PyPI trusted publisher's environment pin (item 4) is the gate a
-   tagged commit cannot remove. "Prevent self-review" blocks whoever
+2. **Required reviewers on `pypi`.** Under Environments, `pypi` lists
+   release maintainers as required reviewers, with "Prevent self-review"
+   on and "Allow administrators to bypass configured protection rules"
+   off. The images, chart and PyPI jobs all run in `pypi` and wait for it
+   at the same time, so a release asks for one approval, and none of them
+   starts until a reviewer other than the person who started the run
+   approves it. The GitHub Release job runs after all three have
+   succeeded and has no environment. For the images, chart and Release
+   this holds only while the tagged workflow names `pypi`, because the tag
+   pusher chooses that file; the PyPI trusted publisher's environment pin
+   (item 4) is the gate a tagged commit cannot remove. "Prevent self-review" blocks whoever
    started the run, which on a re-run is whoever clicked re-run, so a
    re-run is approved by someone other than the tag pusher too.
-3. **Deployment limited to `v*` tags.** On both environments, "Deployment
-   branches and tags" is set to selected tags matching `v*`, with no
-   branch. A job on a branch, a dispatch from a branch included, cannot
-   use either environment. A dispatch from a branch runs ci and builds the
+3. **Deployment limited to `v*` tags.** On `pypi`, "Deployment branches
+   and tags" is set to selected tags matching `v*`, with no branch. A job
+   on a branch, a dispatch from a branch included, cannot use it. A dispatch from a branch runs ci and builds the
    wheels, then the images and chart jobs are refused and the run ends
    failed, having published nothing.
 4. **A trusted publisher on each PyPI project, naming the `pypi`
@@ -58,9 +56,10 @@ settings before the first `v*` tag is pushed.
    `forgd-verdict`, workflow `release.yml` and environment `pypi`. PyPI
    then issues an upload token only to a job running in `pypi`, which the
    settings above gate. Add both before the first tag: the PyPI job runs
-   after the images and chart are pushed, so an upload PyPI refuses
-   leaves the version on GHCR and not on PyPI, and the release is
-   finished by cutting the next patch version.
+   alongside the images and chart, so an upload PyPI refuses leaves the
+   version on GHCR and not on PyPI, and the release is finished by cutting
+   the next patch version. A failed image or chart push likewise leaves
+   the version on PyPI and is finished the same way.
 5. **The `@forgd-ai/forgd-verdict-maintainers` team.** `.github/CODEOWNERS`
    names it as the owner of every path. Under the organization's Teams,
    create it with the release maintainers as members, and give it Write
@@ -85,7 +84,7 @@ The images, the chart and the GitHub Release are pushed with the run's
 any workflow in the repository that asks for `packages: write` or
 `contents: write` gets it, on any branch. Write access to the repository
 is therefore enough to push to `ghcr.io/forgd-ai` and to create a release
-without the `release` environment. Only PyPI is behind the environment
+without the `pypi` environment. Only PyPI is behind the environment
 alone. Keep write access to the repository to people who may publish.
 
 ## First release
@@ -137,11 +136,11 @@ pull request. Both run from a clean `main` that matches `origin/main`.
    - `v<version>` exists neither locally nor on `origin`.
 
    Then it creates the annotated tag and pushes the tag alone.
-4. **Approve.** The tag starts `release.yml`, which asks for three
-   approvals, in this order: `release` (images and chart), then `pypi`,
-   then `release` again (GitHub Release). Each waits until the jobs before
-   it have finished. The reviewer checks the tagged commit as described
-   above before the first approval.
+4. **Approve.** The tag starts `release.yml`, which runs ci and builds
+   the wheels, then asks for one approval in `pypi`. That approval starts
+   the images, chart and PyPI jobs together; the GitHub Release follows
+   once they have succeeded. The reviewer checks the tagged commit as
+   described above before approving.
 
 ## A fork's deploy workflow
 
@@ -168,6 +167,6 @@ on them.
 
 No test in this repository can see them. A `v*` tag pushed by someone
 outside the ruleset's bypass list is refused before any workflow runs. On
-the first release, before anyone approves, confirm that the `release` and
-`pypi` jobs are waiting for review and that the person who pushed the tag
-is not offered the approval.
+the first release, before anyone approves, confirm that the images, chart
+and PyPI jobs are waiting for review in `pypi` and that the person who
+pushed the tag is not offered the approval.

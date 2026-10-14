@@ -164,8 +164,8 @@ CHECK
 
 Tagged v$VERSION and pushed the tag. The tag publishes the release: it runs
 .github/workflows/release.yml, which pushes the base and ingest images and
-the Helm chart to GHCR and the two wheels to PyPI, once the release and
-pypi environments are approved.
+the Helm chart to GHCR and the two wheels to PyPI, once the pypi
+environment is approved.
 
   gh run watch \$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
 EOF
