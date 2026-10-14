@@ -21,8 +21,10 @@ name: release
 # wheels' sha256 sums are kept as artifacts of the run.
 #
 # Nothing is pushed until the tagged commit is on main and the full ci
-# workflow has passed on it. The images and chart jobs run in the `release`
-# environment, and the PyPI job in `pypi`.
+# workflow has passed on it. The images, chart and PyPI jobs run in the
+# `pypi` environment and start together, so one approval covers all three.
+# They do not wait for each other: if one fails after another has published,
+# the release is finished by cutting the next patch version.
 #
 # The last job creates the GitHub Release: notes generated from the merged
 # pull requests, preceded by the image and chart digests, the Helm values
@@ -32,9 +34,9 @@ name: release
 #
 # workflow_dispatch publishes nothing and does not check the commit against
 # main. From a branch it runs ci and builds the wheels, and the images and
-# chart jobs are refused because their environment, `release`, allows only
+# chart jobs are refused because their environment, `pypi`, allows only
 # `v*` tags, so the run ends failed. From a `v*` tag the images and chart
-# jobs wait for approval in `release` and build without pushing. Every
+# jobs wait for approval in `pypi` and build without pushing. Every
 # job is skipped outside this repository, so a fork that pushes a tag runs
 # nothing, and every publishing step requires this repository as well.
 #
@@ -42,8 +44,8 @@ name: release
 # run from the workflow file in the tagged commit, so whoever can push a `v*`
 # tag can remove them. They are not the security boundary. The repository's
 # settings are: a ruleset that limits `v*` tags to release maintainers,
-# required reviewers on the `release` and `pypi` environments, and both
-# environments limited to `v*` tags. docs/RELEASING.md lists them, and what
+# required reviewers on the `pypi` environment, and that environment limited
+# to `v*` tags. docs/RELEASING.md lists them, and what
 # they leave to write access on the repository.
 on:
   push:
@@ -328,7 +330,7 @@ jobs:
     if: github.repository == 'forgd-ai/forgd-verdict'
     needs: [verify, on-main, ci]
     runs-on: ubuntu-latest
-    environment: release
+    environment: pypi
     permissions:
       contents: read
       packages: write
@@ -436,7 +438,7 @@ jobs:
     if: github.repository == 'forgd-ai/forgd-verdict'
     needs: [verify, on-main, ci]
     runs-on: ubuntu-latest
-    environment: release
+    environment: pypi
     permissions:
       contents: read
       packages: write
@@ -564,7 +566,7 @@ jobs:
 
   pypi:
     name: publish to PyPI
-    needs: [verify, on-main, ci, wheels, images, chart]
+    needs: [verify, on-main, ci, wheels]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
     runs-on: ubuntu-latest
     environment: pypi
@@ -615,7 +617,6 @@ jobs:
     needs: [verify, on-main, ci, wheels, images, chart, pypi]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'forgd-ai/forgd-verdict'
     runs-on: ubuntu-latest
-    environment: release
     permissions:
       contents: write
     steps:
