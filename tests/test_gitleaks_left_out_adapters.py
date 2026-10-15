@@ -29,9 +29,10 @@ COVERED = {
     "server/app.py", "otel/app.py", "compliance/scanner.py", "managed/scanner.py",
     "intake/app.py", "cli.py", "hook/cli.py",
 }
-# Modules that build detectors only to screen labels, log values or names.
+# Modules that build detectors only to screen labels, log values or names,
+# or, in policycheck.py, to check a policy without scanning.
 NO_VERDICT = {
-    "compliance/ingest.py", "connector/app.py", "dashboard/app.py",
+    "compliance/ingest.py", "connector/app.py", "dashboard/app.py", "policycheck.py",
 }
 
 

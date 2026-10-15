@@ -10,7 +10,8 @@
     forgd-verdict overrides   show or change the runtime overrides (audited)
     forgd-verdict scan        scan a file or stdin with the same core; exits 1
                               on a deny, 3 when a blocking tier did not run
-    forgd-verdict policy      show the effective merged policy
+    forgd-verdict policy      show the effective merged policy; with --check,
+                              exit 2 naming each role that would not start
     forgd-verdict gitleaks-config --role ROLE
                               print the config ROLE's gitleaks daemon must load
 """
@@ -23,6 +24,8 @@ import logging
 import sys
 
 EXIT_INCOMPLETE = 3
+# policycheck.ROLES; repeated so `--help` does not import the check.
+ROLES = ("server", "collector", "intake", "dashboard", "connector", "compliance")
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
@@ -90,6 +93,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 
 def _cmd_policy(args: argparse.Namespace) -> int:
+    if args.check:
+        return _check_policy(args)
     from .policy import PolicyInvalid, load_policy, redacted
 
     try:
@@ -102,6 +107,20 @@ def _cmd_policy(args: argparse.Namespace) -> int:
         d.name for d in policy.build_detectors(include_local_only=True, profile="dashboard")
     ]
     print(json.dumps(effective, indent=2))
+    return 0
+
+
+def _check_policy(args: argparse.Namespace) -> int:
+    """0 when every role checked would start on the policy; 2, with one line
+    per refusal on stderr, when any would not."""
+    from .policycheck import check
+
+    path, roles, refusals = check(args.policy, args.role or ())
+    for r in refusals:
+        print(f"forgd-verdict policy: {path}: {r.role}: {r.message}", file=sys.stderr)
+    if refusals:
+        return 2
+    print(f"ok: {path}: {', '.join(roles)}")
     return 0
 
 
@@ -903,6 +922,15 @@ def main(argv: list[str] | None = None) -> int:
     p_scan.set_defaults(func=_cmd_scan)
 
     p_policy = sub.add_parser("policy", help="print the effective merged policy")
+    # Also accepted after the subcommand, where `--check` invites it.
+    p_policy.add_argument("--policy", default=argparse.SUPPRESS, help="path to policy.yaml")
+    p_policy.add_argument(
+        "--check", action="store_true",
+        help="build each role from the policy without serving; exit 2 naming "
+             "every role that would refuse to start")
+    p_policy.add_argument(
+        "--role", action="append", choices=ROLES, metavar="ROLE",
+        help=f"with --check, check only this role (repeatable): {', '.join(ROLES)}")
     p_policy.set_defaults(func=_cmd_policy)
 
     p_glc = sub.add_parser("gitleaks-config",

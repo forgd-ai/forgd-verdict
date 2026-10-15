@@ -987,7 +987,8 @@ class Policy:
 
     def build_detectors(self, *, include_local_only: bool = False,
                         salt: str | None = None,
-                        profile: str | None = None) -> list[Any]:
+                        profile: str | None = None,
+                        probe: bool = True) -> list[Any]:
         """Instantiate the enabled detectors, in tier order.
 
         `enabled: auto` means "on if the dependency is present". A detector
@@ -1000,6 +1001,11 @@ class Policy:
         With `profile=None` a configured plugin is skipped. A name under any
         `detectors:` section that is neither a built-in nor an allowlisted
         detector plugin raises, whatever the profile.
+
+        `probe=False` builds every enabled detector without asking whether it
+        can run here: no binary lookup, daemon connection, model load or
+        `available()` call, and no comparison with the config the gitleaks
+        daemon loaded. `forgd-verdict policy --check` builds them this way.
         """
         # `salt` overrides the policy's, for a caller whose salt is not a
         # deployment secret. The hook uses a per-device one: the deployment
@@ -1016,7 +1022,7 @@ class Policy:
             if cfg is None or cfg.enabled is False:
                 return
             detector = factory(cfg.severity, salt)
-            if detector.available():
+            if not probe or detector.available():
                 built.append(detector)
             elif cfg.enabled is True or getattr(detector, "required", False):
                 # `required` covers the case `auto` cannot: a detector
@@ -1043,7 +1049,8 @@ class Policy:
         gl = self.raw["detectors"].get("gitleaks") or {}
 
         def gitleaks(sev: str, salt: str) -> GitleaksDetector:
-            self._refuse_daemon_config_mismatch()
+            if probe:
+                self._refuse_daemon_config_mismatch()
             return GitleaksDetector(
                 sev,
                 salt,
@@ -1068,7 +1075,7 @@ class Policy:
         add("llmguard_pii", lambda sev, salt: LLMGuardPIIDetector(sev, salt))
         if profile is not None:
             built.extend(self._plugin_detectors(allow, cfgs, profile, salt,
-                                                include_local_only, list(built)))
+                                                include_local_only, list(built), probe))
         built.sort(key=lambda d: d.tier)
         return built
 
@@ -1103,7 +1110,8 @@ class Policy:
 
     def _plugin_detectors(self, allow: Mapping[str, PluginAllow],
                           cfgs: Mapping[str, DetectorConfig], profile: str, salt: str,
-                          include_local_only: bool, builtins: list[Any]) -> list[Any]:
+                          include_local_only: bool, builtins: list[Any],
+                          probe: bool = True) -> list[Any]:
         wanted = [e for name, e in allow.items()
                   if name in cfgs and cfgs[name].enabled is not False]
         factories = load_plugins(wanted, "detectors", profile, set(RESERVED_DETECTOR_NAMES))
@@ -1131,7 +1139,7 @@ class Policy:
             prefixes[det.finding_prefix] = name
             if det.local_only and not include_local_only:
                 continue
-            if det.available():
+            if not probe or det.available():
                 out.append(det)
             elif cfg.enabled is True:
                 raise RuntimeError(
