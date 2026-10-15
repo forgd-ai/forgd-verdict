@@ -1,4 +1,4 @@
-"""scripts/verify_deployment.sh — the gate that decides whether a deploy finishes.
+"""verify_deployment.sh — the gate that decides whether a deploy finishes.
 
 Every deployment path calls this script, so a silent regression here would
 mean each of them reporting success while asserting nothing.
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "verify_deployment.sh"
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "src" / "forgd_verdict" / "verify_deployment.sh"
 
 # A healthy service: /healthz 200 with a low uptime, the protected endpoints
 # refusing, the root refusing. Each case overrides only what it is about.
@@ -102,7 +104,7 @@ def stub():
         s.close()
 
 
-def run(verdict="", collector="", dashboard="", **env):
+def run(verdict="", collector="", dashboard="", *, command=None, **env):
     """Run the verifier. Short timeouts so a failing case does not wait 240s."""
     import os
 
@@ -114,7 +116,7 @@ def run(verdict="", collector="", dashboard="", **env):
         **{k: str(v) for k, v in env.items()},
     }
     return subprocess.run(
-        ["bash", str(SCRIPT), verdict, collector, dashboard],
+        [*(command or ["bash", str(SCRIPT)]), verdict, collector, dashboard],
         capture_output=True, text=True, timeout=180, env=environ,
     )
 
@@ -130,6 +132,29 @@ def test_a_healthy_stack_passes_every_assertion(stub):
                       "dashboard.root-requires-auth"):
         assert f"PASS [{assertion}]" in out, out
     assert "7 assertion(s) passed" in out
+
+
+def test_the_cli_runs_the_packaged_script(stub):
+    r = run(stub(HEALTHY_VERDICT), stub(HEALTHY_COLLECTOR), stub(HEALTHY_DASHBOARD),
+            command=[sys.executable, "-m", "forgd_verdict.cli", "verify-deployment"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "7 assertion(s) passed" in r.stdout + r.stderr
+
+
+def test_the_cli_passes_the_scripts_exit_status_through(stub):
+    r = run(stub({}), "", "",
+            command=[sys.executable, "-m", "forgd_verdict.cli", "verify-deployment"])
+    assert r.returncode == 1, r.stdout + r.stderr
+    usage = subprocess.run([sys.executable, "-m", "forgd_verdict.cli", "verify-deployment"],
+                           capture_output=True, text=True, timeout=30)
+    assert usage.returncode == 2
+    assert "usage: verify_deployment.sh" in usage.stderr
+
+
+def test_the_repository_path_is_the_packaged_script():
+    link = ROOT / "scripts" / "verify_deployment.sh"
+    assert link.is_symlink()
+    assert link.resolve() == SCRIPT
 
 
 # --- the assertions that matter ------------------------------------------
@@ -257,7 +282,6 @@ ENTRYPOINT = Path(__file__).resolve().parent.parent / "deploy" / "entrypoint.sh"
 
 def _run_entrypoint(tmp_path, env):
     import os
-    import sys
 
     # The entrypoint runs whichever `python` PATH finds first. Without this,
     # an unactivated shell handed it a system interpreter lacking PyYAML and

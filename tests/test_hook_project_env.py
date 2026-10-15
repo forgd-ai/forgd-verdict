@@ -674,15 +674,16 @@ SPAWN = r"\b(subprocess\.(run|Popen|call|check_call|check_output)|" \
 
 def test_every_process_the_package_starts_is_reviewed_here():
     """detectors/gitleaks.py runs an absolute `binary` on the hook (or PATH
-    with project overrides), and hook/ship.py runs sys.executable. A new
-    call site anywhere in the package fails this until it is checked
-    against a PATH a project sets."""
+    with project overrides), and hook/ship.py runs sys.executable. cli.py
+    looks up and runs the `bash` on PATH for `verify-deployment`, an operator
+    command the hook never reaches. A new call site anywhere in the package
+    fails this until it is checked against a PATH a project sets."""
     import re
 
     src = Path(__file__).resolve().parents[1] / "src" / "forgd_verdict"
     found = {str(p.relative_to(src)): len(re.findall(SPAWN, p.read_text(encoding="utf-8")))
              for p in src.rglob("*.py") if re.search(SPAWN, p.read_text(encoding="utf-8"))}
-    assert found == {"detectors/gitleaks.py": 3, "hook/ship.py": 1}
+    assert found == {"cli.py": 2, "detectors/gitleaks.py": 3, "hook/ship.py": 1}
 
 
 def test_the_detached_drain_runs_this_interpreter_not_one_on_path(tmp_path, monkeypatch):

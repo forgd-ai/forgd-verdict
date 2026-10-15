@@ -119,8 +119,8 @@ cloud resources ([deploy/terraform/README.md](deploy/terraform/README.md)),
 and on Kubernetes the Helm chart deploys the services
 ([deploy/helm/README.md](deploy/helm/README.md)).
 
-`scripts/verify_deployment.sh` checks a deployment over HTTP alone, with
-no credentials:
+`forgd-verdict verify-deployment` (`scripts/verify_deployment.sh` in a
+checkout) checks a deployment over HTTP alone, with no credentials:
 
 * an unsigned POST to the verdict server must return 401, because a
   200 would mean the app came up accepting unsigned traffic;

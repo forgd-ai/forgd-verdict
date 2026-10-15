@@ -266,3 +266,15 @@ def test_the_notice_says_which_wheel_includes_the_fonts(tmp_path):
     assert "The forgd-verdict wheel, and so both container images, includes these fonts" in notice
     assert "The forgd-verdict-hook wheel and the Helm chart carry this NOTICE but include " \
            "neither the fonts" in notice
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
+def test_the_core_wheel_carries_the_deployment_verifier(tmp_path):
+    """`forgd-verdict verify-deployment` runs the copy inside the wheel, so the
+    verifier a deployment runs comes from the release it rolled."""
+    r = build(tree_copy(tmp_path))
+    assert r.returncode == 0, r.stderr
+    core, hook = (zipfile.ZipFile(line) for line in r.stdout.splitlines())
+    name = "forgd_verdict/verify_deployment.sh"
+    assert core.read(name) == (REPO / "src" / name).read_bytes()
+    assert name not in hook.namelist()
