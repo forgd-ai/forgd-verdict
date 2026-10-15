@@ -697,7 +697,12 @@ jobs:
 
           mkdir -p "$OUT"
           cp "$hook" "$OUT/hook.txt"
-          { cat "$sums"; (cd "$OUT" && sha256sum hook.txt); } > "$OUT/SHA256SUMS"
+          # The verifier is attached as the copy inside the core wheel, which
+          # has just been checked against its sum.
+          unzip -p "dist/forgd_verdict-$VERSION-py3-none-any.whl" \
+            forgd_verdict/verify_deployment.sh > "$OUT/verify_deployment.sh"
+          [ -s "$OUT/verify_deployment.sh" ] || fail "the core wheel has no verify_deployment.sh"
+          { cat "$sums"; (cd "$OUT" && sha256sum hook.txt verify_deployment.sh); } > "$OUT/SHA256SUMS"
           printf '%s %s\n%s %s\n' "$IMAGE:$VERSION" "$base" "$IMAGE:$VERSION-ingest" "$ingest" \
             > "$OUT/image-digests.txt"
           cp "$RECORDS/chart-digest/chart-digest.txt" "$OUT/chart-digest.txt"
@@ -722,8 +727,9 @@ jobs:
             echo "--set ingest.image.digest=$ingest"
             echo '```'
             echo
-            echo "Wheels, on PyPI and attached below, and hook.txt, the hashed dependencies"
-            echo "deploy/MDM.md installs them with (sha256, also in SHA256SUMS):"
+            echo "Wheels, on PyPI and attached below; hook.txt, the hashed dependencies"
+            echo "deploy/MDM.md installs them with; and verify_deployment.sh, the post-roll"
+            echo "check, also run as \`forgd-verdict verify-deployment\` (sha256, also in SHA256SUMS):"
             echo
             echo '```'
             cat "$OUT/SHA256SUMS"
@@ -755,5 +761,5 @@ jobs:
           esac
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
             --notes-file "$OUT/notes.md" --generate-notes \
-            dist/*.whl "$OUT/hook.txt" "$OUT/SHA256SUMS" "$OUT/image-digests.txt" \
-            "$OUT/chart-digest.txt"
+            dist/*.whl "$OUT/hook.txt" "$OUT/verify_deployment.sh" "$OUT/SHA256SUMS" \
+            "$OUT/image-digests.txt" "$OUT/chart-digest.txt"

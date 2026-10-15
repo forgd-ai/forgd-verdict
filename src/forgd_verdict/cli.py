@@ -13,6 +13,9 @@
     forgd-verdict policy      show the effective merged policy
     forgd-verdict gitleaks-config --role ROLE
                               print the config ROLE's gitleaks daemon must load
+    forgd-verdict verify-deployment VERDICT COLLECTOR DASHBOARD
+                              check a deployed stack over HTTP; runs the
+                              verify_deployment.sh this release ships
 """
 
 from __future__ import annotations
@@ -891,6 +894,11 @@ def main(argv: list[str] | None = None) -> int:
         help="run the findings intake (adapter 2's receiving end)",
         add_help=False,
     )
+    sub.add_parser(
+        "verify-deployment",
+        help="check a deployed stack over HTTP (verify_deployment.sh)",
+        add_help=False,
+    )
 
     p_scan = sub.add_parser("scan", help="scan a file or stdin")
     p_scan.add_argument("path", nargs="?", default="-")
@@ -1052,7 +1060,8 @@ def main(argv: list[str] | None = None) -> int:
     passthrough = {"serve": _run_serve, "hook": _run_hook,
                    "dashboard": _run_dashboard, "hook-ship": _run_hook_ship,
                    "collect": _run_collect,
-                   "intake": _run_intake}
+                   "intake": _run_intake,
+                   "verify-deployment": _run_verify_deployment}
     takes_value = {"--policy"}
     i = 0
     while i < len(argv):
@@ -1111,6 +1120,19 @@ def _run_dashboard(rest: list[str], before: list[str]) -> int:
     from .dashboard.__main__ import main as dash_main
 
     return dash_main(rest)
+
+
+def _run_verify_deployment(rest: list[str], before: list[str]) -> int:
+    import shutil
+    import subprocess
+    from importlib.resources import as_file, files
+
+    bash = shutil.which("bash")
+    if bash is None:
+        print("forgd-verdict verify-deployment: bash is not on PATH", file=sys.stderr)
+        return 2
+    with as_file(files("forgd_verdict") / "verify_deployment.sh") as script:
+        return subprocess.call([bash, str(script), *rest])
 
 
 def _merge_policy_flag(rest: list[str], before: list[str]) -> list[str]:

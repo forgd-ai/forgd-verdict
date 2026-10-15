@@ -109,7 +109,7 @@ Run, `store-gcs` takes `app-cloudrun`'s accounts as input, and
      [`values-gke.example.yaml`](../deploy/helm/forgd-verdict/values-gke.example.yaml).
 4. **Point names at it.** On ECS, point each host at `alb_dns_name` and
    register `oidc_redirect_uri` with your identity provider.
-5. **Verify.** Run `scripts/verify_deployment.sh`, described below.
+5. **Verify.** Run `forgd-verdict verify-deployment`, described below.
    `app-aca` and `app-ecs` print the command as their `verify_command`
    output. On Kubernetes, run it against the ingress hostname once the
    chart is installed.
@@ -123,8 +123,14 @@ port](../deploy/helm/README.md#the-shipped-policys-dashboard-auth-does-not-port)
 ## Verify the deployment
 
 ```
-scripts/verify_deployment.sh <verdict-url> <collector-url> <dashboard-url>
+forgd-verdict verify-deployment <verdict-url> <collector-url> <dashboard-url>
 ```
+
+The subcommand runs the copy of `verify_deployment.sh` inside the installed
+package, so with `forgd-verdict==<version>` installed it is the check that
+release ships. It needs `bash` and `curl`. In a checkout,
+`scripts/verify_deployment.sh` is the same file. Each GitHub Release also
+attaches it, with its sha256 in `SHA256SUMS`.
 
 Each argument is a base URL with a scheme and no path. Pass an empty string
 for a service that is not deployed. Leaving an argument out is a usage
