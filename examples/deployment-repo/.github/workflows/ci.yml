@@ -1,0 +1,128 @@
+name: ci
+
+# Checks this repository's files against the release in release.yaml, on
+# every pull request: the policy passes that release's
+# `forgd-verdict policy --check`, the release's chart renders with
+# values.yaml, and infra/ validates with the release's modules. A move to a
+# new release is a pull request changing release.yaml and infra/main.tf's
+# refs, so these checks run against the new release before it is rolled.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: "3.19.0"
+  HELM_SHA256: "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496"
+  TERRAFORM_VERSION: "1.9.8"
+
+jobs:
+  check:
+    name: deployment configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the release
+        id: release
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version: *//p' release.yaml)
+          chart=$(sed -n 's/^chart: *//p' release.yaml)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::release.yaml version '$version'"; exit 1; }
+          [[ "$chart" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::release.yaml chart '$chart'"; exit 1; }
+          { echo "version=$version"; echo "chart=$chart"; } >> "$GITHUB_OUTPUT"
+
+      - name: The modules are the release's
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          refs=$(grep -o '?ref=v[^"]*' infra/main.tf | sort -u)
+          [ "$refs" = "?ref=v$VERSION" ] || {
+            echo "::error::infra/main.tf sources the modules at $(echo $refs), not v$VERSION"; exit 1; }
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      # Every `$VAR` the policy names is set to a placeholder, as the
+      # cluster's Secret and the chart would set it, so the check sees each
+      # role configured. A variable the policy needs in a particular shape
+      # gets a placeholder of that shape in `env`; the rest are generated,
+      # each distinct and long enough to pass as a token. A variable left
+      # unset would be checked as unset, which is how the role treats it.
+      - name: Check the policy
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          FORGD_SINK_ENDPOINT_AZMON: https://dcr-placeholder.westeurope-1.ingest.monitor.azure.com/dataCollectionRules/dcr-0123456789abcdef/streams/Custom-Verdict_CL
+        run: |
+          set -euo pipefail
+          eval "$(python3 - <<'PY'
+          import os, re, shlex
+          lines = open("policy.yaml", encoding="utf-8").read().splitlines()
+          code = "\n".join(line.split("#", 1)[0] for line in lines)
+          names = sorted(set(re.findall(r"\$([A-Z][A-Z0-9_]*)", code)))
+          for i, name in enumerate(names, 1):
+              if name in os.environ:
+                  continue
+              value = (f"00000000-0000-4000-8000-{i:012d}" if name.startswith("FORGD_ORG_ID_")
+                       else f"placeholder-{i:03d}-not-a-real-value-0123456789")
+              print(f"export {name}={shlex.quote(value)}")
+          PY
+          )"
+          uvx --from "forgd-verdict==$VERSION" forgd-verdict policy --policy policy.yaml --check
+
+      - name: Install helm
+        run: |
+          set -eux
+          tgz=/tmp/helm.tar.gz
+          curl -fsSL -o "$tgz" \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  $tgz" | sha256sum --check --strict
+          tar -xzf "$tgz" -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      # The chart must be the one built for the release, and render with the
+      # identifiers deploy.yml passes at roll time, as placeholders.
+      - name: Render the chart
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          CHART: ${{ steps.release.outputs.chart }}
+        run: |
+          set -euo pipefail
+          chart=oci://ghcr.io/forgd-ai/charts/forgd-verdict
+          app=$(helm show chart "$chart" --version "$CHART" | sed -n 's/^appVersion: *//p' | tr -d '"')
+          [ "$app" = "$VERSION" ] || { echo "::error::chart $CHART is appVersion $app, not $VERSION"; exit 1; }
+          helm template forgd "$chart" --version "$CHART" \
+            -n forgd -f values.yaml --set-file policy.inline=policy.yaml \
+            --set image.repository=ghcr.io/forgd-ai/forgd-verdict --set image.tag="$VERSION" \
+            --set ingest.image.repository=ghcr.io/forgd-ai/forgd-verdict --set ingest.image.tag="$VERSION-ingest" \
+            --set store.url=https://account.blob.core.windows.net/findings \
+            --set workloadIdentity.tenantId=00000000-0000-0000-0000-000000000000 \
+            --set serviceAccounts.writer.clientId=00000000-0000-0000-0000-000000000001 \
+            --set serviceAccounts.reader.clientId=00000000-0000-0000-0000-000000000002 \
+            --set dashboard.auth.issuer=https://login.microsoftonline.com/tenant/v2.0 \
+            --set dashboard.auth.jwksUrl=https://login.microsoftonline.com/tenant/discovery/v2.0/keys \
+            --set dashboard.auth.audience=00000000-0000-0000-0000-000000000003 \
+            --set-string orgIds.primary=00000000-0000-4000-8000-000000000001 \
+            > /dev/null
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Validate Terraform
+        run: |
+          set -euo pipefail
+          terraform fmt -check -recursive infra
+          terraform -chdir=infra init -backend=false -input=false > /dev/null
+          terraform -chdir=infra validate

@@ -67,8 +67,8 @@ locals {
   #
   # So they are set here and passed to `helm install` from the outputs
   # below, rather than left to the chart's default naming on one side and
-  # guessed on the other. tests/test_helm_chart.py asserts the chart renders
-  # these same names.
+  # guessed on the other. forgd-verdict's tests/test_helm_chart.py asserts
+  # the chart renders these same names.
   writer_service_account = "forgd-verdict-writer"
   reader_service_account = "forgd-verdict-reader"
 }

@@ -1,0 +1,213 @@
+name: deploy
+
+# Rolls the release in release.yaml to the AKS cluster infra/ built: copies
+# the release's images into your registry (or pulls them from ghcr.io),
+# installs or upgrades the public chart with values.yaml and policy.yaml,
+# checks /healthz reports the release, then runs that release's
+# `forgd-verdict verify-deployment`.
+#
+# Dispatch only, from main. A move to a new release is a pull request that
+# changes release.yaml; merge it, then run this workflow.
+#
+# Authentication is OIDC, as the identity infra/access.tf grants: a
+# federated credential whose subject is
+# `repo:<owner>/<repo>:environment:deploy`. Limit the `deploy` environment
+# to `main`, so a workflow on another branch cannot hold that identity, and
+# add required reviewers if a roll should wait for approval.
+#
+# The runner must reach the cluster's API server. infra/ builds a private
+# cluster by default, which a GitHub-hosted runner cannot reach: set
+# DEPLOY_RUNNER to the label of a self-hosted runner in the cluster's
+# network, or apply infra/ with a public API server limited by
+# api_server_authorized_ip_ranges to addresses the runner uses.
+#
+# Variables on the `deploy` environment. None of them is a secret:
+#   DEPLOY_RUNNER        optional: the runner label (default ubuntu-latest)
+#   NAMESPACE            optional: infra's `namespace` (default forgd)
+#   AZURE_CD_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID  sign-in
+#   AKS_RESOURCE_GROUP, AKS_CLUSTER_NAME                        the cluster
+#   AZURE_ACR            optional: a registry to copy the images into.
+#                        Unset, the cluster pulls from ghcr.io.
+#   STORE_URL            infra's `store_url` output
+#   WRITER_CLIENT_ID     infra's `writer_client_id` output
+#   READER_CLIENT_ID     infra's `reader_client_id` output
+#   ORG_ID_PRIMARY       the organization UUID policy.yaml reads as
+#                        $FORGD_ORG_ID_PRIMARY
+#   DASHBOARD_AUDIENCE   the client id oauth2-proxy signs people in with
+#
+# The identity can write only inside the chart's namespace, so the namespace
+# and the Kubernetes Secret values.yaml names (signing secret, tokens, hash
+# salt, access key) are created once by a cluster admin; the chart's README
+# § Secrets lists the keys.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  HELM_VERSION: "3.19.0"
+  HELM_SHA256: "a7f81ce08007091b86d8bd696eb4d86b8d0f2e1b9f6c714be62f82f96a594496"
+  KUBELOGIN_VERSION: "0.2.21"
+  KUBELOGIN_SHA256: "934a2a9618e018cb9fbeb14f3e4c28416fdae815df7706df91500e41d234eb66"
+
+jobs:
+  deploy:
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
+    environment: deploy
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the release
+        id: release
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version: *//p' release.yaml)
+          chart=$(sed -n 's/^chart: *//p' release.yaml)
+          host=$(yq -r '.ingress.host' values.yaml)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::release.yaml version '$version'"; exit 1; }
+          [[ "$chart" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::release.yaml chart '$chart'"; exit 1; }
+          [[ "$host" =~ ^[a-z0-9.-]+$ ]] || { echo "::error::values.yaml ingress.host '$host'"; exit 1; }
+          { echo "version=$version"; echo "chart=$chart"; echo "url=https://$host"; } >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CD_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install helm
+        run: |
+          set -eux
+          tgz=/tmp/helm.tar.gz
+          curl -fsSL -o "$tgz" \
+            "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  $tgz" | sha256sum --check --strict
+          tar -xzf "$tgz" -C /tmp linux-amd64/helm
+          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: Install kubelogin
+        run: |
+          set -eux
+          zip=/tmp/kubelogin.zip
+          curl -fsSL -o "$zip" \
+            "https://github.com/Azure/kubelogin/releases/download/v${KUBELOGIN_VERSION}/kubelogin-linux-amd64.zip"
+          echo "${KUBELOGIN_SHA256}  $zip" | sha256sum --check --strict
+          unzip -q -d /tmp/kubelogin "$zip"
+          sudo install -m 0755 /tmp/kubelogin/bin/linux_amd64/kubelogin /usr/local/bin/kubelogin
+          kubelogin --version
+
+      # A copy in your own registry is checked against GHCR by digest, so
+      # what runs is what the release published.
+      - name: The release's images
+        id: images
+        env:
+          ACR: ${{ vars.AZURE_ACR }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ACR" ]; then
+            echo "repository=ghcr.io/forgd-ai/forgd-verdict" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for t in "$VERSION" "$VERSION-ingest"; do
+            az acr import -n "$ACR" --source "ghcr.io/forgd-ai/forgd-verdict:$t" \
+              --image "forgd-verdict:$t" --force -o none
+            mirrored=$(az acr repository show -n "$ACR" --image "forgd-verdict:$t" --query digest -o tsv)
+            token=$(curl -fsS "https://ghcr.io/token?scope=repository:forgd-ai/forgd-verdict:pull" | jq -r .token)
+            published=$(curl -fsSI -H "Authorization: Bearer $token" \
+              -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+              "https://ghcr.io/v2/forgd-ai/forgd-verdict/manifests/$t" \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')
+            [ "$mirrored" = "$published" ] || { echo "::error::$t is $mirrored in $ACR and $published on GHCR"; exit 1; }
+            echo "$t $mirrored"
+          done
+          echo "repository=$ACR.azurecr.io/forgd-verdict" >> "$GITHUB_OUTPUT"
+
+      - name: The chart is the release's
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          CHART: ${{ steps.release.outputs.chart }}
+        run: |
+          set -euo pipefail
+          app=$(helm show chart oci://ghcr.io/forgd-ai/charts/forgd-verdict --version "$CHART" | sed -n 's/^appVersion: *//p' | tr -d '"')
+          [ "$app" = "$VERSION" ] || { echo "::error::chart $CHART is appVersion $app, not $VERSION"; exit 1; }
+
+      - name: Get the cluster's credentials
+        env:
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+        run: |
+          set -euo pipefail
+          az aks get-credentials -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+
+      # Every value is passed on every roll, so the release holds nothing
+      # this repository and the environment do not say. Both image tags
+      # move together; the chart's README § Upgrading says why.
+      - name: Roll
+        env:
+          REPOSITORY: ${{ steps.images.outputs.repository }}
+          NAMESPACE: ${{ vars.NAMESPACE || 'forgd' }}
+          VERSION: ${{ steps.release.outputs.version }}
+          CHART: ${{ steps.release.outputs.chart }}
+          TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          STORE_URL: ${{ vars.STORE_URL }}
+          WRITER_CLIENT_ID: ${{ vars.WRITER_CLIENT_ID }}
+          READER_CLIENT_ID: ${{ vars.READER_CLIENT_ID }}
+          ORG_ID_PRIMARY: ${{ vars.ORG_ID_PRIMARY }}
+          DASHBOARD_AUDIENCE: ${{ vars.DASHBOARD_AUDIENCE }}
+        run: |
+          set -euo pipefail
+          helm upgrade --install forgd oci://ghcr.io/forgd-ai/charts/forgd-verdict --version "$CHART" \
+            -n "$NAMESPACE" -f values.yaml \
+            --set image.repository="$REPOSITORY" --set image.tag="$VERSION" \
+            --set ingest.image.repository="$REPOSITORY" --set ingest.image.tag="$VERSION-ingest" \
+            --set store.url="$STORE_URL" \
+            --set workloadIdentity.tenantId="$TENANT_ID" \
+            --set serviceAccounts.writer.clientId="$WRITER_CLIENT_ID" \
+            --set serviceAccounts.reader.clientId="$READER_CLIENT_ID" \
+            --set dashboard.auth.issuer="https://login.microsoftonline.com/$TENANT_ID/v2.0" \
+            --set dashboard.auth.jwksUrl="https://login.microsoftonline.com/$TENANT_ID/discovery/v2.0/keys" \
+            --set dashboard.auth.audience="$DASHBOARD_AUDIENCE" \
+            --set-string orgIds.primary="$ORG_ID_PRIMARY" \
+            --set-file policy.inline=policy.yaml \
+            --wait --timeout 10m
+
+      # A passing verify does not show the roll landed: old pods keep
+      # serving while new ones fail to pull. The build /healthz reports does.
+      - name: Check the build
+        env:
+          URL: ${{ steps.release.outputs.url }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            build=$(curl -fsS --max-time 10 "$URL/healthz" | jq -r .build || true)
+            case "$build" in "$VERSION+"*) echo "build $build"; exit 0 ;; esac
+            sleep 10
+          done
+          echo "::error::/healthz reports build '$build', not $VERSION"
+          exit 1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.9.27"
+
+      # The verifier shipped in the release just rolled.
+      - name: Verify
+        env:
+          URL: ${{ steps.release.outputs.url }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: uvx --from "forgd-verdict==$VERSION" forgd-verdict verify-deployment "$URL" "$URL" "$URL"

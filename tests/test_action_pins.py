@@ -17,7 +17,7 @@ _spec = importlib.util.spec_from_file_location(
 check_workflows = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(check_workflows)
 
-ROOTS = (".github", "examples/github")
+ROOTS = (".github", "examples/github", "examples/deployment-repo/.github")
 FILES = sorted(
     p for root in ROOTS for p in (REPO / root).rglob("*")
     if p.suffix in (".yml", ".yaml") and p.is_file()
@@ -74,6 +74,7 @@ def test_files_are_found():
     assert ".github/workflows/ci.yml" in names
     assert ".github/actions/install-gitleaks/action.yml" in names
     assert "examples/github/deploy.yml" in names
+    assert "examples/deployment-repo/.github/workflows/deploy.yml" in names
 
 
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.relative_to(REPO).as_posix())

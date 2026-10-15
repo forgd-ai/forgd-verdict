@@ -1,0 +1,42 @@
+# This deployment's values for the public chart, without its identifiers.
+# deploy.yml passes those with --set from the `deploy` environment's
+# variables: the store URL, the tenant and the writer and reader client ids,
+# the organization id, and the dashboard's issuer, JWKS URL and audience. It
+# sets the images from release.yaml and passes the policy with
+# --set-file policy.inline=policy.yaml.
+#
+# Every key is described in the chart's values.yaml at the release's tag.
+
+# The dashboard sits behind oauth2-proxy, which signs people in and passes
+# the ID token on as a bearer token; the dashboard verifies it against the
+# issuer's keys. Other proxies: the chart's README, § The shipped policy's
+# dashboard auth does not port.
+dashboard:
+  auth:
+    mode: oidc_jwt
+    header: authorization
+
+ingress:
+  # infra's `ingress_class_name` output.
+  className: webapprouting.kubernetes.azure.com
+  host: verdict.example.com
+  tls:
+    clusterIssuer: letsencrypt
+  dashboard:
+    annotations:
+      nginx.ingress.kubernetes.io/auth-url: https://verdict.example.com/oauth2/auth
+      nginx.ingress.kubernetes.io/auth-signin: https://verdict.example.com/oauth2/start?rd=$escaped_request_uri
+      nginx.ingress.kubernetes.io/auth-response-headers: Authorization
+      nginx.ingress.kubernetes.io/proxy-buffer-size: 32k
+
+# Created outside the chart, so no secret value is stored in the release.
+secrets:
+  existingSecret: forgd-verdict
+
+# Half of each federated subject: these must equal infra's
+# `service_account_names` output.
+serviceAccounts:
+  writer:
+    name: forgd-verdict-writer
+  reader:
+    name: forgd-verdict-reader

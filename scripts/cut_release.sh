@@ -88,19 +88,30 @@ def chart_patch(m):
     return f"version: {major}.{minor}.{patch + 1}"
 
 
-for path, pattern, replacement in (
+# The chart's version as bumped above; the entries run in order.
+def bumped_chart(m):
+    chart = pathlib.Path("deploy/helm/forgd-verdict/Chart.yaml").read_text()
+    return "chart: " + re.search(r"(?m)^version: (\S+)$", chart).group(1)
+
+
+# (path, pattern, replacement[, how many matches it must make, default 1])
+for path, pattern, replacement, *count in (
     ("pyproject.toml", r'(?m)^version = "[^"]+"', f'version = "{version}"'),
     ("src/forgd_verdict/__init__.py", r'(?m)^__version__ = "[^"]+"', f'__version__ = "{version}"'),
     ("deploy/helm/forgd-verdict/Chart.yaml", r'(?m)^appVersion: "[^"]+"', f'appVersion: "{version}"'),
     ("deploy/helm/forgd-verdict/Chart.yaml", r'(?m)^version: (\d+)\.(\d+)\.(\d+)$', chart_patch),
     ("packaging/forgd-verdict-hook/pyproject.toml", r'(?m)^version = "[^"]+"', f'version = "{version}"'),
     ("packaging/forgd-verdict-hook/pyproject.toml", r'"forgd-verdict==[^"]+"', f'"forgd-verdict=={version}"'),
+    ("examples/deployment-repo/release.yaml", r'(?m)^version: \S+$', f"version: {version}"),
+    ("examples/deployment-repo/release.yaml", r'(?m)^chart: \S+$', bumped_chart),
+    ("examples/deployment-repo/infra/main.tf", r'\?ref=v[^"]+"', f'?ref=v{version}"', 3),
 ):
+    want = count[0] if count else 1
     p = pathlib.Path(path)
     text = p.read_text()
-    updated, n = re.subn(pattern, replacement, text, count=1)
-    if n != 1:
-        raise SystemExit(f"could not find the version line in {path}")
+    updated, n = re.subn(pattern, replacement, text, count=want)
+    if n != want:
+        raise SystemExit(f"found {n} version lines in {path}, not {want}")
     p.write_text(updated)
     print(f"  {path}")
 PY
@@ -110,7 +121,9 @@ PY
   # Every file the bump block writes.
   git add pyproject.toml src/forgd_verdict/__init__.py \
           deploy/helm/forgd-verdict/Chart.yaml \
-          packaging/forgd-verdict-hook/pyproject.toml
+          packaging/forgd-verdict-hook/pyproject.toml \
+          examples/deployment-repo/release.yaml \
+          examples/deployment-repo/infra/main.tf
   git commit -q -s -m "release: v$VERSION"
 
   say "pushing $RELEASE_BRANCH"
@@ -142,14 +155,23 @@ chart = pathlib.Path("deploy/helm/forgd-verdict/Chart.yaml").read_text()
 dunder = re.search(r'(?m)^__version__ = "([^"]+)"$', init)
 app = re.search(r'(?m)^appVersion: "?([^"\n]+?)"?$', chart)
 pins = [d.split("==", 1)[1] for d in hook.get("dependencies", []) if d.startswith("forgd-verdict==")]
+example = pathlib.Path("examples/deployment-repo/release.yaml").read_text()
+example_version = re.search(r'(?m)^version: (\S+)$', example)
+example_chart = re.search(r'(?m)^chart: (\S+)$', example)
+chart_version = re.search(r'(?m)^version: (\S+)$', chart)
+refs = re.findall(r'\?ref=v([^"]+)"', pathlib.Path("examples/deployment-repo/infra/main.tf").read_text())
 found = {
     "pyproject.toml version": core.get("version"),
     "src/forgd_verdict/__init__.py __version__": dunder and dunder.group(1),
     "packaging/forgd-verdict-hook/pyproject.toml version": hook.get("version"),
     "packaging/forgd-verdict-hook/pyproject.toml forgd-verdict== pin": pins[0] if pins else None,
     "deploy/helm/forgd-verdict/Chart.yaml appVersion": app and app.group(1),
+    "examples/deployment-repo/release.yaml version": example_version and example_version.group(1),
+    "examples/deployment-repo/infra/main.tf module refs": refs[0] if refs == [version] * 3 else refs,
 }
 wrong = [f"{name} is {value!r}" for name, value in found.items() if value != version]
+if not (example_chart and chart_version and example_chart.group(1) == chart_version.group(1)):
+    wrong.append("examples/deployment-repo/release.yaml chart does not match Chart.yaml's version")
 if wrong:
     raise SystemExit(f"main is not at {version}: " + "; ".join(wrong)
                      + ". Merge the release pull request and pull main first.")

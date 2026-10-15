@@ -201,8 +201,11 @@ _CRED_KEY = re.compile(
 
 def _shipped() -> list[tuple[str, dict]]:
     out = [("DEFAULT_POLICY", json.loads(json.dumps(DEFAULT_POLICY)))]
+    # Under examples/, the policies: examples/policy/ and any policy.yaml. A
+    # deployment example's release.yaml and Helm values are not policies.
     for path in [REPO / "policy.yaml", *sorted(REPO.glob("*/policy.yaml")),
-                 *sorted((REPO / "examples").rglob("*.yaml"))]:
+                 *sorted((REPO / "examples" / "policy").glob("*.yaml")),
+                 *sorted((REPO / "examples").rglob("policy.yaml"))]:
         if path.is_file():
             doc = yaml.safe_load(path.read_text())
             if isinstance(doc, dict):
