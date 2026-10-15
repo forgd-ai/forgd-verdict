@@ -476,21 +476,85 @@ forgd-verdict --policy policy.yaml policy
 
 This prints the effective policy as JSON: the file merged over the
 defaults, with the environment overrides applied, redacted as described
-above. It takes no options of its own. It refuses what loading the
-policy refuses on a service: `hook.enabled_events` naming an event the
-hook does not handle, for one, exits 2 with the reason on stderr. Run it
-on a policy file before rolling it out, in CI or on an admin machine;
-the hook on a laptop only warns about such an event and drops it. It
-does not start a service or make the checks a service makes at startup,
-so a setting that stops a service, such as a missing `stripped_by`,
-still prints.
+above. It refuses what loading the policy refuses on a service:
+`hook.enabled_events` naming an event the hook does not handle, for one,
+exits 2 with the reason on stderr. The hook on a laptop only warns about
+such an event and drops it. Printing does not start a service or make the
+checks a service makes at startup, so a setting that stops a service, such
+as a missing `stripped_by`, still prints. `--check` makes them.
+
+### Checking a policy before a roll
+
+```bash
+pip install 'forgd-verdict==<version>'
+forgd-verdict policy --check --policy policy.yaml
+```
+
+`--check` builds each role from the policy the way its entry point does,
+then closes it without serving, and reports every role that would refuse
+to start. It exits 0, printing `ok: <path>: <roles>`, or 2 with one line
+per refusal on stderr. The roles' startup warnings are printed too:
+
+```
+forgd-verdict policy: policy.yaml: collector: ValueError: otel.orgs entry 'primary' has a token but no id. ...
+```
+
+Install the version you are about to roll: the check is that release's
+roles. It refuses what they refuse at start, among them:
+
+- a `$FORGD_ORG_ID_<NAME>` that resolves to nothing where it is required,
+  which is where its org's otel token, intake fleet token or compliance
+  key is set;
+- a detector setting that does not parse, or an enabled detector that is
+  neither built in nor an allowlisted plugin;
+- a weak or repeated token, a sink endpoint whose token is unset or that
+  would send it in the clear, a store URL carrying credentials;
+- dashboard auth, entitlements, admins and branding that do not parse,
+  and an enabled connector that is not configured;
+- `dashboard.auth.mode` none, which the dashboard refuses to serve on a
+  public interface. Pass `--serve-open` to the check when the deployment
+  passes it to the dashboard (`dashboard.serveOpen` in the chart);
+- a missing hash salt, where the role requires one.
+
+It also refuses a top-level key that is not one of the sections above.
+The roles ignore such a key, so a misspelt section would otherwise be
+silently absent.
+
+The roles checked are the verdict server, collector, intake and
+dashboard, the connector when `connector.enabled` is true, and the
+Compliance API scanner when `compliance` names an org. `--role` (repeatable)
+checks only those named. Intake builds its detectors on its first scan
+rather than at start; the check builds them, and refuses intake when they
+would fail.
+
+Some things only the running environment decides, and the check does not
+look at them:
+
+- whether a detector can run there. Every enabled detector is built, but
+  no gitleaks binary or daemon, model or plugin `available()` is asked, and
+  the tiers above T0 do not scan. The collector's guard on sink metadata
+  runs the T0 tiers alone;
+- whether the store accepts the role's identity. Each role writes to a
+  local store in a temporary directory, after its configured spec has been
+  checked as `open_store` checks it. The dashboard's and connector's store
+  is not in the policy, so neither is checked;
+- the value of every `$VAR` the deployment sets. A reference unset here is
+  checked as unset, which is how the role treats it: an otel org whose
+  token is unset is skipped, so its id is not checked. Run it with the
+  variables set, to placeholders where they are secrets, each token
+  distinct, since a token two entries share is refused.
+
+The messages are the ones the role prints when it refuses, so they can
+name a value from the environment. A parser error is described by its line
+and column only.
 
 With no `--policy`, `$FORGD_VERDICT_POLICY` unset and no `./policy.yaml`,
 it prints the built-in defaults with the environment overrides applied. A
 named path that does not exist exits 2 with the one-line message above.
 
-Run it on the machine or in the container whose environment you want to
-check: overrides and secret resolution are read from the shell it runs in.
+Run either form on the machine or in the container whose environment you
+want to check: overrides and secret resolution are read from the shell it
+runs in.
 
 ## Runtime overrides
 

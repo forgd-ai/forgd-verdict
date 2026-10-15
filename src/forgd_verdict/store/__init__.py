@@ -70,6 +70,35 @@ class StoreNotConfigured(ValueError):
 BUILTIN_SCHEMES = BUILTIN_STORE_SCHEMES
 
 
+def check_store_spec(spec: str, *, plugins: Sequence[PluginAllow] = ()) -> None:
+    """Raise as `open_store(spec)` would on a spec it refuses, without
+    opening anything, importing a backend or loading a plugin."""
+    if spec.startswith("$"):
+        raise StoreNotConfigured(
+            f"the findings store is {spec!r} and {spec[1:]} is not set. "
+            "Set it to a path or a blob URL, or set `store: \"\"` in the "
+            "policy to run without a durable store."
+        )
+    refuse_shadowing(plugins, "stores", BUILTIN_SCHEMES)
+    scheme = store_scheme(spec)
+    if scheme is not None:
+        if find_entry(plugins, "stores", scheme) is not None:
+            return
+        refuse_unlisted("stores", scheme, f"the store scheme {scheme!r}")
+    if spec.startswith(("https://", "http://", "s3://", "gs://")) and "@" in spec.split("/")[2]:
+        raise ValueError(
+            f"the findings store spec {shown_url(spec)!r} carries credentials in the URL; "
+            "remove them and give the service an identity with access to the store")
+    if spec.startswith(("https://", "http://")):
+        from ..safehttp import cleartext_refusal
+
+        refused = cleartext_refusal(spec)
+        if refused:
+            raise ValueError(f"the findings store spec {shown_url(spec)!r} is refused: "
+                             f"{refused}. The service's identity token goes with every "
+                             "request.")
+
+
 def open_store(spec: str, instance: str | None = None, *,
                plugins: Sequence[PluginAllow] = (), profile: str | None = None):
     """Open a store from a URI-ish spec.
@@ -96,32 +125,14 @@ def open_store(spec: str, instance: str | None = None, *,
     directory with that literal name: the writes succeed, health passes,
     and the findings land somewhere nobody configured.
     """
-    if spec.startswith("$"):
-        raise StoreNotConfigured(
-            f"the findings store is {spec!r} and {spec[1:]} is not set. "
-            "Set it to a path or a blob URL, or set `store: \"\"` in the "
-            "policy to run without a durable store."
-        )
-    refuse_shadowing(plugins, "stores", BUILTIN_SCHEMES)
+    check_store_spec(spec, plugins=plugins)
     scheme = store_scheme(spec)
     if scheme is not None:
         entry = find_entry(plugins, "stores", scheme)
         if entry is not None:
             return build_plugin(entry, profile, set(BUILTIN_SCHEMES), Store, spec, instance)
-        refuse_unlisted("stores", scheme, f"the store scheme {scheme!r}")
-    if spec.startswith(("https://", "http://", "s3://", "gs://")) and "@" in spec.split("/")[2]:
-        raise ValueError(
-            f"the findings store spec {shown_url(spec)!r} carries credentials in the URL; "
-            "remove them and give the service an identity with access to the store")
     if spec.startswith(("https://", "http://")):
-        from ..safehttp import cleartext_refusal
         from .blob import BlobStore
-
-        refused = cleartext_refusal(spec)
-        if refused:
-            raise ValueError(f"the findings store spec {shown_url(spec)!r} is refused: "
-                             f"{refused}. The service's identity token goes with every "
-                             "request.")
 
         return BlobStore(spec, instance=instance)
     if spec.startswith("s3://"):

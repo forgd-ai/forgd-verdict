@@ -60,7 +60,7 @@ LAYERS = {
         "plugins"),
     2: ("store", "behaviour", "lockout", "lockout_evidence", "overrides", "metadata"),
     3: ("server", "hook", "compliance", "otel", "sink", "managed", "intake"),
-    4: ("dashboard", "connector", "cli", "spotcheck", "testing"),
+    4: ("dashboard", "connector", "cli", "spotcheck", "testing", "policycheck"),
 }
 LAYER_OF = {mod: n for n, mods in LAYERS.items() for mod in mods}
 
