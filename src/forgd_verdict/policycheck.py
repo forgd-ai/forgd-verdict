@@ -102,6 +102,7 @@ def _server(policy: Policy, root: Path) -> None:
 
     # Read by `serve` before the app is built (server/__main__.py).
     _ = policy.limit_concurrency
+    int(policy.server.get("port", 8000))
     _check_spec(policy, policy.server.get("store"))
     detectors = _detectors(policy, "server")
     VerdictServer(policy, logger=_quiet(), detectors=detectors,
@@ -115,6 +116,8 @@ def _collector(policy: Policy, root: Path) -> None:
     from .sink.factory import sinks_may_need_late
 
     otel = policy.for_profile("otel")
+    # Read by `collect` before the app is built (otel/__main__.py).
+    int(otel.otel.get("port", 8100))
     _check_spec(policy, otel.otel.get("store") or otel.server.get("store"))
     detectors = _detectors(policy, "otel", "collector")
     late = []
@@ -135,25 +138,47 @@ def _intake(policy: Policy, root: Path) -> None:
     from .intake.app import Intake
 
     config = policy.raw.get("intake") or {}
+    # Read by `intake` before the app is built (intake/__main__.py).
+    int(config.get("port", 8200))
     _check_spec(policy, config.get("store") or (policy.raw.get("server") or {}).get("store"))
     for profile in ("server", "hook"):
         _detectors(policy, profile)
     Intake(policy, store=_local_store(root, "intake")).close()
 
 
-def _dashboard(policy: Policy, root: Path, path: Path) -> None:
+def _dashboard(policy: Policy, root: Path, path: Path, serve_open: bool) -> None:
     from .dashboard.app import create_app
+    from .entitlements import MODE_NONE
 
     # The dashboard loads the policy itself, from $FORGD_VERDICT_POLICY.
     with _env("FORGD_VERDICT_POLICY", str(path)):
-        create_app(str(root / "dashboard"))
+        app = create_app(str(root / "dashboard"))
+    # dashboard/__main__.py refuses this bind; the image binds 0.0.0.0.
+    if app.auth.mode == MODE_NONE and not serve_open:
+        raise ValueError(
+            "dashboard.auth.mode is 'none', so `forgd-verdict dashboard` refuses to "
+            "bind a public interface without --serve-open; set dashboard.auth, or pass "
+            "--serve-open to the check if the network in front of the dashboard is "
+            "the control")
 
 
 def _connector(policy: Policy, root: Path) -> None:
+    """The connector's store comes from --store or $FORGD_VERDICT_STORE, not
+    the policy; it is given a local one here, like the other roles."""
     from .connector import config
 
-    if config.load(policy) is None:
+    cfg = config.load(policy)
+    if cfg is None:
         raise ValueError("connector.enabled is not true, so the connector does not start")
+    try:
+        import mcp  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "the connector needs its extra: pip install 'forgd-verdict[connector]'") from exc
+    from .connector.app import create_app
+    from .connector.tools import reader_from_policy
+
+    create_app(cfg, reader_from_policy(policy, cfg, _local_store(root, "connector")))
 
 
 def _compliance(policy: Policy, root: Path) -> None:
@@ -189,11 +214,12 @@ def configured_roles(policy: Policy) -> tuple[str, ...]:
     return tuple(roles)
 
 
-def check(path: str | None, roles: Sequence[str] = ()) -> tuple[Path, tuple[str, ...],
-                                                                list[Refusal]]:
+def check(path: str | None, roles: Sequence[str] = (), *,
+          serve_open: bool = False) -> tuple[Path, tuple[str, ...], list[Refusal]]:
     """(the file checked, the roles checked, every refusal). A refusal with
     role "policy" is the file itself: missing, unparseable, or carrying a
-    top-level key no role reads."""
+    top-level key no role reads. `serve_open` is the dashboard's
+    --serve-open."""
     file = policy_path(path)
     if not file.is_file():
         return file, (), [Refusal("policy", f"{file} does not exist; pass --policy")]
@@ -210,7 +236,7 @@ def check(path: str | None, roles: Sequence[str] = ()) -> tuple[Path, tuple[str,
     chosen = tuple(roles) or configured_roles(policy)
     steps: dict[str, Callable[[Policy, Path], None]] = {
         "server": _server, "collector": _collector, "intake": _intake,
-        "dashboard": lambda p, r: _dashboard(p, r, file.resolve()),
+        "dashboard": lambda p, r: _dashboard(p, r, file.resolve(), serve_open),
         "connector": _connector, "compliance": _compliance,
     }
     with tempfile.TemporaryDirectory(prefix="forgd-policy-check-") as tmp:

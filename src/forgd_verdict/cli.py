@@ -115,7 +115,7 @@ def _check_policy(args: argparse.Namespace) -> int:
     per refusal on stderr, when any would not."""
     from .policycheck import check
 
-    path, roles, refusals = check(args.policy, args.role or ())
+    path, roles, refusals = check(args.policy, args.role or (), serve_open=args.serve_open)
     for r in refusals:
         print(f"forgd-verdict policy: {path}: {r.role}: {r.message}", file=sys.stderr)
     if refusals:
@@ -931,6 +931,10 @@ def main(argv: list[str] | None = None) -> int:
     p_policy.add_argument(
         "--role", action="append", choices=ROLES, metavar="ROLE",
         help=f"with --check, check only this role (repeatable): {', '.join(ROLES)}")
+    p_policy.add_argument(
+        "--serve-open", action="store_true",
+        help="with --check, accept dashboard.auth.mode none, as the dashboard's "
+             "--serve-open does")
     p_policy.set_defaults(func=_cmd_policy)
 
     p_glc = sub.add_parser("gitleaks-config",

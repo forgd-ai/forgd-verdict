@@ -9,6 +9,7 @@ and the check accepts.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import subprocess
 import sys
@@ -30,6 +31,10 @@ ENV = {
 }
 
 
+OIDC = {"mode": "oidc_jwt", "issuer": "https://issuer.example/v2.0",
+        "jwks_url": "https://issuer.example/keys", "audience": "api://dashboard"}
+
+
 def base(tmp: Path) -> dict:
     return {
         "privacy": {"hash_salt": "salt-" + "p9Vb2nXq7rTz4mKw8cLs3jHd"},
@@ -40,6 +45,7 @@ def base(tmp: Path) -> dict:
                            "token": "$FORGD_OTEL_TOKEN_PRIMARY"}]},
         "intake": {"fleet": [{"name": "laptops", "tokens": ["$FORGD_INTAKE_FLEET_TOKEN"],
                               "org": "$FORGD_ORG_ID_PRIMARY"}]},
+        "dashboard": {"auth": OIDC},
     }
 
 
@@ -64,42 +70,58 @@ def write(tmp: Path, policy: dict) -> Path:
 # -- how each role starts --------------------------------------------------
 
 
-def start_server(path: Path, tmp: Path) -> None:
-    """`serve`'s pre-checks, with uvicorn stubbed, then the app uvicorn builds."""
+@contextlib.contextmanager
+def no_serving():
+    """uvicorn.run does nothing, so an entry point returns after its checks."""
     import uvicorn
-
-    from forgd_verdict.server.__main__ import main
-    from forgd_verdict.server.app import VerdictServer
 
     real, uvicorn.run = uvicorn.run, lambda *a, **k: None
     try:
-        if main(["--policy", str(path)]) != 0:
-            raise SystemExit("serve refused")
+        yield
     finally:
         uvicorn.run = real
+
+
+def entry(main, *args: str) -> None:
+    with no_serving():
+        if main(list(args)) != 0:
+            raise SystemExit("the entry point refused")
+
+
+def start_server(path: Path, tmp: Path) -> None:
+    """`serve`'s checks, then the app uvicorn would build."""
+    from forgd_verdict.server.__main__ import main
+    from forgd_verdict.server.app import VerdictServer
+
+    entry(main, "--policy", str(path))
     VerdictServer(load_policy(str(path))).close()
 
 
 def start_collector(path: Path, tmp: Path) -> None:
+    from forgd_verdict.otel.__main__ import main
     from forgd_verdict.otel.app import Collector
 
+    entry(main, "--policy", str(path))
     Collector(load_policy(str(path))).close()
 
 
 def start_intake(path: Path, tmp: Path) -> None:
+    from forgd_verdict.intake.__main__ import main
     from forgd_verdict.intake.app import Intake
 
+    entry(main, "--policy", str(path))
     Intake(load_policy(str(path))).close()
 
 
 def start_dashboard(path: Path, tmp: Path) -> None:
+    """As the image starts it: on 0.0.0.0, the policy from the environment."""
     import os
 
-    from forgd_verdict.dashboard.app import create_app
+    from forgd_verdict.dashboard.__main__ import main
 
     os.environ["FORGD_VERDICT_POLICY"] = str(path)
     try:
-        create_app(str(tmp / "dashboard-store"))
+        entry(main, "--host", "0.0.0.0", "--store", str(tmp / "dashboard-store"))
     finally:
         del os.environ["FORGD_VERDICT_POLICY"]
 
@@ -107,8 +129,7 @@ def start_dashboard(path: Path, tmp: Path) -> None:
 def start_connector(path: Path, tmp: Path) -> None:
     from forgd_verdict.connector.__main__ import main
 
-    if main(["--policy", str(path)]) != 0:
-        raise SystemExit("connector refused")
+    entry(main, "--policy", str(path), "--store", str(tmp / "connector-store"))
 
 
 def start_compliance(path: Path, tmp: Path) -> None:
@@ -161,6 +182,10 @@ CASES = [
      {}, {"dashboard"}),
     ("an enabled connector with no auth", _set("connector", {"enabled": True}),
      {}, {"connector"}),
+    ("a dashboard with no auth", _set("dashboard.auth", None), {}, {"dashboard"}),
+    ("a server port that is not a number", _set("server.port", "http"), {}, {"server"}),
+    ("a collector port that is not a number", _set("otel.port", "http"), {}, {"collector"}),
+    ("an intake port that is not a number", _set("intake.port", "http"), {}, {"intake"}),
     ("a compliance key whose org id is unset",
      _set("compliance.orgs", [{"id": "$FORGD_ORG_ID_UNSET", "api_key": "$FORGD_TEST_CAK"}]),
      {"FORGD_ORG_ID_UNSET": None, "FORGD_TEST_CAK": "cak-" + "m3Nb7vCx1zLk5jHg9fDs2aQw"},
@@ -195,6 +220,28 @@ def test_a_policy_the_role_refuses_the_check_refuses(env, tmp_path, edit, env_ed
     refused = {r.role for r in refusals}
     assert roles <= refused, refusals
     assert refused - roles <= stricter, refusals
+
+
+def test_serve_open_accepts_a_dashboard_with_no_auth(env, tmp_path):
+    policy = base(tmp_path)
+    del policy["dashboard"]
+    path = write(tmp_path, policy)
+    assert [r.role for r in policycheck.check(str(path))[2]] == ["dashboard"]
+    assert policycheck.check(str(path), serve_open=True)[2] == []
+
+
+def test_a_configured_connector_starts_and_passes(env, tmp_path):
+    policy = base(tmp_path)
+    policy["connector"] = {"enabled": True, "resource": "https://mcp.example/mcp",
+                           "required_scope": "findings.read",
+                           "auth": {"mode": "oidc_jwt", "issuer": OIDC["issuer"],
+                                    "jwks_url": OIDC["jwks_url"],
+                                    "audience": "https://mcp.example/mcp"}}
+    path = write(tmp_path, policy)
+    start_connector(path, tmp_path)
+    _, checked, refusals = policycheck.check(str(path))
+    assert refusals == []
+    assert "connector" in checked
 
 
 def test_the_base_policy_starts_every_role_and_passes(env, tmp_path):

@@ -509,8 +509,11 @@ roles. It refuses what they refuse at start, among them:
   neither built in nor an allowlisted plugin;
 - a weak or repeated token, a sink endpoint whose token is unset or that
   would send it in the clear, a store URL carrying credentials;
-- dashboard auth, entitlements, admins and branding that do not parse, and
-  an enabled connector that is not configured;
+- dashboard auth, entitlements, admins and branding that do not parse,
+  and an enabled connector that is not configured;
+- `dashboard.auth.mode` none, which the dashboard refuses to serve on a
+  public interface. Pass `--serve-open` to the check when the deployment
+  passes it to the dashboard (`dashboard.serveOpen` in the chart);
 - a missing hash salt, where the role requires one.
 
 It also refuses a top-level key that is not one of the sections above.
@@ -533,7 +536,8 @@ look at them:
   runs the T0 tiers alone;
 - whether the store accepts the role's identity. Each role writes to a
   local store in a temporary directory, after its configured spec has been
-  checked as `open_store` checks it;
+  checked as `open_store` checks it. The dashboard's and connector's store
+  is not in the policy, so neither is checked;
 - the value of every `$VAR` the deployment sets. A reference unset here is
   checked as unset, which is how the role treats it: an otel org whose
   token is unset is skipped, so its id is not checked. Run it with the
