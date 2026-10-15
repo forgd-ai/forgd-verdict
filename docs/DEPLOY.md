@@ -7,7 +7,10 @@ them into a cluster that Terraform built or that you already run. Why it is
 split this way is in [DESIGN.md § Two deployment
 wrappers](DESIGN.md#two-deployment-wrappers-not-one-path-per-target).
 
-To try it on one machine first, see [QUICKSTART.md](QUICKSTART.md).
+To try it on one machine first, see [QUICKSTART.md](QUICKSTART.md). To
+run a published release from a repository of your own deployment files,
+without forking this one, see [DEPLOY-FROM-RELEASES.md](DEPLOY-FROM-RELEASES.md);
+the modules, chart and checks below are the same.
 
 ## Choose a target
 

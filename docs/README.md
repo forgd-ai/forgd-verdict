@@ -6,6 +6,8 @@
   signed request with a fake key, and read the finding back.
 - [DEPLOY.md](DEPLOY.md): choose a cloud and a target, the order of
   operations, and verifying a deployment.
+- [DEPLOY-FROM-RELEASES.md](DEPLOY-FROM-RELEASES.md): run a published
+  release from a repository of your own deployment files, without forking.
 - [OPERATIONS.md](OPERATIONS.md): rolling and rolling back releases,
   rotating secrets, health endpoints, excluding test traffic.
 

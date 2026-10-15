@@ -23,9 +23,13 @@ what comes back, and it can block a prompt before it reaches the model.
   experimental: it has not yet been run against a real Claude organization
   or identity provider.
 
-You fork this repository and deploy it into your own cloud, against your
-own Claude organizations: Azure, AWS or Google Cloud, on managed
-containers or Kubernetes. Findings are written to storage in that cloud.
+You deploy it into your own cloud, against your own Claude organizations:
+Azure, AWS or Google Cloud, on managed containers or Kubernetes. Findings
+are written to storage in that cloud. Either fork this repository and
+deploy from the fork, or keep a repository of your own deployment files
+that runs a published release (the images, the Helm chart, the Terraform
+modules and the PyPI package); [docs/DEPLOY-FROM-RELEASES.md](docs/DEPLOY-FROM-RELEASES.md)
+says when to choose which and has a skeleton for the second.
 
 ## Status
 

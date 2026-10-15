@@ -2,8 +2,10 @@
 
 ## Who this is for
 
-Whoever runs this forks it and deploys it themselves, into their own
-cloud, against their own Claude organizations, writing to their own store.
+Whoever runs this deploys it themselves, into their own cloud, against
+their own Claude organizations, writing to their own store: from a fork,
+or from a repository of their own files that runs a published release
+(docs/DEPLOY-FROM-RELEASES.md, examples/deployment-repo).
 
 Two things follow, and both are easy to forget:
 

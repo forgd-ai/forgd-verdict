@@ -21,7 +21,9 @@ SCRIPT = REPO / "scripts" / "cut_release.sh"
 CHART = "deploy/helm/forgd-verdict/Chart.yaml"
 HOOK = "packaging/forgd-verdict-hook/pyproject.toml"
 SYNC = "  uv sync --all-extras --no-extra ml\n"
-BUMPED = ("pyproject.toml", "src/forgd_verdict/__init__.py", CHART, HOOK)
+EXAMPLE_RELEASE = "examples/deployment-repo/release.yaml"
+EXAMPLE_INFRA = "examples/deployment-repo/infra/main.tf"
+BUMPED = ("pyproject.toml", "src/forgd_verdict/__init__.py", CHART, HOOK, EXAMPLE_RELEASE, EXAMPLE_INFRA)
 
 
 def _script() -> str:
@@ -76,6 +78,12 @@ def test_the_release_script_bump_block_rewrites_every_version_it_owns(tmp_path):
     assert hook["dependencies"] == ["forgd-verdict==9.9.9"]
     assert '__version__ = "9.9.9"' in (root / "src/forgd_verdict/__init__.py").read_text()
     assert 'appVersion: "9.9.9"' in (root / CHART).read_text()
+    example = (root / EXAMPLE_RELEASE).read_text()
+    assert "version: 9.9.9\n" in example
+    chart = ".".join(map(str, _chart_version((root / CHART).read_text())))
+    assert f"chart: {chart}\n" in example
+    refs = re.findall(r'\?ref=v([^"]+)"', (root / EXAMPLE_INFRA).read_text())
+    assert refs == ["9.9.9"] * 3
 
 
 def test_the_release_script_writes_no_changelog():
@@ -209,6 +217,27 @@ def test_tag_refuses_a_tree_whose_versions_do_not_match(tmp_path):
     assert proc.returncode == 1
     assert "9.9.9" in proc.stderr
     assert _refs(run) == before
+    assert not run.git("tag", "--list")
+
+
+@pytest.mark.parametrize("edit", [
+    (EXAMPLE_RELEASE, r"(?m)^chart: \S+$", "chart: 0.0.1"),
+    (EXAMPLE_INFRA, r'\?ref=v9\.9\.9"', '?ref=v9.9.8"'),
+], ids=["example chart", "one module ref"])
+def test_tag_refuses_an_example_that_is_not_the_release(tmp_path, edit):
+    run = _release_repo(tmp_path)
+    assert run("prepare", "9.9.9").returncode == 0
+    _merge_release_branch(run, "9.9.9")
+    run.git("checkout", "-q", "main")
+    run.git("pull", "-q", "--ff-only")
+    rel, pattern, replacement = edit
+    path = tmp_path / "work" / rel
+    path.write_text(re.sub(pattern, replacement, path.read_text(), count=1))
+    run.git("commit", "-q", "-am", "drift")
+    run.git("push", "-q", "origin", "main")
+    proc = run("tag", "9.9.9")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "examples/deployment-repo" in proc.stderr
     assert not run.git("tag", "--list")
 
 
