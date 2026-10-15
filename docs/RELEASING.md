@@ -33,17 +33,21 @@ settings before the first `v*` tag is pushed.
    tag.
 2. **Required reviewers on `pypi`.** Under Environments, `pypi` lists
    release maintainers as required reviewers, with "Prevent self-review"
-   on and "Allow administrators to bypass configured protection rules"
+   off and "Allow administrators to bypass configured protection rules"
    off. The images, chart and PyPI jobs all run in `pypi` and wait for it
    at the same time, so a release asks for one approval, and none of them
-   starts until a reviewer other than the person who started the run
-   approves it. The GitHub Release job runs after all three have
-   succeeded and has no environment. For the images, chart and Release
-   this holds only while the tagged workflow names `pypi`, because the tag
-   pusher chooses that file; the PyPI trusted publisher's environment pin
-   (item 4) is the gate a tagged commit cannot remove. "Prevent self-review" blocks whoever
-   started the run, which on a re-run is whoever clicked re-run, so a
-   re-run is approved by someone other than the tag pusher too.
+   starts until a release maintainer approves it. The GitHub Release job
+   runs after all three have succeeded and has no environment. For the
+   images, chart and Release this holds only while the tagged workflow
+   names `pypi`, because the tag pusher chooses that file; the PyPI
+   trusted publisher's environment pin (item 4) is the gate a tagged
+   commit cannot remove.
+
+   With "Prevent self-review" off, the maintainer who pushed the tag can
+   approve their own release. That is the setting while the maintainers
+   are few enough that waiting for another one would hold a release up.
+   Turning it on makes the approver someone other than whoever started
+   the run, which on a re-run is whoever clicked re-run.
 3. **Deployment limited to `v*` tags.** On `pypi`, "Deployment branches
    and tags" is set to selected tags matching `v*`, with no branch. A job
    on a branch, a dispatch from a branch included, cannot use it. A dispatch from a branch runs ci and builds the
@@ -168,5 +172,5 @@ on them.
 No test in this repository can see them. A `v*` tag pushed by someone
 outside the ruleset's bypass list is refused before any workflow runs. On
 the first release, before anyone approves, confirm that the images, chart
-and PyPI jobs are waiting for review in `pypi` and that the person who
-pushed the tag is not offered the approval.
+and PyPI jobs are waiting for review in `pypi`, with the release
+maintainers as its reviewers.
