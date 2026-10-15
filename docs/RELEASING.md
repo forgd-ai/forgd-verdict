@@ -142,6 +142,19 @@ pull request. Both run from a clean `main` that matches `origin/main`.
    once they have succeeded. The reviewer checks the tagged commit as
    described above before approving.
 
+## A security fix
+
+A reported vulnerability is fixed in a draft security advisory, in its
+temporary private fork (see [SECURITY.md](../SECURITY.md)). GitHub Actions
+do not run in that fork, so before merging run the full suite locally
+under the Python and Terraform versions CI uses, as `prepare` does.
+
+Merge the advisory's pull request from the advisory page, then cut a
+patch release straight away as above, so the fix is public on `main` for
+as short a time as possible before it is released. Publish the advisory
+once the GitHub Release exists, naming the affected versions and the
+fixed one.
+
 ## A fork's deploy workflow
 
 `examples/github/deploy.yml` deploys on every `v*` tag pushed to the fork,
