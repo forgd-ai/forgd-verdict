@@ -2,12 +2,30 @@
 
 ## Reporting a vulnerability
 
-Email **security@forgd.ai**.
+Report it privately, by either route:
 
-Do not open a public issue for a vulnerability. Include the version or
-commit, the component, the steps to reproduce, and what an attacker gains.
-If the report involves a matched secret or personal data, describe the
-shape of it rather than sending a real value.
+- on GitHub, from this repository's **Security** tab: **Report a
+  vulnerability**. The report is visible only to you and the maintainers;
+- by email to **security@forgd.ai**.
+
+Do not open a public issue, discussion or pull request for a
+vulnerability. Include the version or commit, the component, the steps to
+reproduce, and what an attacker gains. If the report involves a matched
+secret or personal data, describe the shape of it rather than sending a
+real value.
+
+## How a fix is made
+
+A vulnerability is fixed in private until it is released. The maintainers
+open a draft security advisory for it and develop the fix in the
+advisory's temporary private fork, which only the maintainers and the
+people they invite can see, the reporter included. The fix does not
+appear as a public branch or pull request.
+
+The fix ships as a patch release, cut as in
+[docs/RELEASING.md](docs/RELEASING.md). Once it is published, the
+advisory is published with it, naming the affected and fixed versions,
+and credits the reporter unless they ask not to be named.
 
 ## Supported versions
 

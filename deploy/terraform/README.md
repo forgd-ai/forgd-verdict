@@ -18,6 +18,22 @@ modules/ci-gcp/        the GCP CD service account that scripts/deploy_gcp.sh run
 examples/aks/          the AKS root
 ```
 
+A root outside this repository sources a module by git ref at a release
+tag, so the modules match the release's images and chart:
+
+```hcl
+module "cluster" {
+  source = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/cluster-aks?ref=vX.Y.Z"
+  # ...
+}
+```
+
+Any module above works the same way. Each one stands alone: it names no
+module by a local path and reads no file outside its own directory.
+`examples/aks` uses relative paths because it lives beside them; copied
+out of this repository, its three `source` lines become git sources like
+the one above.
+
 `monitor-azure` is off unless `enable_azure_monitor` is set. It creates
 a Log Analytics workspace, which bills per GB ingested and per GB retained,
 and a fork should choose that rather than inherit it. Nothing else in the
