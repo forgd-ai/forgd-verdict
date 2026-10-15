@@ -300,8 +300,8 @@ def test_a_missing_file_is_refused(env, tmp_path):
 
 def test_the_connector_and_scanner_are_checked_when_configured(env, tmp_path):
     policy = base(tmp_path)
-    assert "connector" not in policycheck.configured_roles(load_policy(str(write(tmp_path,
-                                                                                 policy))))
+    roles = policycheck.configured_roles(load_policy(str(write(tmp_path, policy))))
+    assert "connector" not in roles
     policy["connector"] = {"enabled": True}
     policy["compliance"] = {"orgs": [{"id": "$FORGD_ORG_ID_PRIMARY", "api_key": "$X"}]}
     roles = policycheck.configured_roles(load_policy(str(write(tmp_path, policy))))
