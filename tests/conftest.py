@@ -44,6 +44,45 @@ def _gitleaks_init_under_test(self, *args, **kwargs):
 GitleaksDetector.__init__ = _gitleaks_init_under_test
 
 
+def pytest_addoption(parser):
+    parser.addoption("--shard", default=None, metavar="I/N",
+                     help="run the I-th of N groups of the selected tests; see tests/shard.py")
+    parser.addoption("--record-durations", default=None, metavar="PATH",
+                     help="write each test's duration to PATH as JSON")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """`--shard`, applied after `-m` and `-k` have deselected."""
+    value = config.getoption("--shard")
+    if not value:
+        return
+    from shard import load_durations, parse_shard, plan, shard_of
+
+    index, count = parse_shard(value)
+    groups = plan(load_durations(), count)
+    keep = [item for item in items if shard_of(item.nodeid, groups, count) == index]
+    if len(keep) < len(items):
+        kept = set(map(id, keep))
+        config.hook.pytest_deselected(items=[i for i in items if id(i) not in kept])
+        items[:] = keep
+
+
+_DURATIONS: dict[str, float] = {}
+
+
+def pytest_runtest_logreport(report):
+    _DURATIONS[report.nodeid] = _DURATIONS.get(report.nodeid, 0.0) + report.duration
+
+
+def pytest_sessionfinish(session):
+    path = session.config.getoption("--record-durations")
+    if path and not hasattr(session.config, "workerinput"):
+        Path(path).write_text(json.dumps(
+            {k: round(v, 2) for k, v in sorted(_DURATIONS.items())}, indent=0) + "\n",
+            encoding="utf-8")
+
+
 @pytest.fixture(autouse=True)
 def _fresh_dashboard_policy_cache():
     """Tests patch `load_policy` or rewrite the policy between requests; a

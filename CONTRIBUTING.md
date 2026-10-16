@@ -86,6 +86,16 @@ it a broken default path ships unnoticed. It also validates the workflow
 files, checks the layering, lints the Helm chart, checks that the gitleaks
 sidecar and the subprocess agree, and builds both wheels.
 
+Each Python version's suite runs as five jobs: the parallel pass
+(`-m "not serial"` under xdist) and the serial pass in four shards
+(`-m serial --shard I/4`). A serial test is timing- or memory-bounded and
+runs alone on its runner. Shards are balanced by `tests/durations.json`;
+after adding or changing slow serial tests, regenerate it with
+`uv run pytest -q -m serial --record-durations tests/durations.json`. A test
+the file does not name still runs, in the shard a hash of its node id
+picks. The required checks `test (py3.11)` to `test (py3.13)` are gate
+jobs that pass only when every suite job, on every version, passed.
+
 **No repository secrets are required:** every test is offline, and
 signatures are minted inside the job. If CI ever needs a secret, something
 has been wired wrong.
