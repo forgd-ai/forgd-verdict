@@ -64,7 +64,7 @@ dev = [
   "mcp>=2.2,<3",
   # Pinned minor: ruff adds rules in minor releases, which would
   # otherwise turn a dependency refresh into a red build.
-  "ruff>=0.14,<0.17",
+  "ruff>=0.14,<0.18",
 ]
 
 [project.scripts]
