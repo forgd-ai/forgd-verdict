@@ -77,6 +77,42 @@ def test_files_are_found():
     assert "examples/deployment-repo/.github/workflows/deploy.yml" in names
 
 
+def _dependabot_reads(directories: list[str]) -> set[str]:
+    """The workflow and action files Dependabot's github-actions updater
+    reads: for `/`, the root action file and `.github/workflows/*`; for any
+    other directory, the YAML files directly in it."""
+    read = set()
+    for d in directories:
+        base = REPO / d.strip("/")
+        if d == "/":
+            read |= {f for f in ("action.yml", "action.yaml") if (REPO / f).is_file()}
+            base = REPO / ".github" / "workflows"
+        read |= {p.relative_to(REPO).as_posix() for p in base.glob("*")
+                 if p.suffix in (".yml", ".yaml") and p.is_file()}
+    return read
+
+
+def _github_actions_directories() -> list[str]:
+    config = yaml.safe_load((REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    [entry] = [u for u in config["updates"] if u["package-ecosystem"] == "github-actions"]
+    return entry["directories"]
+
+
+def test_dependabot_reads_every_file_with_a_pin():
+    """A pin Dependabot does not read stays behind when it bumps the same
+    action elsewhere, and the setup-uv check below then fails its pull
+    request."""
+    pinned = {p.relative_to(REPO).as_posix() for p in FILES if _line_uses(p.read_text(encoding="utf-8"))}
+    assert "examples/deployment-repo/.github/workflows/ci.yml" in pinned
+    unread = pinned - _dependabot_reads(_github_actions_directories())
+    assert not unread, sorted(unread)
+
+
+def test_the_dependabot_reader_misses_a_directory_left_out():
+    directories = [d for d in _github_actions_directories() if d != "/examples/github"]
+    assert "examples/github/deploy.yml" not in _dependabot_reads(directories)
+
+
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.relative_to(REPO).as_posix())
 def test_every_uses_is_pinned(path):
     assert problems(path.read_text(encoding="utf-8")) == []
