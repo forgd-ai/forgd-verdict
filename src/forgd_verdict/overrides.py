@@ -209,6 +209,12 @@ REFUSED_RETIREMENT_UNVERIFIED = (f"{ERROR_RETIREMENT_UNVERIFIED}: the legacy mar
                                  "on a signed chain, but the migration that retired them cannot "
                                  "be verified, so the recovered object can neither carry the "
                                  "retirement nor drop it")
+# Why a recover writes nothing when two request records at the newest
+# revision each verify and nothing signed says which one was applied.
+ERROR_HEAD_AMBIGUOUS = "head_ambiguous"
+REFUSED_HEAD_AMBIGUOUS = (f"{ERROR_HEAD_AMBIGUOUS}: more than one signed request record at the "
+                          "newest revision verifies, and no verification record or signed "
+                          "outcome says which one was applied")
 ANCHOR_ERRORS = (ERROR_ANCHOR_MISSING, ERROR_BEFORE_ANCHOR, ERROR_NOT_ANCHORED,
                  ERROR_BEHIND_REQUEST)
 
@@ -2176,11 +2182,14 @@ def _recovered(store: Any, status: str, raw: dict | None, mode: str | None,
     and a warning says what was dropped.
 
     It is retired when the kept state is, when the invalid object names
-    a migration `_migration` accepts, or when any migration request
-    `_chained_migration` finds verifies. Refused
+    a migration `_migration` accepts, or when the migration request
+    `_chained_migration` finds verifies and has a signed `applied` outcome.
+    That migration is not on the kept chain, which would be retired if it
+    were, so nothing but its outcome says it committed. Refused
     (REFUSED_RETIREMENT_UNVERIFIED) when the kept state is retired and its
-    migration is not accepted, and when it is not retired while
-    `_retired_request` finds a retired request.
+    migration is not accepted, when `_chained_migration` finds a migration
+    with no signed `applied` outcome, and when the state is not retired
+    while `_retired_request` finds a retired request.
 
     Its revision is above every revision a request record or the head the
     newest signed verification record names (lockout.anchored_head).
@@ -2206,6 +2215,12 @@ def _recovered(store: Any, status: str, raw: dict | None, mode: str | None,
         named = retired_by is not None
         if not named:
             retired_by = _chained_migration(store, verify_keys)
+            if retired_by is not None and not _outcome_says(
+                    store, retired_by["id"], verify_keys, ("applied",)):
+                _log.warning("recover found a migration off the kept chain with no signed "
+                             "`applied` outcome", extra={"fields": {
+                                 "migration": retired_by["id"]}})
+                raise Refused(REFUSED_RETIREMENT_UNVERIFIED)
         if retired_by is not None:
             state = replace(state, legacy_markers_retired=True, retired_by=retired_by["id"])
             if kept is not None:
@@ -2243,7 +2258,9 @@ def _recoverable(store: Any, raw: dict | None, verify_keys: VerifyKeys = None,
     The first candidate for its head is the request record
     latest_request_revision counts at its revision, when that is later
     than both the object's revision and `anchor`'s and it is the only such
-    record without a signed `conflict` outcome. Next is the record the
+    record without a signed `conflict` outcome. When there are several, the
+    one `_settled_head` picks is, whatever the invalid object names. Next is
+    the record the
     invalid object names, or the one `anchor` names when the object is not
     at or after it (check_anchor), then request records newest revision
     first. A record that shares its base with another is skipped unless it
@@ -2258,10 +2275,15 @@ def _recoverable(store: Any, raw: dict | None, verify_keys: VerifyKeys = None,
     if not isinstance(revision, int) or isinstance(revision, bool):
         revision = None
     top, latest = _latest_requests(store, verify_keys)
-    if top > max(revision or 0, anchor["revision"] if anchor is not None else 0):
-        unsettled = [r["id"] for r in latest
-                     if isinstance(r.get("id"), str) and _AUDIT_ID.fullmatch(r["id"])
-                     and not _abandoned(store, r, verify_keys, ("conflict",))]
+    unsettled = [r["id"] for r in latest
+                 if isinstance(r.get("id"), str) and _AUDIT_ID.fullmatch(r["id"])
+                 and not _abandoned(store, r, verify_keys, ("conflict",))]
+    # The invalid object's revision and audit id do not settle a race at the
+    # newest revision: nothing signed them.
+    if top > (anchor["revision"] if anchor is not None else 0) and (
+            len(unsettled) > 1 or top > (revision or 0)):
+        if len(unsettled) > 1:
+            unsettled = _settled_head(store, top, unsettled, verify_keys)
         if len(unsettled) == 1:
             candidates.append(unsettled[0])
     if anchor is not None and anchor["audit_id"] is not None and not (
@@ -2308,6 +2330,37 @@ def _recoverable(store: Any, raw: dict | None, verify_keys: VerifyKeys = None,
             vouched[audit_id] = expected
         return replace(state, audit_hash=expected)
     return None
+
+
+def _settled_head(store: Any, revision: int, unsettled: list[str],
+                  verify_keys: VerifyKeys = None) -> list[str]:
+    """Of request records `unsettled`, all at `revision`, the one whose write
+    committed: of those with a signed `applied` outcome, or of all of them
+    when none has one, the only one whose chain verifies. Refused
+    (REFUSED_HEAD_AMBIGUOUS) when more than one does. The walks stop at the
+    second chain that verifies."""
+    applied = [a for a in unsettled if _outcome_says(store, a, verify_keys, ("applied",))]
+    verified: list[str] = []
+    for audit_id in sorted(applied or unsettled):
+        if _chain_verifies(store, audit_id, verify_keys):
+            verified.append(audit_id)
+            if len(verified) > 1:
+                _log.warning("recover found more than one verifiable request record at the "
+                             "newest revision", extra={"fields": {
+                                 "revision": revision, "records": sorted(unsettled)}})
+                raise Refused(REFUSED_HEAD_AMBIGUOUS)
+    return verified
+
+
+def _chain_verifies(store: Any, audit_id: str, verify_keys: VerifyKeys = None) -> bool:
+    """Whether request record `audit_id`'s chain verifies back to a chain
+    start (`_walk`)."""
+    try:
+        _walk(store, _request(store, audit_id, _stored_hash(store, audit_id), verify_keys),
+              None, verify_keys)
+    except InvalidState:
+        return False
+    return True
 
 
 def _chained_migration(store: Any, verify_keys: VerifyKeys = None) -> dict[str, str] | None:
@@ -2403,7 +2456,13 @@ def _abandoned(store: Any, request: Mapping[str, Any], verify_keys: VerifyKeys,
                results: Collection[str] = ("error",)) -> bool:
     """Whether `request` has an outcome record signed by one of
     `verify_keys` that names it and says one of `results`."""
-    audit_id = request.get("id")
+    return _outcome_says(store, request.get("id"), verify_keys, results)
+
+
+def _outcome_says(store: Any, audit_id: Any, verify_keys: VerifyKeys,
+                  results: Collection[str]) -> bool:
+    """Whether request `audit_id` has an outcome record signed by one of
+    `verify_keys` that names it and says one of `results`."""
     if not (isinstance(audit_id, str) and _AUDIT_ID.fullmatch(audit_id)):
         return False
     blob = store.get_audit(audit_name(audit_id, "outcome"))

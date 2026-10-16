@@ -940,10 +940,12 @@ def test_a_refusal_before_commit_is_the_only_error_outcome(tmp_path, monkeypatch
         monkeypatch.undo()
 
 
-def test_recover_skips_the_loser_of_a_race_when_nothing_says_which_won(tmp_path, monkeypatch):
+def test_recover_keeps_the_racing_record_whose_write_was_applied(tmp_path, monkeypatch):
     """Two records on the same base, the object deleted: neither is built on
-    and the object is gone, so recover keeps their base and the head change
-    is lost rather than the loser's change kept."""
+    and the object is gone. Recover kept their base, losing the winner's
+    change; the winner's signed `applied` outcome says which one committed.
+    With that outcome lost too, recover refuses, and keeps the record left
+    once the other is deleted."""
     from forgd_verdict import overrides as ov
 
     key = Ed25519PrivateKey.generate()
@@ -967,10 +969,23 @@ def test_recover_skips_the_loser_of_a_race_when_nothing_says_which_won(tmp_path,
                if n.endswith("-request.json")
                and json.loads(store.get_audit(n))["new_value"] == "enforce"]
     store.root.joinpath(AUDIT_PREFIX, ov.audit_name(loser["id"], "outcome")).unlink()
-    (store.root / "state" / "runtime-overrides.json").unlink()
+    control = store.root / "state" / "runtime-overrides.json"
+    winner = json.loads(control.read_bytes())["audit_id"]
+    control.unlink()
     applied = _apply_v(store, ov.Change(ov.ACTION_RECOVER), key, keys)
     assert applied.state.overrides[ov.KEY_MODE].value == "observe"
-    assert applied.state.excluded_requests == frozenset()
+    assert applied.state.excluded_requests == frozenset({"req_winner"})
+
+    control.unlink()
+    store.root.joinpath(AUDIT_PREFIX, ov.audit_name(applied.audit_id, "request")).unlink()
+    store.root.joinpath(AUDIT_PREFIX, ov.audit_name(applied.audit_id, "outcome")).unlink()
+    store.root.joinpath(AUDIT_PREFIX, ov.audit_name(winner, "outcome")).unlink()
+    with pytest.raises(ov.Refused) as exc:
+        _apply_v(store, ov.Change(ov.ACTION_RECOVER), key, keys)
+    assert str(exc.value) == ov.REFUSED_HEAD_AMBIGUOUS
+    store.root.joinpath(AUDIT_PREFIX, ov.audit_name(loser["id"], "request")).unlink()
+    applied = _apply_v(store, ov.Change(ov.ACTION_RECOVER), key, keys)
+    assert applied.state.excluded_requests == frozenset({"req_winner"})
 
 
 def test_a_signed_record_built_on_an_unapplied_migration_does_not_retire_a_recovery(
