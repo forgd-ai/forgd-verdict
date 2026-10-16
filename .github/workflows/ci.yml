@@ -44,17 +44,23 @@ env:
   TERRAFORM_VERSION: "1.9.8"
 
 jobs:
-  test:
-    name: test (py${{ matrix.python }})
+  # The suite, per Python version, in parts on separate runners: the
+  # parallel pass, and the serial pass split into duration-balanced shards
+  # (tests/shard.py). A serial test needs its runner to itself, which a
+  # shard on its own runner still gives.
+  suite:
+    name: test (py${{ matrix.python }}, ${{ matrix.part }})
     if: github.event_name != 'schedule'
     # CI_RUNS_ON, a repository variable holding a JSON runs-on value, moves
     # this job onto self-hosted runners. Unset, it runs on GitHub's.
     runs-on: ${{ vars.CI_RUNS_ON && fromJSON(vars.CI_RUNS_ON) || 'ubuntu-latest' }}
-    timeout-minutes: 220
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13"]
+        # tests/test_ci_shards.py checks these name every shard of one count.
+        part: [parallel, serial 1/4, serial 2/4, serial 3/4, serial 4/4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -101,13 +107,16 @@ jobs:
       # deploy.yml therefore passed review and failed at startup with no
       # jobs, no log and the file path where its name should be.
       - name: Validate workflow files
+        if: matrix.part == 'parallel'
         run: uv run python scripts/check_workflows.py
 
       - name: Lint
+        if: matrix.part == 'parallel'
         run: uv run ruff check src tests loadtest.py deploy/assert_presidio.py
 
       # Upward dependencies only. Sideways coupling is reported, not failed on.
       - name: Check the layering
+        if: matrix.part == 'parallel'
         run: uv run python scripts/import_graph.py --check
 
       # Validate, not apply. A module nobody applied this week still has to
@@ -115,6 +124,7 @@ jobs:
       # changes real infrastructure, so it stays manual. What proves a real
       # deployment is scripts/verify_deployment.sh, not a green plan.
       - name: Validate Terraform
+        if: matrix.part == 'parallel'
         run: |
           # Fails when terraform is missing. This step used to exit 0 with
           # a notice when the binary was absent, and once ubuntu-latest
@@ -137,11 +147,16 @@ jobs:
       - name: Test
         env:
           FORGD_FULL_DIFFERENTIAL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && '1' || '' }}
+          PART: ${{ matrix.part }}
         run: |
-          uv run pytest -q -n auto -m "not serial"
-          uv run pytest -q -m serial
+          if [ "$PART" = parallel ]; then
+            uv run pytest -q -n auto -m "not serial"
+          else
+            uv run pytest -q -m serial --shard "${PART#serial }"
+          fi
 
       - name: Lint the Helm chart
+        if: matrix.part == 'parallel'
         run: |
           # `helm template`, not just `helm lint`. LINT DOWNGRADES A FAILED
           # `required` TO A WARNING and still exits 0, so a lint-only step
@@ -175,6 +190,7 @@ jobs:
           helm template ci deploy/helm/forgd-verdict "${VALUES[@]}" >/dev/null
 
       - name: Assert the chart tests were not skipped
+        if: matrix.part == 'parallel'
         run: |
           # Every chart test skipif's on a missing helm. If the install step
           # above regresses, the invariants that keep the hash salt away
@@ -187,6 +203,7 @@ jobs:
           fi
 
       - name: Assert the gitleaks tests were not skipped
+        if: matrix.part == 'parallel'
         run: |
           set -o pipefail
           # The T1 tests skipif on a missing binary. If the install step
@@ -201,6 +218,7 @@ jobs:
           fi
 
       - name: CLI smoke test
+        if: matrix.part == 'parallel'
         run: |
           set -eux
           # Deny path exits 1 and must name the detector class, not the value.
@@ -217,6 +235,24 @@ jobs:
           out=$(echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}' \
             | uv run forgd-verdict hook --policy tests/data/ci-hook-policy.yaml)
           test -z "$out" || { echo "::error::hook emitted output on the allow path: $out"; exit 1; }
+
+  # The required checks name `test (py3.11)` and the rest, so each is a job
+  # that passes only when every part of the suite did.
+  test:
+    name: test (py${{ matrix.python }})
+    needs: suite
+    if: always() && github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Every part of the suite passed
+        env:
+          RESULT: ${{ needs.suite.result }}
+        run: |
+          test "$RESULT" = success || {
+            echo "::error::a part of the suite did not pass: $RESULT"; exit 1; }
 
   sidecar:
     name: gitleaks sidecar
