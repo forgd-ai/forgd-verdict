@@ -393,24 +393,39 @@ fleetwide visibility there is.
 | `400` | undecodable body, or gzip that is corrupt or cut short — it will not decode on retry either |
 | `413` | over `otel.max_body_bytes`, as sent or once decompressed |
 | `415` | a `Content-Encoding` other than `gzip` or `identity`, checked before the body is read |
+| `503` + `Retry-After`, `store_unavailable` | the store writer is retrying a batch it failed to write, and takes no new batch until that one is written. Checked before the body is read |
 | `503` + `Retry-After` | writer behind, `otel.export_workers` exports already being decoded and scanned (`busy`, checked before the body is read), a body not received within 30 seconds (`body_timeout`), or a transient failure; the exporter retries |
 | `503` + `Retry-After`, `too_many_records` | the body carries more than 10,000 records (log records, or spans and their events). Nothing in it is scanned or stored |
 | `503` + `Retry-After`, `decoded_too_large` | the body's attribute values render to more than 8 characters per byte of the body (at least 4,000,000), counting each level of a nested array or kvlist. Nothing in it is scanned or stored |
 
 **A `200` is not a store write.** It means the batch was scanned and its
 records were queued for the store's background writer, and an exporter does
-not resend a batch after a `200`. Delivery after that point is
-at-most-once: a failed write is retried twice and then the batch is
-dropped, as is a retried batch that no longer fits in the queue. Each
-failed write logs the WARNING `store flush failed`, whose `dropped_total`
-field counts the records dropped so far; a collector that shuts down with
-records still queued logs `store sink closed before its queue was written`.
-The collector's `/stats` does not include the store writer's counters, so
-those log lines are where such a drop shows. A full queue is handled
-before the `200`: the collector answers `503` with `busy`, counts it under
-`counts.queue_full` in `/stats`, and the exporter keeps the batch and
-retries. Answering `503` while the store is degraded, so the exporter
-retries rather than the batch being dropped, is a planned follow-up.
+not resend a batch after a `200`. The writer does not drop a failed write.
+It keeps the batch and retries it, after 1 second and then twice as long
+each time up to 30 seconds, until the store takes it. A batch that spans
+several days, orgs or sources is several store objects, and a retry writes
+only the ones that failed. Each failed write logs the WARNING
+`store flush failed` with the attempt number. The first write that succeeds
+after a failure logs `store flush recovered`.
+
+While the writer holds a failed batch, the collector answers every logs and
+traces export with `503` and `store_unavailable`, counts it under
+`counts.store_unavailable`, and the exporter keeps the batch and retries.
+`store.held` in `/stats` is the number of records being retried. Batches
+already queued behind the failed one stay queued and are written after it.
+A write the store refuses every time, such as a permission missing on one
+partition, keeps the collector answering `503` until the store accepts it
+or the collector is restarted, and a restart drops the held records as
+below.
+A full queue is also handled before the `200`: the collector answers `503`
+with `busy`, counts it under `counts.queue_full`, and the exporter retries.
+
+What the collector holds in memory is lost if the process stops before the
+store recovers. On a shutdown the writer tries the held and queued records
+for up to 10 seconds, retrying each failed write twice, then counts what is
+left in `store.dropped` and logs `store sink closed before its queue was
+written`. An exporter gives up on a batch after its own retry limit, and
+that loss shows on the sending side only.
 
 The intake (adapter 2) writes its two routes differently.
 
