@@ -325,7 +325,9 @@ a `$VAR` placeholder in `hook.scan_endpoint`, `hook.scan_token`,
 `hook.ship_endpoint`, `hook.ship_store` or `hook.ship_token`, and to a `$VAR`
 gitleaks `daemon` when the hook scans locally. The hook resolves a relative
 gitleaks `config` or `binary` against the policy file's directory, not the
-project's, and refuses a `hook.ca_file` that is not absolute.
+project's, and refuses a `hook.ca_file` that is not absolute. With
+`hook.project_overrides: true` it leaves them relative, and they resolve
+against the directory the hook runs in, which is the project.
 `hook.project_overrides` has no environment override.
 
 Without `hook.project_overrides: true`, the hook also ignores

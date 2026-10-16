@@ -8,6 +8,7 @@ baseline, the same file gitleaksd loads."""
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -89,3 +90,72 @@ def test_the_shipped_policy_gives_the_cli_and_the_daemon_the_same_config(monkeyp
         assert derived.gitleaks_config() is None, name
     for role in GITLEAKS_ROLE_PROFILES:
         assert gitleaks_daemon_config(policy, role) == str(BASELINE_CONFIG), role
+
+
+# --- relative paths under hook.project_overrides ---------------------------
+
+# A rule only the project's config has, so a finding of it shows which config
+# the scan loaded.
+PROJECT_RULE = '''
+[[rules]]
+id = "project-only-token"
+regex = 'PROJECTTOKEN[0-9]{12}'
+'''
+
+
+def _project_scan(tmp_path, monkeypatch, gitleaks: dict) -> list:
+    """Load a hook policy with `hook.project_overrides: true` and `gitleaks`,
+    from a directory other than the project, and scan from the project."""
+    import pytest
+    import yaml
+
+    from forgd_verdict.models import ScanUnit
+    from forgd_verdict.policy import load_policy
+
+    if not shutil.which("gitleaks"):
+        pytest.skip("gitleaks is not installed")
+    managed, project = tmp_path / "managed", tmp_path / "project"
+    managed.mkdir()
+    project.mkdir(exist_ok=True)
+    (project / ".gitleaks.toml").write_text(PROJECT_RULE, encoding="utf-8")
+    policy_path = managed / "policy.yaml"
+    policy_path.write_text(yaml.safe_dump({
+        "hook": {"project_overrides": True},
+        "detectors": {"gitleaks": {"enabled": True, **gitleaks}},
+    }), encoding="utf-8")
+    monkeypatch.chdir(project)
+    policy = load_policy(str(policy_path), for_hook=True)
+    assert policy.raw["detectors"]["gitleaks"].get("config") == gitleaks.get("config")
+    [detector] = [d for d in policy.build_detectors(profile="hook") if d.name == "gitleaks"]
+    return detector.scan([ScanUnit("t", None, "token PROJECTTOKEN123456789012 here")])
+
+
+def test_a_relative_config_under_project_overrides_is_the_projects_file(tmp_path, monkeypatch):
+    """gitleaks runs from a fresh temporary directory, and the relative
+    path was passed to it unchanged, so it named a file in that empty
+    directory and every scan failed on a bad --config."""
+    findings = _project_scan(tmp_path, monkeypatch, {"config": ".gitleaks.toml"})
+    assert [f.detector for f in findings] == ["gitleaks:project-only-token"]
+
+
+def test_a_relative_binary_path_under_project_overrides_runs(tmp_path, monkeypatch):
+    """`_resolve_binary` found it from this process's working directory, and
+    the child was started from the temporary one."""
+    (tmp_path / "project" / "bin").mkdir(parents=True)
+    (tmp_path / "project" / "bin" / "gitleaks").symlink_to(shutil.which("gitleaks") or "/x")
+    findings = _project_scan(tmp_path, monkeypatch,
+                             {"config": ".gitleaks.toml", "binary": "bin/gitleaks"})
+    assert [f.detector for f in findings] == ["gitleaks:project-only-token"]
+
+
+def test_the_detector_holds_absolute_paths(tmp_path, monkeypatch):
+    from forgd_verdict.detectors.gitleaks import GitleaksDetector
+
+    monkeypatch.chdir(tmp_path)
+    exe = tmp_path / "bin" / "tool"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    exe.chmod(0o755)
+    detector = GitleaksDetector(binary="bin/tool", config="rules.toml")
+    assert detector._binary == str(exe)
+    assert detector._config == str(tmp_path / "rules.toml")
