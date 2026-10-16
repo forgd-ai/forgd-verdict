@@ -789,6 +789,165 @@ def test_a_persistent_store_outage_still_gives_up():
     assert sink.errors >= 3, sink.stats()
 
 
+class _Outage:
+    """A store that fails every write while `down` is set, and otherwise
+    records each call's records."""
+
+    def __init__(self, down=True, fail_on=None):
+        self.down = down
+        self.fail_on = fail_on
+        self.calls: list[list] = []
+
+    def write_verdicts(self, batch):
+        if self.down or (self.fail_on is not None and self.fail_on(batch)):
+            raise RuntimeError("storage account unreachable")
+        self.calls.append(list(batch))
+        return len(batch)
+
+
+def _wait(cond, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
+
+
+def _holding_sink(store, **kw):
+    from forgd_verdict.store.sink import StoreSink
+
+    kw.setdefault("batch_size", 1)
+    return StoreSink(store, salt="s", flush_interval_s=0.05, hold_failed=True,
+                     hold_retry_s=0.02, hold_retry_max_s=0.05, **kw)
+
+
+def test_a_holding_sink_writes_an_accepted_record_once_the_store_recovers():
+    """The writer exhausting its retries dropped the batch, after the
+    collector had answered 200 for it, and an exporter does not resend a
+    batch it got a 200 for."""
+    store = _Outage()
+    sink = _holding_sink(store)
+    try:
+        assert sink.submit_records([rec(request_id="r1")])
+        assert _wait(lambda: sink.errors > sink.max_retries + 1)
+        assert sink.degraded
+        assert sink.dropped == 0, sink.stats()
+        assert sink.stats()["held"] == 1 and sink.stats()["pending"] == 1
+        store.down = False
+        assert _wait(lambda: sink.written == 1), sink.stats()
+        assert not sink.degraded
+        assert sink.dropped == 0
+        assert [r.request_id for call in store.calls for r in call] == ["r1"]
+    finally:
+        sink.close()
+
+
+def test_a_degraded_sink_refuses_new_records_and_takes_them_after_recovery():
+    """Refused, so the collector answers 503 and the exporter keeps the
+    batch, rather than queueing records a restart would lose."""
+    store = _Outage()
+    sink = _holding_sink(store)
+    try:
+        assert sink.submit_records([rec(request_id="r1")])
+        assert _wait(lambda: sink.degraded)
+        assert not sink.submit_records([rec(request_id="r2")])
+        assert not sink.submit_record(rec(request_id="r3"))
+        store.down = False
+        assert _wait(lambda: not sink.degraded)
+        assert sink.submit_records([rec(request_id="r2")])
+        assert _wait(lambda: sink.written == 2), sink.stats()
+    finally:
+        sink.close()
+
+
+def test_a_held_batch_is_retried_without_rewriting_the_groups_already_written():
+    """A store writes one object per (source, org, day). A retry of the
+    whole batch after the second object failed wrote the first again."""
+    store = _Outage(down=False,
+                    fail_on=lambda batch: batch[0].day == "2026-09-18" and fail[0])
+    fail = [True]
+    sink = _holding_sink(store, batch_size=2)
+    try:
+        assert sink.submit_records([rec(request_id="a", day="2026-09-17"),
+                                    rec(request_id="b", day="2026-09-18")])
+        assert _wait(lambda: sink.degraded)
+        assert sink.stats()["held"] == 1
+        fail[0] = False
+        assert _wait(lambda: sink.written == 2), sink.stats()
+        assert [[r.request_id for r in call] for call in store.calls] == [["a"], ["b"]]
+    finally:
+        sink.close()
+
+
+def test_a_holding_sink_retries_less_often_the_longer_the_outage():
+    sink = _holding_sink(None)
+    sink.hold_retry_s, sink.hold_retry_max_s = 1.0, 30.0
+    delays = []
+    for attempt in range(1, 8):
+        sink._held_attempts = attempt
+        delays.append(sink._hold_delay())
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+    # 2.0 ** 1024 overflows: about 8.5 hours of outage at the 30 s cap.
+    sink._held_attempts = 5000
+    assert sink._hold_delay() == 30.0
+
+
+def test_a_degraded_refusal_is_not_counted_as_dropped():
+    """The collector answers it 503 and the exporter sends it again."""
+    sink = _holding_sink(_Outage())
+    try:
+        assert sink.submit_records([rec(request_id="r1")])
+        assert _wait(lambda: sink.degraded)
+        assert not sink.submit_records([rec(request_id="r2")])
+        assert sink.dropped == 0, sink.stats()
+    finally:
+        sink.close()
+
+
+def test_flush_on_a_holding_sink_waits_for_the_held_batch_to_be_written():
+    store = _Outage()
+    sink = _holding_sink(store, batch_size=100)
+    try:
+        assert sink.submit_records([rec(request_id="r1")])
+        assert not sink.flush(timeout_s=0.3)
+        assert sink.degraded
+        store.down = False
+        assert sink.flush(timeout_s=5)
+        assert sink.written == 1
+    finally:
+        sink.close()
+
+
+def test_closing_a_sink_that_holds_a_batch_counts_and_logs_it(caplog):
+    import logging
+
+    store = _Outage()
+    sink = _holding_sink(store, close_timeout_s=2.0)
+    assert sink.submit_records([rec(request_id="r1"), rec(request_id="r2")])
+    assert _wait(lambda: sink.degraded)
+    with caplog.at_level(logging.WARNING, logger="forgd_verdict"):
+        sink.close()
+    assert sink.dropped == 2, sink.stats()
+    assert sink.written == 0
+    assert any(r.getMessage() == "store flush failed" for r in caplog.records)
+
+
+def test_a_sink_not_holding_still_drops_after_its_retries():
+    """The verdict server and the intake keep the bounded retry: neither
+    has a sender that resends on a refusal."""
+    from forgd_verdict.store.sink import StoreSink
+
+    sink = StoreSink(_Outage(), salt="s", batch_size=1, flush_interval_s=0.05)
+    try:
+        assert sink.submit_record(rec())
+        assert _wait(lambda: sink.dropped == 1), sink.stats()
+        assert not sink.degraded
+        assert sink.submit_record(rec())
+    finally:
+        sink.close()
+
+
 def test_two_runs_in_one_container_never_name_the_same_object():
     """The instance id must not depend on a variable only one platform sets.
 

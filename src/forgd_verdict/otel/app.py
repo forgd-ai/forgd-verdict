@@ -157,6 +157,7 @@ class Collector:
             batch_size=int(self.config.get("store_batch_size", 50)),
             flush_interval_s=float(self.config.get("store_flush_s", 30)),
             max_queue=2 * MAX_RECORDS,
+            hold_failed=True,
         )
         # Adapter 5. Empty unless `sinks:` is configured, and nothing is
         # built or run when it is absent. Built BEFORE serving starts so a
@@ -471,6 +472,9 @@ class Collector:
                              self._cors(headers.get("origin", "")))
             return
 
+        if self.sink.degraded:
+            await self._store_unavailable(headers, send)
+            return
         if not await self._encoding_supported(headers, send):
             return
         if not await self._export_slot(headers, send):
@@ -648,6 +652,9 @@ class Collector:
             # The sender retries this batch, so its findings must not count
             # as recorded.
             self._seen.forget(seen_added)
+            if self.sink.degraded:
+                await self._store_unavailable(headers, send)
+                return
             # Backpressure rather than silence: the writer is behind, and
             # the exporter holding the batch is a better buffer than this
             # process pretending it stored something.
@@ -671,6 +678,16 @@ class Collector:
                       or UNSCANNED_CAPPED in v.tiers_dropped))
         await self._json(send, 200, {"partialSuccess": {}},
                          self._cors(headers.get("origin", "")))
+
+    async def _store_unavailable(self, headers: dict[str, str], send: Callable) -> None:
+        """503 `store_unavailable`: the store writer holds a batch it could
+        not write, and takes nothing more until it has written it."""
+        self.bump("store_unavailable")
+        await self._json(
+            send, 503, {"error": "store_unavailable"},
+            extra_headers=[(b"retry-after", b"15"),
+                           *self._cors(headers.get("origin", ""))],
+        )
 
     def _fleet_refusal(self, org: dict, records: list, claims: set[str]) -> str | None:
         """Why a batch on a fleet token cannot be filed under one org of its
@@ -781,10 +798,10 @@ class Collector:
             # ingest, so a downstream outage is invisible upstream and
             # this counter is the only place it shows.
             "sinks": [f.stats() for f in self.forwarders],
-            # The store write runs after the 200, so a batch dropped after
-            # its retries shows here and in the logs, nowhere upstream.
+            # `held` is the failed batch the writer is retrying; while it is
+            # non-zero, exports are answered 503 `store_unavailable`.
             "store": {"written": self.sink.written, "dropped": self.sink.dropped,
-                      "errors": self.sink.errors},
+                      "errors": self.sink.errors, "held": self.sink.stats()["held"]},
             "records_logs": counts.get("records_logs", 0),
             "records_traces": counts.get("records_traces", 0),
             "counts": {**counts, "metadata_redacted": self.meta.redacted},

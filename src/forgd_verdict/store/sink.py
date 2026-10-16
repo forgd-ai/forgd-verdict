@@ -11,6 +11,11 @@ requirement: a storage outage must never become a webhook failure. So the
 queue is bounded, puts never block, and every exception inside the writer is
 swallowed and counted. Dropping records is strictly better than adding
 latency to a verdict.
+
+The collector constructs it with `hold_failed=True`. An OTLP exporter does
+not resend a batch it got a 200 for, and does resend one it got a 503 for,
+so there the writer keeps a failed batch and retries it until it is written,
+and the sink refuses new records while it holds one.
 """
 
 from __future__ import annotations
@@ -59,6 +64,9 @@ class StoreSink:
         # drop NEWER records to save older ones.
         max_retries: int = 2,
         close_timeout_s: float = 10.0,
+        hold_failed: bool = False,
+        hold_retry_s: float = 1.0,
+        hold_retry_max_s: float = 30.0,
     ):
         self.store = store
         self.salt = salt
@@ -72,6 +80,15 @@ class StoreSink:
         self.retries = 0
         self.max_retries = max_retries
         self.close_timeout_s = close_timeout_s
+        self.hold_failed = hold_failed
+        self.hold_retry_s = hold_retry_s
+        self.hold_retry_max_s = hold_retry_max_s
+        # The unwritten part of a failed batch, under `hold_failed`. Written
+        # only by the writer thread; non-empty means the sink is degraded.
+        self._held: list[VerdictRecord] = []
+        self._held_attempts = 0
+        # Flush requests answered once the held batch is written.
+        self._held_flushes: list[_FlushRequest] = []
         self._closing = threading.Event()
         # Held across the accepting check and the put in `_enqueue` and
         # `submit_records`, across every put in `_requeue`, and while
@@ -92,6 +109,12 @@ class StoreSink:
     @property
     def enabled(self) -> bool:
         return self.store is not None
+
+    @property
+    def degraded(self) -> bool:
+        """True while the writer holds a batch it failed to write. Only
+        `hold_failed` holds one."""
+        return bool(self._held)
 
     def submit(self, row: dict[str, Any], findings: list[Finding] | None = None) -> None:
         """Enqueue one verdict. Never blocks, never raises."""
@@ -130,10 +153,13 @@ class StoreSink:
 
     def submit_records(self, records: list[VerdictRecord]) -> bool:
         """Enqueue all of `records` or none of them. True if they were
-        accepted; a refusal counts every record in `dropped`."""
+        accepted; a refusal counts every record in `dropped`, except one
+        while `degraded`, which the caller is expected to send again."""
         if self.store is None or not records:
             return True
         with self._accept_lock:
+            if self._held:
+                return False
             free = (self._queue.maxsize - self._queue.qsize()
                     if self._queue.maxsize > 0 else len(records))
             if self._closing.is_set() or not self._thread.is_alive() or free < len(records):
@@ -147,7 +173,8 @@ class StoreSink:
         """Write every record accepted before this call, waiting at most
         `timeout_s` (default `close_timeout_s`). True when the writer got
         through them in time. A batch that failed is retried as in normal
-        running and still counts as got through."""
+        running and still counts as got through, except under `hold_failed`,
+        where it counts once it is written."""
         if self._thread is None:
             return True
         deadline = time.monotonic() + (self.close_timeout_s if timeout_s is None
@@ -169,9 +196,10 @@ class StoreSink:
 
     def _enqueue(self, record: VerdictRecord) -> None:
         """`put_nowait`, raising `queue.Full` once the sink is closing or its
-        writer thread has exited: nothing would write the record."""
+        writer thread has exited, when nothing would write the record, and
+        while it is `degraded`."""
         with self._accept_lock:
-            if self._closing.is_set() or not self._thread.is_alive():
+            if self._closing.is_set() or not self._thread.is_alive() or self._held:
                 raise queue.Full
             self._queue.put_nowait(record)
 
@@ -182,6 +210,13 @@ class StoreSink:
             if self._closing.is_set():
                 self._drain(batch)
                 return
+            if self._held:
+                self._closing.wait(self._hold_delay())
+                if not self._closing.is_set():
+                    self._flush(list(self._held))
+                    if not self._held:
+                        self._answer_held_flushes()
+                continue
             timeout = max(0.1, self.flush_interval_s - (time.monotonic() - last_flush))
             try:
                 item = self._queue.get(timeout=min(timeout, _CLOSE_POLL_S))
@@ -191,7 +226,10 @@ class StoreSink:
                 self._flush(batch)
                 batch = []
                 last_flush = time.monotonic()
-                item.done.set()
+                if self._held:
+                    self._held_flushes.append(item)
+                else:
+                    item.done.set()
                 continue
             if item is not None:
                 batch.append(item)
@@ -205,8 +243,12 @@ class StoreSink:
                 last_flush = time.monotonic()
 
     def _drain(self, batch: list[VerdictRecord]) -> None:
-        """Write `batch` and everything still queued, in batches. A failed
-        batch is requeued and retried as in normal running."""
+        """Write a held batch, `batch` and everything still queued, in
+        batches. A failed batch is requeued and retried `max_retries` times,
+        held or not."""
+        batch = self._held + batch
+        self._held = []
+        self._answer_held_flushes()
         while True:
             try:
                 item = self._queue.get_nowait()
@@ -237,17 +279,73 @@ class StoreSink:
                 except queue.Full:
                     self.dropped += 1
 
+    def _answer_held_flushes(self) -> None:
+        for request in self._held_flushes:
+            request.done.set()
+        self._held_flushes = []
+
+    def _hold_delay(self) -> float:
+        """Seconds before the next attempt at the held batch: `hold_retry_s`,
+        doubling per failed attempt, at most `hold_retry_max_s`. The exponent
+        is capped because `2.0 ** 1024` raises OverflowError."""
+        exponent = min(max(0, self._held_attempts - 1), 30)
+        return min(self.hold_retry_max_s, self.hold_retry_s * 2 ** exponent)
+
+    def _write(self, batch: list[VerdictRecord]) -> None:
+        """`write_verdicts`, counting what it wrote."""
+        self.written += self.store.write_verdicts(batch)
+
+    def _write_holding(self, batch: list[VerdictRecord]) -> None:
+        """Write `batch` one (source, org, day) group at a time, which is one
+        store object each, so that a failure part-way holds only the groups
+        not written and a retry does not write the others again."""
+        groups: dict[tuple, list[VerdictRecord]] = {}
+        for record in batch:
+            groups.setdefault((record.source, record.org, record.day), []).append(record)
+        pending = list(groups.values())
+        while pending:
+            try:
+                self._write(pending[0])
+            except Exception:
+                self._held = _flatten(pending)
+                raise
+            pending.pop(0)
+            if self._held:
+                self._held = _flatten(pending)
+
     def _flush(self, batch: list[VerdictRecord]) -> None:
         if not batch:
             return
         started = time.monotonic()
         self._inflight = len(batch)
         self._batched = 0
+        holding = self.hold_failed and not self._closing.is_set()
         try:
-            self.written += self.store.write_verdicts(batch)
+            if holding:
+                self._write_holding(batch)
+                if self._held_attempts:
+                    _log.warning("store flush recovered",
+                                 extra={"fields": {"records": len(batch),
+                                                   "attempts": self._held_attempts}})
+                self._held_attempts = 0
+            else:
+                self._write(batch)
             self.retries = 0
         except Exception as exc:  # noqa: BLE001 - a storage outage is not a webhook failure
             self.errors += 1
+            if holding:
+                self._held_attempts += 1
+                _log.warning(
+                    "store flush failed",
+                    extra={"fields": {
+                        "error": type(exc).__name__,
+                        "records": len(batch),
+                        "held": len(self._held),
+                        "attempt": self._held_attempts,
+                        "dropped_total": self.dropped,
+                    }},
+                )
+                return
             # RETRY before dropping, so a transient error does not cost
             # findings permanently. A typical one is a pod that starts
             # serving before its federated token is available, which would
@@ -287,9 +385,11 @@ class StoreSink:
 
     def stats(self) -> dict[str, Any]:
         """`pending` is every accepted record not yet written: `queued`,
-        plus `batched` in the writer's hands, plus `inflight` in a write."""
+        plus `batched` in the writer's hands, plus `inflight` in a write or
+        `held` after a failed one. A retry of the held batch is in flight
+        too, which is why it is the larger of the two and not their sum."""
         queued = self._queue.qsize() if self.store is not None else 0
-        batched, inflight = self._batched, self._inflight
+        batched, inflight, held = self._batched, self._inflight, len(self._held)
         return {
             "enabled": self.enabled,
             "written": self.written,
@@ -298,7 +398,9 @@ class StoreSink:
             "queued": queued,
             "batched": batched,
             "inflight": inflight,
-            "pending": queued + batched + inflight,
+            "held": held,
+            "degraded": bool(held),
+            "pending": queued + batched + max(inflight, held),
             "flushes": self.flushes,
             "last_flush_ms": self.last_flush_ms,
         }
@@ -306,7 +408,7 @@ class StoreSink:
     def close(self) -> None:
         """Write what is queued, waiting at most `close_timeout_s`.
 
-        Rows still queued or in flight when the wait ends are counted in
+        Rows still queued, held or in flight when the wait ends are counted in
         `dropped` and logged, whether the writer is still running or has
         exited without writing them.
         """
@@ -317,7 +419,7 @@ class StoreSink:
                 return
             self._closing.set()
         self._thread.join(timeout=self.close_timeout_s)
-        lost = self._queue.qsize() + self._inflight
+        lost = self._queue.qsize() + max(self._inflight, len(self._held))
         if not lost:
             return
         self.dropped += lost
@@ -325,3 +427,8 @@ class StoreSink:
             "store sink closed before its queue was written",
             extra={"fields": {"records": lost, "dropped_total": self.dropped}},
         )
+
+
+def _flatten(groups: list[list[VerdictRecord]]) -> list[VerdictRecord]:
+    """`groups` flattened, in order."""
+    return [record for group in groups for record in group]

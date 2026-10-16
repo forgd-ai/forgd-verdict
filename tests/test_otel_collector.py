@@ -1119,13 +1119,75 @@ async def test_stats_counts_store_writes_and_drops(tmp_path):
 
     status, body = await client.get("/stats", auth_hdr)
     assert status == 200
-    assert body["store"] == {"written": 0, "dropped": 0, "errors": 0}
+    assert body["store"] == {"written": 0, "dropped": 0, "errors": 0, "held": 0}
 
     c.sink.dropped += 3
     c.sink.errors += 1
     status, body = await client.get("/stats", auth_hdr)
-    assert body["store"] == {"written": 0, "dropped": 3, "errors": 1}
+    assert body["store"] == {"written": 0, "dropped": 3, "errors": 1, "held": 0}
     c.close()
+
+
+class _FailingStore(LocalFileStore):
+    """A local store whose writes fail while `down` is set."""
+
+    down = False
+
+    def write_verdicts(self, records):
+        if self.down:
+            raise OSError("store unreachable")
+        return super().write_verdicts(records)
+
+
+def _turn_batch(n: int):
+    return logs_json([{"attributes": {
+        "event.name": "claude_code.user_prompt", "prompt": f"deploy with {SEEDED}",
+        "session.id": f"sess-{n}", "prompt.id": f"turn-{n}"}, "body": ""}], RESOURCE)
+
+
+async def test_a_batch_answered_200_is_written_once_the_store_recovers(tmp_path):
+    """The collector answered 200 on queueing, and the writer dropped the
+    batch after two failed retries. An exporter does not resend a batch it
+    got a 200 for, so its findings were lost with only a counter to show."""
+    store = _FailingStore(tmp_path / "findings", instance="test")
+    store.down = True
+    c = Collector(make_policy(), store=store)
+    c.sink.hold_retry_s = c.sink.hold_retry_max_s = 0.02
+    client = ASGIClient(c)
+    try:
+        status, _ = await client.post("/v1/logs", _turn_batch(1), auth())
+        assert status == 200
+        assert not c.sink.flush(timeout_s=0.2)
+        # Past the point where the bounded retry dropped it.
+        assert _wait_for(lambda: c.sink.errors > c.sink.max_retries + 1)
+        assert c.sink.degraded and c.sink.dropped == 0
+
+        # While the writer holds the failed batch, an export is refused
+        # and the exporter keeps it.
+        status, body = await client.post("/v1/logs", _turn_batch(2), auth())
+        assert status == 503
+        assert body == {"error": "store_unavailable"}
+        assert c._counts["store_unavailable"] == 1
+
+        store.down = False
+        assert _wait_for(lambda: not c.sink.degraded)
+        status, _ = await client.post("/v1/logs", _turn_batch(2), auth())
+        assert status == 200
+        rows = stored(c)
+    finally:
+        c.close()
+    assert c.sink.dropped == 0
+    assert sorted(r.session_id for r in rows) == ["sess-1", "sess-2"]
+    assert all(r.findings_count == 1 for r in rows)
+
+
+def _wait_for(cond, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
 
 
 def test_a_short_metrics_token_refuses_to_start_the_collector():
