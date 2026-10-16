@@ -35,9 +35,13 @@ updates:
         update-types: [major]
 
   - package-ecosystem: github-actions
+    # For any directory other than /, Dependabot reads the YAML files directly
+    # in it, not a .github/workflows below it.
     directories:
       - /
       - /.github/actions/install-gitleaks
+      - /examples/github
+      - /examples/deployment-repo/.github/workflows
     schedule:
       interval: weekly
     groups:

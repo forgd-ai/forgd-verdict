@@ -36,7 +36,8 @@ def test_the_config_is_version_2():
 @pytest.mark.parametrize("ecosystem, directories", [
     ("pip", {"/", "/packaging/forgd-verdict-hook"}),
     ("gomod", {"/sidecar/gitleaksd", "/deploy/gitleaks-cli"}),
-    ("github-actions", {"/", "/.github/actions/install-gitleaks"}),
+    ("github-actions", {"/", "/.github/actions/install-gitleaks", "/examples/github",
+                        "/examples/deployment-repo/.github/workflows"}),
     ("docker", {"/deploy"}),
 ])
 def test_each_ecosystem_lists_its_directories(ecosystem, directories):

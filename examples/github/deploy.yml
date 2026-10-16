@@ -2,10 +2,9 @@ name: deploy
 
 # A template for deploying a fork to its own cloud. It does not run from
 # here: copy it to .github/workflows/deploy.yml in your fork, then set the
-# variables below on the GitHub environment each job names. Dependabot does
-# not read this file where it is, so its action pins are current only as of
-# this release; once the copy is under .github/workflows, Dependabot keeps
-# them current.
+# variables below on the GitHub environment each job names. Dependabot keeps
+# its action pins current here, and keeps your copy's current once it is
+# under .github/workflows.
 #
 # A `v*` tag, or a manual run, builds the images on the runner, pushes them
 # to your registry and rolls your deployment on Azure, AWS, GCP or several.
