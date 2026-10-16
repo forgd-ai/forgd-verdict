@@ -26,7 +26,7 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +43,7 @@ from .lockout import (
     anchored_head,
     expected_roles,
     fresh_head,
+    override_record_leaf,
     override_records,
     provable,
 )
@@ -136,6 +137,12 @@ STARTS = (ACTION_INIT, ACTION_RECOVER, ACTION_CHECKPOINT)
 # before a change that would take the head further from its start.
 CHECKPOINT_EVERY = 100
 
+# A change and a cold read read only the request records whose ids are at
+# most this much older than the verified head's. A record at a later
+# revision was built on that head, so it was written after the head's
+# record; this allows for writer clocks that disagree by up to a day.
+REQUEST_WINDOW = timedelta(days=1)
+
 # What the dashboard may do: everything but migration, which only the CLI
 # runs.
 DASHBOARD_ACTIONS = frozenset({
@@ -215,6 +222,12 @@ ERROR_HEAD_AMBIGUOUS = "head_ambiguous"
 REFUSED_HEAD_AMBIGUOUS = (f"{ERROR_HEAD_AMBIGUOUS}: more than one signed request record at the "
                           "newest revision verifies, and no verification record or signed "
                           "outcome says which one was applied")
+# Why a change writes nothing when its request record would be dated more
+# than REQUEST_WINDOW before the head it builds on, where a later check for
+# later requests would not read it.
+ERROR_CLOCK_BEHIND_HEAD = "clock_behind_head"
+REFUSED_CLOCK_BEHIND_HEAD = (f"{ERROR_CLOCK_BEHIND_HEAD}: this change would be dated more than a "
+                             "day before the change it builds on; check this process's clock")
 ANCHOR_ERRORS = (ERROR_ANCHOR_MISSING, ERROR_BEFORE_ANCHOR, ERROR_NOT_ANCHORED,
                  ERROR_BEHIND_REQUEST)
 
@@ -993,7 +1006,7 @@ def unanchored_head(store: Any, verify_keys: VerifyKeys = None) -> dict[str, Any
         fresh, anchor = fresh_head(store, verify_keys, identities=False)
         if not fresh or anchor is None or state.revision <= anchor["revision"]:
             return None
-        if latest_request_revision(store, verify_keys) > state.revision:
+        if latest_request_revision(store, verify_keys, after=state.audit_id) > state.revision:
             return None
     except Exception:  # noqa: BLE001 - an unread or invalid object names no head
         return None
@@ -1026,8 +1039,9 @@ def check_anchor(state: ControlState, anchor: Mapping[str, Any] | None, *, cold:
 
 def check_requests(store: Any, state: ControlState, verify_keys: VerifyKeys = None) -> None:
     """InvalidState (ERROR_BEHIND_REQUEST) when a request record
-    latest_request_revision counts names a later revision than `state`."""
-    if latest_request_revision(store, verify_keys) > state.revision:
+    latest_request_revision counts names a later revision than `state`,
+    reading only the records within REQUEST_WINDOW of its head's."""
+    if latest_request_revision(store, verify_keys, after=state.audit_id) > state.revision:
         raise InvalidState("object_behind_request")
 
 
@@ -1958,8 +1972,17 @@ def apply_change(store: Any, actor: Mapping[str, Any], change: Change, *,
     if expect_revision is not None and expect_revision != state.revision:
         raise StoreConflict("the object changed since the form was rendered")
     if (status == STATUS_OK and change.action != ACTION_RECOVER
-            and latest_request_revision(store, verify_keys) > state.revision):
+            and latest_request_revision(store, verify_keys, after=state.audit_id)
+            > state.revision):
         raise Refused(REFUSED_BEHIND_REQUEST)
+    if status == STATUS_OK and _before_window(moment, state.audit_id):
+        _log.warning("runtime overrides change refused: its record would be dated more than a "
+                     "day before the head it builds on", extra={"fields": {
+                         "head": state.audit_id, "at": stamp}})
+        raise Refused(REFUSED_CLOCK_BEHIND_HEAD)
+    # A recover has no head to bound the scan by, so it reads every request
+    # record, once.
+    records = _request_records(store) if change.action == ACTION_RECOVER else None
     if (status == STATUS_OK and change.action not in (ACTION_INIT, ACTION_RECOVER)
             and (links >= CHECKPOINT_EVERY
                  or (verify_keys is not None and _rotated(store, state, signing_key)))):
@@ -1971,7 +1994,7 @@ def apply_change(store: Any, actor: Mapping[str, Any], change: Change, *,
             raise Refused(REFUSED_ORPHANED)
         if change.action != ACTION_INIT and not recorded:
             raise Refused(ERROR_UNINITIALIZED)
-        state = replace(state, revision=highest_revision(store))
+        state = replace(state, revision=highest_revision(store, records))
     audit_id = new_audit_id(moment)
     retired_by = None
 
@@ -2004,11 +2027,11 @@ def apply_change(store: Any, actor: Mapping[str, Any], change: Change, *,
     elif change.action == ACTION_RECOVER:
         if status == STATUS_OK:
             if not (anchor_lapsed(store, verify_keys)
-                    or latest_request_revision(store, verify_keys) > state.revision):
+                    or _latest_requests(store, verify_keys, records)[0] > state.revision):
                 raise Refused("the object is valid; there is nothing to recover")
             raw = json.loads(state.to_bytes())
         new_state, old, new, retired_by = _recovered(store, status, raw, recover_mode, actor,
-                                                     stamp, audit_id, verify_keys)
+                                                     stamp, audit_id, verify_keys, records)
     else:
         new_state, old, new = _next(state, change, actor, stamp, audit_id)
 
@@ -2173,9 +2196,10 @@ def _retired_ref(store: Any, raw: dict | None, verify_keys: VerifyKeys = None,
 
 def _recovered(store: Any, status: str, raw: dict | None, mode: str | None,
                actor: Mapping[str, Any], stamp: str, audit_id: str,
-               verify_keys: VerifyKeys = None,
+               verify_keys: VerifyKeys = None, records: Records | None = None,
                ) -> tuple[ControlState, Any, Any, dict[str, str] | None]:
-    """(state, old value, new value, retired_by) for a recover.
+    """(state, old value, new value, retired_by) for a recover, from
+    `records` (_request_records, read when not given).
 
     The state is the one the newest verifiable chain produced, with `mode`
     set over it when given. With no verifiable chain it holds only `mode`,
@@ -2194,9 +2218,10 @@ def _recovered(store: Any, status: str, raw: dict | None, mode: str | None,
     Its revision is above every revision a request record or the head the
     newest signed verification record names (lockout.anchored_head).
     """
+    records = _request_records(store) if records is None else records
     vouched: dict[str, str] = {}
     anchor = anchored_head(store, verify_keys)
-    kept = _recoverable(store, raw, verify_keys, vouched, anchor)
+    kept = _recoverable(store, raw, verify_keys, vouched, anchor, records)
     if kept is None:
         state = ControlState()
         _log.warning("recover found no verifiable audit chain: the recovered object drops "
@@ -2214,7 +2239,7 @@ def _recovered(store: Any, status: str, raw: dict | None, mode: str | None,
                       if _applied_by_chain(store, raw) else None)
         named = retired_by is not None
         if not named:
-            retired_by = _chained_migration(store, verify_keys)
+            retired_by = _chained_migration(store, verify_keys, records)
             if retired_by is not None and not _outcome_says(
                     store, retired_by["id"], verify_keys, ("applied",)):
                 _log.warning("recover found a migration off the kept chain with no signed "
@@ -2229,7 +2254,7 @@ def _recovered(store: Any, status: str, raw: dict | None, mode: str | None,
                              "recover kept the retirement of a migration on a verified chain "
                              "over a kept state that is not retired", extra={"fields": {
                                  "retired_by": retired_by["id"]}})
-        elif _retired_request(store, verify_keys):
+        elif _retired_request(store, verify_keys, records):
             raise Refused(REFUSED_RETIREMENT_UNVERIFIED)
     overrides = dict(state.overrides)
     if mode is not None:
@@ -2240,7 +2265,7 @@ def _recovered(store: Any, status: str, raw: dict | None, mode: str | None,
     revision = (raw or {}).get("revision")
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
         revision = 0
-    revision = max(revision, highest_revision(store),
+    revision = max(revision, highest_revision(store, records),
                    anchor["revision"] if anchor is not None else 0)
     state = replace(state, revision=revision, overrides=overrides)
     return state, {"status": status, "kept": kept is not None}, None, retired_by
@@ -2252,8 +2277,10 @@ _RECOVER_CANDIDATES = 10
 
 def _recoverable(store: Any, raw: dict | None, verify_keys: VerifyKeys = None,
                  vouched: dict[str, str] | None = None,
-                 anchor: Mapping[str, Any] | None = None) -> ControlState | None:
-    """The object the newest verifiable chain produced, or None.
+                 anchor: Mapping[str, Any] | None = None,
+                 records: Records | None = None) -> ControlState | None:
+    """The object the newest verifiable chain produced, or None, from
+    `records` (_request_records, read when not given).
 
     The first candidate for its head is the request record
     latest_request_revision counts at its revision, when that is later
@@ -2274,7 +2301,8 @@ def _recoverable(store: Any, raw: dict | None, verify_keys: VerifyKeys = None,
     revision = (raw or {}).get("revision")
     if not isinstance(revision, int) or isinstance(revision, bool):
         revision = None
-    top, latest = _latest_requests(store, verify_keys)
+    records = _request_records(store) if records is None else records
+    top, latest = _latest_requests(store, verify_keys, records)
     unsettled = [r["id"] for r in latest
                  if isinstance(r.get("id"), str) and _AUDIT_ID.fullmatch(r["id"])
                  and not _abandoned(store, r, verify_keys, ("conflict",))]
@@ -2294,21 +2322,17 @@ def _recoverable(store: Any, raw: dict | None, verify_keys: VerifyKeys = None,
         named = anchor["audit_id"]
     if isinstance(named, str) and _AUDIT_ID.fullmatch(named) and named not in candidates:
         candidates.append(named)
-    records = []
-    for name in _requests(store):
+    linked = []
+    for name, record in records:
         audit_id = name.rsplit("/", 1)[-1][: -len("-request.json")]
-        try:
-            record = json.loads(store.get_audit(name) or b"{}")
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            continue
         if isinstance(record, dict) and _AUDIT_ID.fullmatch(audit_id):
             base = (record.get("base_audit_id"), record.get("base_hash"))
-            records.append((_base_revision(record), audit_id, base))
+            linked.append((_base_revision(record), audit_id, base))
     siblings: dict[Any, int] = {}
-    for _, _, base in records:
+    for _, _, base in linked:
         siblings[base] = siblings.get(base, 0) + 1
-    built_on = {base[0] for _, _, base in records}
-    for _, audit_id, base in sorted(records, key=lambda r: (r[0], r[1]), reverse=True):
+    built_on = {base[0] for _, _, base in linked}
+    for _, audit_id, base in sorted(linked, key=lambda r: (r[0], r[1]), reverse=True):
         if audit_id in candidates:
             continue
         if siblings[base] > 1 and audit_id not in built_on:
@@ -2363,17 +2387,15 @@ def _chain_verifies(store: Any, audit_id: str, verify_keys: VerifyKeys = None) -
     return True
 
 
-def _chained_migration(store: Any, verify_keys: VerifyKeys = None) -> dict[str, str] | None:
-    """The newest `legacy.migrate` request record signed by one of
+def _chained_migration(store: Any, verify_keys: VerifyKeys = None,
+                       records: Records | None = None) -> dict[str, str] | None:
+    """The newest `legacy.migrate` request record in `records`
+    (_request_records, read when not given) signed by one of
     `verify_keys`, with no signed `error` or `conflict` outcome, whose
     chain verifies back to a chain start (`_walk`), as its id and SHA-256.
     None when there is none."""
     migrations = []
-    for name in _requests(store):
-        try:
-            record = json.loads(store.get_audit(name) or b"{}")
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            continue
+    for _, record in _request_records(store) if records is None else records:
         if (isinstance(record, dict) and record.get("action") == ACTION_MIGRATE
                 and isinstance(record.get("id"), str) and _AUDIT_ID.fullmatch(record["id"])):
             migrations.append((_base_revision(record), record["id"]))
@@ -2390,14 +2412,12 @@ def _chained_migration(store: Any, verify_keys: VerifyKeys = None) -> dict[str, 
     return None
 
 
-def _retired_request(store: Any, verify_keys: VerifyKeys = None) -> bool:
-    """Whether a request record signed by one of `verify_keys`, with no
-    signed `error` or `conflict` outcome, says `legacy_markers_retired`."""
-    for name in _requests(store):
-        try:
-            record = json.loads(store.get_audit(name) or b"{}")
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            continue
+def _retired_request(store: Any, verify_keys: VerifyKeys = None,
+                     records: Records | None = None) -> bool:
+    """Whether a request record in `records` (_request_records, read when
+    not given) signed by one of `verify_keys`, with no signed `error` or
+    `conflict` outcome, says `legacy_markers_retired`."""
+    for _, record in _request_records(store) if records is None else records:
         if (isinstance(record, dict) and _retired(record) and _signed_by(record, verify_keys)
                 and not _abandoned(store, record, verify_keys, ("error", "conflict"))):
             return True
@@ -2418,6 +2438,44 @@ def _requests(store: Any, *, newest_first: bool = False) -> Iterator[str]:
             if n.endswith("-request.json"))
 
 
+# Each request record's name and its parsed body, None when it does not parse.
+Records = list[tuple[str, Any]]
+
+
+def _before_window(moment: datetime, audit_id: Any) -> bool:
+    """Whether a record minted at `moment` would be dated more than
+    REQUEST_WINDOW before audit record `audit_id`'s id."""
+    if not (isinstance(audit_id, str) and _AUDIT_ID.fullmatch(audit_id)):
+        return False
+    head = datetime.strptime(audit_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+    return moment.astimezone(UTC).replace(microsecond=0) < head - REQUEST_WINDOW
+
+
+def _request_records(store: Any, after: str | None = None) -> Records:
+    """The request records, day by day, each read once. With `after`, an
+    audit id, only those whose ids are no more than REQUEST_WINDOW older
+    than it, listing only the days they can be in. Store read errors
+    propagate."""
+    start = None
+    if isinstance(after, str) and _AUDIT_ID.fullmatch(after):
+        moment = datetime.strptime(after[:16], "%Y%m%dT%H%M%SZ") - REQUEST_WINDOW
+        start = f"{moment:%Y%m%dT%H%M%SZ}"
+    if start is None:
+        names: Iterable[str] = _requests(store)
+    else:
+        first_day = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
+        names = (n for day in store.audit_days() if day >= first_day
+                 for n in store.list_audit(day, override_record_leaf(day))
+                 if n.endswith("-request.json") and n.rsplit("/", 1)[-1] >= start)
+    records: Records = []
+    for name in names:
+        try:
+            records.append((name, json.loads(store.get_audit(name) or b"{}")))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            records.append((name, None))
+    return records
+
+
 def _stored_hash(store: Any, audit_id: str | None) -> str | None:
     """The SHA-256 of request record `audit_id` as stored, or None."""
     if audit_id is None or not _AUDIT_ID.fullmatch(audit_id):
@@ -2426,30 +2484,37 @@ def _stored_hash(store: Any, audit_id: str | None) -> str | None:
     return _sha256(blob) if blob is not None else None
 
 
-def latest_request_revision(store: Any, verify_keys: VerifyKeys = None) -> int:
+def latest_request_revision(store: Any, verify_keys: VerifyKeys = None,
+                            after: str | None = None) -> int:
     """The highest revision a request record signed by one of `verify_keys`
     says it produced, leaving out a request whose outcome record is signed
-    by one of them and says `error`. Store read errors propagate."""
-    return _latest_requests(store, verify_keys)[0]
+    by one of them and says `error`. With `after`, an audit id, only the
+    records within REQUEST_WINDOW of it count (_request_records). Store
+    read errors propagate."""
+    return _latest_requests(store, verify_keys, after=after)[0]
 
 
 def _latest_requests(store: Any, verify_keys: VerifyKeys = None,
+                     records: Records | None = None, after: str | None = None,
                      ) -> tuple[int, list[dict[str, Any]]]:
-    """latest_request_revision, and the request records it counts that
-    produced that revision."""
-    best, latest = 0, []
-    for name in _requests(store):
+    """latest_request_revision over `records` (_request_records with
+    `after`, read when not given), and the request records it counts that
+    produced that revision. Outcome records are read only for the highest
+    revisions, down to the first that has a request it counts."""
+    by_revision: dict[int, list[dict[str, Any]]] = {}
+    for _, record in _request_records(store, after) if records is None else records:
         try:
-            record = json.loads(store.get_audit(name) or b"{}")
             revision = int(record.get("base_revision", -1)) + 1
-        except (ValueError, TypeError, AttributeError, RecursionError):
+        except (ValueError, TypeError, AttributeError):
             continue
-        if (revision >= best and revision > 0 and _signed_by(record, verify_keys)
-                and not _abandoned(store, record, verify_keys)):
-            if revision > best:
-                best, latest = revision, []
-            latest.append(record)
-    return best, latest
+        if revision > 0 and _signed_by(record, verify_keys):
+            by_revision.setdefault(revision, []).append(record)
+    for revision in sorted(by_revision, reverse=True):
+        counted = [r for r in by_revision[revision]
+                   if not _abandoned(store, r, verify_keys)]
+        if counted:
+            return revision, counted
+    return 0, []
 
 
 def _abandoned(store: Any, request: Mapping[str, Any], verify_keys: VerifyKeys,
@@ -2475,14 +2540,14 @@ def _outcome_says(store: Any, audit_id: Any, verify_keys: VerifyKeys,
             and _signed_by(outcome, verify_keys))
 
 
-def highest_revision(store: Any) -> int:
-    """The highest revision any request record says it produced."""
+def highest_revision(store: Any, records: Records | None = None) -> int:
+    """The highest revision any request record in `records`
+    (_request_records, read when not given) says it produced."""
     best = 0
-    for name in _requests(store):
+    for _, record in _request_records(store) if records is None else records:
         try:
-            record = json.loads(store.get_audit(name) or b"{}")
             best = max(best, int(record.get("base_revision", -1)) + 1)
-        except (ValueError, TypeError, RecursionError):
+        except (ValueError, TypeError, AttributeError):
             continue
     return best
 

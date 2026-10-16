@@ -608,6 +608,10 @@ as the control identity.
   five minutes; fix it (NTP on the node or the operator's machine).
   Without it, the store cannot say when a record was written, and its
   adapter needs `audit_modified`.
+- **`refused: clock_behind_head`**: the change would be dated more than
+  a day before the change it builds on, so a cold reader's check for a
+  later request would not read it. Fix this process's clock (NTP on the
+  node or the operator's machine) and run the change again.
 - **`refused: retirement_unverified`**: the `legacy.migrate` record that
   retired the markers is missing or altered. Its id is the object's
   `legacy_markers_retired_by`, or the next request record's
