@@ -675,6 +675,157 @@ def test_recover_proceeds_when_the_only_retired_request_conflicted(store, monkey
     assert applied.state.excluded_requests == frozenset({"req_2"})
 
 
+def _migration_raced_with_unknown_outcome(store, monkeypatch):
+    """An exclude commits at the migration's revision while the migration's
+    object write fails with an error other than a conflict, so its outcome
+    is `unknown`. The object then fails to parse as a supported version,
+    still naming the exclude. Returns the migration's request record."""
+    real_put, real_write = store.put_audit, store.write_control
+
+    def racing(name, body):
+        if name.endswith("-request.json"):
+            monkeypatch.setattr(store, "put_audit", real_put)
+            _change(store, Change(ACTION_EXCLUDE, value="req_2"))
+            monkeypatch.setattr(store, "write_control", timeout)
+        return real_put(name, body)
+
+    def timeout(body, etag):
+        raise TimeoutError("no answer")
+
+    monkeypatch.setattr(store, "put_audit", racing)
+    with pytest.raises(TimeoutError):
+        _change(store, Change(ACTION_MIGRATE), migrate=(None, frozenset({"req_1"})))
+    monkeypatch.undo()
+    assert store.write_control is not timeout and real_write
+    [migration] = [json.loads(store.get_audit(n)) for n in store.list_audit()
+                   if n.endswith("-request.json")
+                   and json.loads(store.get_audit(n))["action"] == ACTION_MIGRATE]
+    outcome = json.loads(store.get_audit(audit_name(migration["id"], "outcome")))
+    assert outcome["result"] == "unknown"
+    raw = json.loads(_control(store).read_bytes())
+    raw["version"] = 99
+    _control(store).write_text(json.dumps(raw))
+    return migration
+
+
+def test_recover_refuses_a_retirement_from_a_migration_that_may_not_have_committed(
+        store, monkeypatch, caplog):
+    """The kept chain is the exclude's, and the migration is off it with
+    no signed outcome saying it committed. Recover marked the object
+    retired from it and dropped the legacy ids it would have folded in.
+    Mutation: drop the `applied` check in _recovered."""
+    migration = _migration_raced_with_unknown_outcome(store, monkeypatch)
+    before = _store_bytes(store)
+    with caplog.at_level(logging.WARNING, "forgd_verdict"), pytest.raises(ov.Refused) as exc:
+        _change(store, Change(ACTION_RECOVER))
+    assert str(exc.value) == ov.REFUSED_RETIREMENT_UNVERIFIED
+    assert any(r.getMessage() == "recover found a migration off the kept chain with no "
+               "signed `applied` outcome" and r.fields["migration"] == migration["id"]
+               for r in caplog.records)
+    assert _store_bytes(store) == before
+
+
+def _top_siblings_unsettled(store, monkeypatch, winner_outcome=False):
+    """rev 1 sets observe. rev 2 is raced: an exclude wins and a set of
+    enforce loses, and the loser's `conflict` outcome is lost, as is the
+    winner's `applied` one unless `winner_outcome`. The object is restored
+    to rev 1 and every verification record deleted, so nothing else names
+    either rev 2 record. Returns (winner id, loser id)."""
+    from forgd_verdict.store.base import StoreConflict
+
+    _change(store, Change(ACTION_SET, KEY_MODE, "observe"))
+    old = _control(store).read_bytes()
+    real_put = store.put_audit
+
+    def racing(name, body):
+        if name.endswith("-request.json"):
+            monkeypatch.setattr(store, "put_audit", real_put)
+            _change(store, Change(ACTION_EXCLUDE, value="req_winner"))
+        return real_put(name, body)
+
+    monkeypatch.setattr(store, "put_audit", racing)
+    with pytest.raises(StoreConflict):
+        _change(store, Change(ACTION_SET, KEY_MODE, "enforce"))
+    monkeypatch.undo()
+    winner = _head(store).audit_id
+    [loser] = [json.loads(store.get_audit(n))["id"] for n in store.list_audit()
+               if n.endswith("-request.json")
+               and json.loads(store.get_audit(n)).get("new_value") == "enforce"]
+    (store.root / AUDIT_PREFIX / audit_name(loser, "outcome")).unlink()
+    if not winner_outcome:
+        (store.root / AUDIT_PREFIX / audit_name(winner, "outcome")).unlink()
+    _anchor(store)
+    _control(store).write_bytes(old)
+    _unanchor(store)
+    return winner, loser
+
+
+def test_recover_refuses_when_both_top_siblings_verify(store, monkeypatch, caplog):
+    """Recover skipped both as siblings and kept rev 1, losing the
+    winner's exclude with no sign that it had. Mutation: drop the
+    ambiguity refusal in _recoverable."""
+    winner, loser = _top_siblings_unsettled(store, monkeypatch)
+    before = _store_bytes(store)
+    with caplog.at_level(logging.WARNING, "forgd_verdict"), pytest.raises(ov.Refused) as exc:
+        _change(store, Change(ACTION_RECOVER))
+    assert str(exc.value) == ov.REFUSED_HEAD_AMBIGUOUS
+    assert [r.fields["records"] for r in caplog.records if r.getMessage().startswith(
+        "recover found more than one")] == [sorted([winner, loser])]
+    assert _store_bytes(store) == before
+
+
+def test_recover_keeps_the_top_sibling_with_a_signed_applied_outcome(store, monkeypatch):
+    """Mutation: settle a top race by chain verification alone."""
+    _top_siblings_unsettled(store, monkeypatch, winner_outcome=True)
+    applied = _change(store, Change(ACTION_RECOVER))
+    assert applied.state.excluded_requests == frozenset({"req_winner"})
+    assert applied.state.value(KEY_MODE) == "observe"
+
+
+@pytest.mark.parametrize("winner_outcome", [False, True], ids=["no-outcome", "applied"])
+def test_an_invalid_object_naming_a_top_sibling_does_not_settle_the_race(
+        store, monkeypatch, winner_outcome):
+    """A storage administrator without the signing key writes an invalid
+    object at the race's revision naming the loser. Recover adopted the loser's chain.
+    Mutation: skip the race check when the invalid object is at the top
+    revision."""
+    _, loser = _top_siblings_unsettled(store, monkeypatch, winner_outcome)
+    top = ov.latest_request_revision(store, KEYS)
+    _control(store).write_text(json.dumps({"version": 99, "revision": top, "audit_id": loser}))
+    if winner_outcome:
+        applied = _change(store, Change(ACTION_RECOVER))
+        assert applied.state.excluded_requests == frozenset({"req_winner"})
+        assert applied.state.value(KEY_MODE) == "observe"
+    else:
+        with pytest.raises(ov.Refused) as exc:
+            _change(store, Change(ACTION_RECOVER))
+        assert str(exc.value) == ov.REFUSED_HEAD_AMBIGUOUS
+
+
+def test_recover_keeps_the_top_sibling_left_once_the_other_is_deleted(store, monkeypatch):
+    """The documented remedy for head_ambiguous."""
+    winner, loser = _top_siblings_unsettled(store, monkeypatch)
+    (store.root / AUDIT_PREFIX / audit_name(loser, "request")).unlink()
+    applied = _change(store, Change(ACTION_RECOVER))
+    assert applied.state.excluded_requests == frozenset({"req_winner"})
+    assert applied.state.value(KEY_MODE) == "observe"
+
+
+def test_recover_keeps_the_only_top_sibling_whose_chain_verifies(store, monkeypatch):
+    """The loser's record is altered and signed again, so it is signed but
+    does not replay to the object it records. Mutation: keep every
+    unsettled top sibling as a candidate, not only those whose chain
+    verifies."""
+    winner, loser = _top_siblings_unsettled(store, monkeypatch)
+    path = store.root / AUDIT_PREFIX / audit_name(loser, "request")
+    record = json.loads(path.read_bytes())
+    body = {k: v for k, v in record.items() if k != sig.SIGNATURE_FIELD}
+    path.write_bytes(ov._record_bytes(sig.sign({**body, "new_value": "observe"}, OVERRIDES_KEY)))
+    assert not ov._chain_verifies(store, loser, KEYS)
+    applied = _change(store, Change(ACTION_RECOVER))
+    assert applied.state.excluded_requests == frozenset({"req_winner"})
+
+
 def _restored_behind_a_live_anchor(store):
     """rev 1 and rev 2 (enforce) are each anchored. The object is restored
     to rev 1 and the records naming rev 2 deleted, so the fresh record

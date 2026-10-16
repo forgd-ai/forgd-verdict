@@ -608,7 +608,23 @@ as the control identity.
   original bytes from bucket versioning, then run `overrides recover`. If
   no version survives, delete every signed request record whose
   `legacy_markers_retired` is `true`, run `recover`, then
-  `migrate-markers` again, and record what was deleted.
+  `migrate-markers` again, and record what was deleted. The same refusal
+  follows the WARNING "recover found a migration off the kept chain with
+  no signed `applied` outcome", whose `migration` field names a migration
+  that may never have committed, for example one whose object write timed
+  out while another change committed at the same revision. If the change
+  the object names at that revision is the one in force, the migration did
+  not commit: delete its request record, run `recover`, then
+  `migrate-markers` again.
+- **`refused: head_ambiguous`**: two or more signed request records at
+  the newest revision each verify, and nothing signed says which one was
+  applied: their writes raced, the loser's `conflict` outcome and the
+  winner's `applied` outcome were both lost, and no verification record
+  names the winner. An invalid object naming one of them does not count. The WARNING "recover found more than one verifiable request
+  record at the newest revision" names them in `records`. Read each
+  `audit/runtime-overrides/<YYYY>-<MM>-<DD>/<id>-request.json`, decide
+  which change should stand, delete the other request records, and run
+  `recover` again. Record what was deleted.
 
 **What recover writes:** the state of the newest audit chain that still
 verifies, at a revision past every one seen, so every replica adopts it,

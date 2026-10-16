@@ -208,8 +208,8 @@ folds them into the overrides object and sets `legacy_markers_retired`.
     state is not retired, it takes it from the invalid object's
     `legacy_markers_retired_by`, and failing that from the newest
     `legacy.migrate` request record in the audit store that is signed by
-    a listed verify key, has no signed `error` or `conflict` outcome, and
-    whose chain verifies back to a chain start. The migration must be a
+    a listed verify key, has a signed `applied` outcome, and whose chain
+    verifies back to a chain start. The migration must be a
     stored `legacy.migrate` request whose bytes match the hash the chain
     names for it, and signed when no hash is named.
     - If the check passes, the recovered object is retired, and the
@@ -219,6 +219,10 @@ folds them into the overrides object and sets `legacy_markers_retired`.
       state that is not retired.
     - When the kept state is retired and its migration fails the check,
       recover refuses rather than write an object that is not retired.
+    - When the newest `legacy.migrate` record found that way with no
+      signed `error` or `conflict` outcome has no signed `applied` outcome
+      either, recover refuses: it may have lost a race to a change at the
+      same revision, or committed and lost its outcome write.
     - When the state recover would write is not retired, but a request
       record signed by a listed verify key, with no signed `error` or
       `conflict` outcome, says `legacy_markers_retired: true`, recover
@@ -1162,7 +1166,12 @@ The operator procedure is "Recovery" in the guide. This is what recover does.
        revision is later than both the object's and that of the head the
        newest signed verification record names. A record with a signed
        `conflict` outcome is skipped, since its write did not commit. When
-       more than one record is left at that revision, none is tried here;
+       more than one record is left at that revision, the one whose chain
+       verifies is tried, among those with a signed `applied` outcome if
+       any has one. When more than one verifies, recover refuses with
+       `head_ambiguous` and writes nothing, since nothing signed says which
+       write committed. The invalid object's revision and audit id do not
+       settle it;
     2. the record the invalid object names, or, when the object is behind
        the head the newest signed verification record names, the record
        that head names;
@@ -1184,8 +1193,12 @@ The operator procedure is "Recovery" in the guide. This is what recover does.
   - `legacy_markers_retired: true` and `legacy_markers_retired_by` when
     the kept state or the invalid object names a migration that passes
     the check above, or when a `legacy.migrate` request record is signed
-    by a listed verify key, has no signed `error` or `conflict` outcome,
-    and its chain verifies back to a chain start; else neither. If it
+    by a listed verify key, has a signed `applied` outcome, and its chain
+    verifies back to a chain start; else neither. Such a migration is not
+    on the kept chain, which would be retired if it were, so only its
+    outcome says it committed. When the newest such record with no signed
+    `error` or `conflict` outcome has no signed `applied` outcome either,
+    recover refuses with `retirement_unverified`. If it
     would write neither while any request record signed by a listed key,
     with no signed `error` or `conflict` outcome, says the markers are
     retired, it refuses and writes nothing (see the migration entry
