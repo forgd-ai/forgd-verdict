@@ -98,12 +98,17 @@ def _resolve_binary(binary: str | None) -> str | None:
     An explicitly configured path still has to exist: otherwise `enabled:
     auto` would silently treat a typo as "present" and every scan would
     return zero findings.
+
+    Absolute, because the scan runs gitleaks from a temporary directory, so
+    a relative path that resolved here would name nothing there.
     """
     if binary:
-        return shutil.which(binary) or (
+        found = shutil.which(binary) or (
             binary if os.path.isfile(binary) and os.access(binary, os.X_OK) else None
         )
-    return shutil.which("gitleaks")
+    else:
+        found = shutil.which("gitleaks")
+    return os.path.abspath(found) if found else None
 
 
 class GitleaksDetector:
@@ -125,7 +130,10 @@ class GitleaksDetector:
         self._salt = salt
         self._binary = _resolve_binary(binary)
         self._timeout_s = timeout_s
-        self._config = config
+        # Against this process's working directory, for the same reason as
+        # the binary: under `hook.project_overrides` the policy leaves a
+        # relative config relative so that it names a file in the project.
+        self._config = os.path.abspath(config) if config else config
         self._redact = redact
         self._max_bytes = max_bytes
         self._daemon = daemon or None
