@@ -470,7 +470,7 @@ def test_verification_records_are_not_audit_records(tmp_path):
     """The cold-start check ignores them, as it does probe records."""
     store = CloudStore(tmp_path)
     assert all(is_probe(n) for n in store.list_audit())
-    assert all(n.rsplit("/", 1)[-1].startswith(lockout.VERIFY_PREFIX)
+    assert all(n.rsplit("/", 1)[-1].startswith((lockout.VERIFY_PREFIX, lockout.CLOCK_PREFIX))
                for n in store.list_audit())
 
 
@@ -1080,6 +1080,91 @@ def _refused(caplog):
             and getattr(r, "fields", {}).get("code") == lockout.ERROR_VERIFY_BASE_FUTURE]
 
 
+def _clock_ahead(caplog):
+    return [r for r in caplog.records if r.levelno == logging.ERROR
+            and getattr(r, "fields", {}).get("code") == lockout.ERROR_VERIFY_CLOCK_AHEAD]
+
+
+@pytest.mark.parametrize("ahead, written", [(-3600, True), (300, True), (301, False)])
+def test_a_verification_is_not_written_from_a_clock_ahead_of_the_store(
+        tmp_path, caplog, monkeypatch, ahead, written):
+    """A clock behind the store's writes a record that is only stale
+    sooner. Mutation: drop the store time check from write_verification."""
+    store = CloudStore(tmp_path, verified=False)
+    _write(store, NOW - timedelta(minutes=30))
+    monkeypatch.setattr(store, "audit_modified", lambda name: NOW - timedelta(seconds=ahead))
+    with caplog.at_level(logging.ERROR, "forgd_verdict.lockout"):
+        record = _write(store, NOW)
+    assert (record is not None) == written
+    assert len(_records(store)) == (2 if written else 1)
+    if written:
+        assert not _clock_ahead(caplog)
+    else:
+        [logged] = _clock_ahead(caplog)
+        assert logged.fields["ahead_s"] == ahead
+
+
+def test_the_first_verification_is_checked_against_the_store_s_time(tmp_path, caplog,
+                                                                    monkeypatch):
+    """With no record to chain on, the store's time is the only reference."""
+    store = CloudStore(tmp_path, verified=False)
+    monkeypatch.setattr(store, "audit_modified", lambda name: NOW - timedelta(minutes=10))
+    with caplog.at_level(logging.ERROR, "forgd_verdict.lockout"):
+        assert _write(store, NOW) is None
+    assert not _records(store) and _clock_ahead(caplog)
+
+
+def test_a_provable_store_with_no_record_time_writes_no_verification(tmp_path, caplog):
+    """A store that can prove a lockout must give a time to check against;
+    one that cannot and has none is not checked. Mutation: skip the check
+    when audit_modified is absent."""
+
+    class NoTime:
+        lockout_provable = True
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == "audit_modified":
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    inner = CloudStore(tmp_path, verified=False)
+    with caplog.at_level(logging.ERROR, "forgd_verdict.lockout"):
+        assert _write(NoTime(inner), NOW) is None
+    assert not _records(inner) and _clock_ahead(caplog)
+
+    class Unprovable(NoTime):
+        lockout_provable = False
+
+    assert _write(Unprovable(inner), NOW) is not None
+
+
+def test_a_failed_store_time_read_writes_no_verification(tmp_path):
+    store = CloudStore(tmp_path, verified=False)
+
+    def unavailable(name):
+        raise StoreReadError("unavailable")
+
+    store.audit_modified = unavailable
+    with pytest.raises(StoreReadError):
+        _write(store, NOW)
+    assert not _records(store)
+
+
+def test_the_clock_probe_is_a_probe_and_not_an_override_record(tmp_path):
+    """The store time is read from a create-only record under the audit
+    prefix, which the control identity can write, and override listings
+    skip it."""
+    store = CloudStore(tmp_path, verified=False)
+    assert _write(store, NOW) is not None
+    [probe_] = [n for n in store.list_audit() if lockout.CLOCK_PREFIX in n]
+    assert lockout.is_probe(probe_) and probe_.startswith(f"{NOW:%Y-%m-%d}/")
+    assert not list(lockout.override_records(store))
+    assert json.loads(store.get_audit(probe_))["kind"] == "clock"
+
+
 @pytest.mark.parametrize("ahead, written", [(299, True), (301, False)])
 def test_a_record_on_a_future_dated_base_is_not_written(tmp_path, caplog, ahead, written):
     """A record's id follows its base's, so one on a base dated past the
@@ -1099,16 +1184,20 @@ def test_a_record_on_a_future_dated_base_is_not_written(tmp_path, caplog, ahead,
         assert logged.fields["base_id"] == base["id"]
 
 
-def test_a_run_after_a_future_dated_record_is_refused_until_it_is_deleted(tmp_path, caplog):
-    """A CLI with a clock ten minutes fast writes a record; the dashboard's
-    runs and anchors write nothing and log the code, and do not raise. With
-    that record deleted, the next run writes one readers trust. Mutation:
-    drop the clock check from write_verification."""
+def test_a_run_after_a_future_dated_record_is_refused_until_it_is_deleted(
+        tmp_path, caplog, monkeypatch):
+    """A CLI with a clock ten minutes fast, on a store whose time agrees
+    with it, writes a record; the dashboard's runs and anchors write
+    nothing and log the code, and do not raise. With that record deleted,
+    the next run writes one readers trust. Mutation: drop the clock check
+    from write_verification."""
     from forgd_verdict.lockout_evidence.verifier import Verifier
 
     store = CloudStore(tmp_path)
     now = datetime.now(UTC)
-    future = _write(store, now + timedelta(minutes=10))
+    with monkeypatch.context() as fast:
+        fast.setattr(store, "audit_modified", lambda name: now + timedelta(minutes=10))
+        future = _write(store, now + timedelta(minutes=10))
     head = {"revision": 0, "audit_id": None, "audit_hash": None}
     verifier = Verifier(store, signing_key=OVERRIDES_KEY, verify_keys=_keys(),
                         identities=(WRITER, COLLECTOR), trusted=lambda: head,

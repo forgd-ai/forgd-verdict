@@ -167,7 +167,7 @@ def test_a_record_older_than_two_hours_is_stale(tmp_path):
     later = then.replace(hour=14, second=1)
     assert lockout.lockout_status(store, ("verdict",), later).problems == {
         "*": "verification stale"}
-    [name] = [n for n in store.list_audit()]
+    [name] = [n for n in store.list_audit() if lockout.VERIFY_PREFIX in n]
     assert json.loads(store.get_audit(name))["at"] == "2026-09-28T12:00:00Z"
 
 

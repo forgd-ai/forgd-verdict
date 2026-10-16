@@ -543,7 +543,8 @@ its own lockout before it applies anything.
 - **Probe records are not audit records.** A create that succeeds leaves
   a probe record in the audit prefix. The cold-start check, the revision
   count and the history all ignore every name whose file part starts
-  with `probe-`, so a probe record never counts as an orphaned chain.
+  with `probe-`, `clock-` or `verify-`, so a probe record never counts as
+  an orphaned chain.
 - **Each probe publishes a report,** `state/overrides-lockout-<role>.json`,
   beside the org registry's per-role files: `version`, `role`,
   `instance`, `result`, `at`, and `error` (an exception type name) for
@@ -778,6 +779,12 @@ IAM policy, and readers trust only that. The code is
   - Records are create-only, under the prefix no writer can write, and are
     ignored by the cold-start check, the revision count and the history,
     as probe records are.
+  - Before writing one, the dashboard or the CLI creates a clock probe,
+    `audit/runtime-overrides/<YYYY-MM-DD>/clock-<time>-<hex>.json`, and
+    reads its last-modified time back from the store. If its own clock is
+    more than five minutes ahead of that, it writes no record and logs
+    `verification_clock_ahead` with `ahead_s`. A store that can prove a
+    lockout and cannot report the time writes no record either.
   - A reader trusts only the newest record, by id. If that record fails
     any check, the reader does not fall back to an older one. The newest
     record must:
@@ -910,11 +917,24 @@ since gained.
       own last run ended, and was not written by a dashboard
       (`written_by` other than `dashboard`, or absent). This is how a CLI
       record written without `FORGD_OVERRIDES_WRITER_IDENTITIES` is
-      replaced. A dashboard whose own run cannot show the identities
-      locked out logs its ERROR and does not rewrite its own record, or
-      another replica's, until the hourly run. So a correctly configured
-      replica can wait up to an hour to replace a failing record written
-      by a misconfigured one.
+      replaced;
+    - when the newest fresh record does not show every writer identity
+      locked out, was written by a dashboard, this one or another
+      replica, and `FAILING_RETRY_S` (300 seconds) has passed since this
+      dashboard's last run, doubled for each consecutive run of its own
+      that wrote no record or a failing one. Seeing a passing fresh
+      record, from any replica, resets the count. A transient failure is
+      replaced within five
+      minutes, and a correctly configured replica replaces a
+      misconfigured one's failing record within five minutes of its own
+      last run. A failure that persists is retried at 5, 10, 20 and 40
+      minutes, then hourly, so replicas that all fail write a bounded
+      number of records.
+  - After runs that wrote nothing (a store error, or
+    `verification_clock_ahead`), none of these makes a run due until
+    `RETRY_S` after the last, doubled for each further such run, up to
+    `FAILING_RETRY_S`. Each run creates one clock probe, so a fast clock
+    leaves at most one every five minutes per replica.
 - **A dashboard that restarts before the retry** holds no state, and as a
   cold reader it cannot adopt a head no record names. So when its reader
   holds nothing, it names the store object's head instead, if:
@@ -1150,9 +1170,12 @@ A verification record dated in the future is refused because a record's
 id must sort after the id of the record it chains on: if a process with a
 clock more than five minutes fast wrote the newest record, every record
 chained on it would carry that date, so the dashboard and the CLI write
-nothing and log `verification_base_in_future`. A process with a fast
-clock can still write the first such record, since nothing checks its
-clock against another.
+nothing and log `verification_base_in_future`. The writer checks its
+clock against the store's before it writes, from a clock probe's
+last-modified time, so a process with a fast clock writes no record and
+logs `verification_clock_ahead`. A record dated in the future can still
+come from a store whose own time is wrong, or from a release before that
+check.
 
 ### Recover
 
@@ -1621,8 +1644,9 @@ follows.
 - **Naming.** `audit/runtime-overrides/<YYYY-MM-DD>/<id>-<kind>.json`,
   where `<id>` starts with the time and `<kind>` is `request` or
   `outcome`, so names sort by time. The same prefix holds the lockout
-  verification records, `<YYYY-MM-DD>/verify-<id>.json`, and the writers'
-  probe records (see [Writer lockout probe](#writer-lockout-probe)).
+  verification records, `<YYYY-MM-DD>/verify-<id>.json`, their writers'
+  clock probes, `<YYYY-MM-DD>/clock-<id>.json`, and the writers' probe
+  records (see [Writer lockout probe](#writer-lockout-probe)).
 - **Operator identity is stored in plain text.** The privacy invariant
   covers matched content and the people whose prompts are scanned, whose
   actor ids the store pseudonymises. An audit of who flipped enforce

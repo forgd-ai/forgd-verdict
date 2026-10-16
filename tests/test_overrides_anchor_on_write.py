@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import DETECTORS, OVERRIDES_KEY, OVERRIDES_PUBLIC, OVERRIDES_PUBLIC_TEXT
@@ -178,9 +179,12 @@ def test_a_failed_record_is_retried_before_the_hourly_run(store, caplog):
     """Mutations: clear the pending head when the run fails; skip a due
     run in tick."""
     v, _ = _unanchored_change(store, caplog)
+    assert not v.due(), "a run that wrote nothing is retried after RETRY_S"
+    v._last -= verifier.RETRY_S
     assert v.due() and v.tick(), "retried while the store still fails"
     assert v.pending is not None
     store.failing = False
+    v._last -= 2 * verifier.RETRY_S
     assert v.tick()
     assert v.pending is None and not v.due()
     assert not v.tick(), "nothing is due until the hour has passed"
@@ -360,40 +364,132 @@ def test_a_failed_rewrite_of_a_cli_record_is_retried(store):
     assert dashboard.tick() and lockout.fresh_record(store, KEYS)["ok"]
 
 
-def _replica(store, clock):
-    """A dashboard replica whose verification shows a failing identity."""
-    return Verifier(store, identities=(WRITER,), clock=clock,
-                    evaluate=lambda s, ids, **_: {WRITER: "policy_read_failed"},
+def _replica(store, clock, failing=None):
+    """A dashboard replica whose verification shows a failing identity
+    while `failing()` is true, or always when it is not given."""
+    def evaluate(s, ids, **_):
+        return {WRITER: "policy_read_failed" if failing is None or failing() else None}
+
+    return Verifier(store, identities=(WRITER,), clock=clock, evaluate=evaluate,
                     signing_key=OVERRIDES_KEY, verify_keys=KEYS,
                     unanchored=lambda: unanchored_head(store, KEYS),
                     written_by=lockout.WRITTEN_BY_DASHBOARD)
 
 
-def test_two_dashboard_replicas_do_not_rewrite_each_others_failing_record(store):
-    """Each replica's newest record is the other's, so it was never the
-    newest when its own last run ended. Neither runs before the interval.
-    A failing record from the CLI, or from a writer that names none, is
-    still rewritten. Mutation: drop the written_by condition in due."""
+def _ticks_until_run(verifier_, clock, start):
+    """The seconds after `start` at which the verifier's tick first runs,
+    ticking every RETRY_S."""
+    t = start
+    while True:
+        t += verifier.RETRY_S
+        clock.t = t
+        if verifier_.tick():
+            return t - start
+
+
+def test_a_dashboard_retries_its_own_failing_record_on_a_backoff(store):
+    """A transient failure is replaced in FAILING_RETRY_S, not the hourly
+    interval; a failure that persists is retried at doubling intervals up
+    to the hourly one. Mutation: keep the written_by exclusion in due;
+    drop the doubling; never reset the count."""
+    clock = Clock()
+    broken = [True]
+    a = _replica(store, clock, failing=lambda: broken[0])
+    _change(store, Change(ACTION_INIT), a)
+    assert not lockout.fresh_record(store, KEYS)["ok"]
+    waits = [_ticks_until_run(a, clock, clock.t) for _ in range(6)]
+    assert waits == [300.0, 600.0, 1200.0, 2400.0, 3600.0, 3600.0], waits
+
+    clock.t = a._last + verifier.FAILING_RETRY_S - verifier.RETRY_S
+    assert not a.tick()
+    broken[0] = False
+    clock.t = a._last + lockout.VERIFY_EVERY_S
+    assert a.tick() and lockout.fresh_record(store, KEYS)["ok"]
+    assert a._failed_runs == 0
+    broken[0] = True
+    clock.t += lockout.VERIFY_EVERY_S
+    assert a.tick() and not lockout.fresh_record(store, KEYS)["ok"]
+    assert _ticks_until_run(a, clock, clock.t) == verifier.FAILING_RETRY_S
+
+
+def test_a_failing_record_from_one_replica_is_replaced_by_another(store):
+    """A misconfigured replica's failing record is rewritten by a correctly
+    configured one FAILING_RETRY_S after that one's own last run, not an
+    hour later. Mutation: keep the written_by exclusion in due."""
+    clock = Clock()
+    good = _verifier(store, clock=clock)
+    _change(store, Change(ACTION_INIT), good)
+    bad = _replica(store, clock)
+    clock.t = 120.0
+    bad.once()
+    assert not lockout.fresh_record(store, KEYS)["ok"]
+    assert _ticks_until_run(good, clock, 0.0) == verifier.FAILING_RETRY_S
+    assert lockout.fresh_record(store, KEYS)["ok"]
+    assert not bad.due() and not good.due()
+
+
+def test_a_passing_record_from_another_replica_resets_the_backoff(store):
+    """Mutation: reset the count only on this process's own passing record."""
+    clock = Clock()
+    a = _replica(store, clock)
+    _change(store, Change(ACTION_INIT), a)
+    for _ in range(4):
+        _ticks_until_run(a, clock, clock.t)
+    assert a._failed_runs == 5
+    good = _verifier(store, clock=clock)
+    good.once()
+    assert not a.due() and a._failed_runs == 0
+    _replica(store, clock).once()
+    clock.t = a._last + verifier.FAILING_RETRY_S
+    assert a.due()
+
+
+def test_a_clock_ahead_of_the_store_retries_a_pending_head_on_a_backoff(store, monkeypatch,
+                                                                        caplog):
+    """Each refused run leaves a clock probe, so retries back off from
+    RETRY_S to FAILING_RETRY_S. Mutation: leave runs that wrote nothing
+    out of the backoff."""
+    monkeypatch.setattr(store, "audit_modified",
+                        lambda name: datetime.now(UTC) - timedelta(minutes=10))
+    clock = Clock()
+    a = _verifier(store, clock=clock)
+    _change(store, Change(ACTION_INIT), a)
+    assert a.pending is not None and not lockout.fresh_record(store, KEYS)
+    with caplog.at_level(logging.ERROR, "forgd_verdict.lockout"):
+        for tick in range(1, int(lockout.VERIFY_EVERY_S // verifier.RETRY_S)):
+            clock.t = tick * verifier.RETRY_S
+            a.tick()
+    assert [r for r in caplog.records
+            if getattr(r, "fields", {}).get("code") == lockout.ERROR_VERIFY_CLOCK_AHEAD]
+    probes = [n for n in store.list_audit() if lockout.CLOCK_PREFIX in n]
+    # Runs at 0, 60, 180, 420, then every 300 seconds.
+    assert len(probes) == 14, len(probes)
+    monkeypatch.undo()
+    clock.t += verifier.FAILING_RETRY_S
+    assert a.tick() and a.pending is None
+
+
+def test_two_failing_replicas_write_at_most_one_record_each_per_backoff(store):
+    """Mutation: run whenever the newest record fails, with no backoff."""
     clock = Clock()
     a, b = _replica(store, clock), _replica(store, clock)
     b.once()
     _change(store, Change(ACTION_INIT), a)
-    assert lockout.fresh_record(store, KEYS)["written_by"] == lockout.WRITTEN_BY_DASHBOARD
     written = _count(store)
-    assert not b.due()
-    for tick in range(1, int(lockout.VERIFY_EVERY_S // verifier.RETRY_S)):
+    for tick in range(1, int(lockout.VERIFY_EVERY_S // verifier.RETRY_S) + 1):
         clock.t = tick * verifier.RETRY_S
-        assert not a.tick() and not b.tick()
-    assert _count(store) == written
-    clock.t = lockout.VERIFY_EVERY_S + verifier.RETRY_S
-    assert b.tick()
+        a.tick()
+        b.tick()
+    # Each replica runs at 300, 900, 2100 and 3600 seconds at most.
+    assert _count(store) - written <= 8, _count(store) - written
 
     for written_by in (lockout.WRITTEN_BY_CLI, None):
         cli = Verifier(store, identities=(), signing_key=OVERRIDES_KEY, verify_keys=KEYS,
                        written_by=written_by)
         cli.once()
         assert lockout.fresh_record(store, KEYS).get("written_by") == written_by
-        assert b.due()
+        b._last = clock.t
+        assert b.due(), "a failing record from the CLI is rewritten at once"
         b.once()
 
 

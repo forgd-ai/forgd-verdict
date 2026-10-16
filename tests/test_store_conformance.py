@@ -29,7 +29,7 @@ import sys
 import threading
 import types
 from contextlib import contextmanager, suppress
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -48,6 +48,18 @@ BLOB_URL = "https://acct.blob.core.windows.net/findings/demo"
 BLOB_PREFIX = "demo"
 S3_URL = "s3://forgd-findings/demo"
 GCS_URL = "gs://forgd-findings/demo"
+
+
+class _ServerClock:
+    """The cloud fakes' time: this machine's, moved by `offset`."""
+
+    offset = timedelta(0)
+
+    def now(self) -> datetime:
+        return datetime.now(UTC) + self.offset
+
+
+SERVER_TIME = _ServerClock()
 
 
 def _write_denied(denied: set[str], key: str) -> bool:
@@ -130,6 +142,7 @@ class ResourceExistsError(_AzureError, FileExistsError):
 class _FakeProperties:
     def __init__(self, etag: str):
         self.etag = etag
+        self.last_modified = SERVER_TIME.now()
 
 
 class _FakeDownload:
@@ -529,6 +542,12 @@ class FakeS3Client:
                     raise _S3Error("PreconditionFailed")
             self.objects[Key] = bytes(Body)
 
+    def head_object(self, Bucket, Key):  # noqa: N803
+        with self._lock:
+            if Key not in self.objects:
+                raise _S3Error("NoSuchKey")
+            return {"ETag": _etag(self.objects[Key]), "LastModified": SERVER_TIME.now()}
+
     def get_object(self, Bucket, Key):  # noqa: N803
         with self._lock:
             if Key in self.denied:
@@ -631,6 +650,7 @@ class _FakeGCSBlob:
         self._client = client
         self.name = name
         self.generation = generation
+        self.updated = SERVER_TIME.now() if generation is not None else None
 
     def upload_from_string(self, data, content_type="text/plain",
                            if_generation_match=None, **kw):
@@ -1407,6 +1427,47 @@ def test_state_round_trips(backend):
     assert json.loads(store.get_state("cursor.json"))["last_run_started_at"] == (
         "2026-09-19T00:00:00Z"
     )
+
+
+def test_audit_modified_is_the_store_s_time_for_a_record(backend, monkeypatch):
+    """Mutation: return this process's clock instead of the record's time."""
+    from forgd_verdict.store.base import StoreReadError
+
+    offset = timedelta(0) if isinstance(backend, LocalBackend) else timedelta(hours=3)
+    monkeypatch.setattr(SERVER_TIME, "offset", offset)
+    store = backend.make_store("t1")
+    store.put_audit("2026-10-16/probe-clock-x.json", b"{}\n")
+    found = store.audit_modified("2026-10-16/probe-clock-x.json")
+    assert found.tzinfo is not None
+    assert abs((found - (datetime.now(UTC) + offset)).total_seconds()) < 5
+    with pytest.raises(StoreReadError):
+        store.audit_modified("2026-10-16/probe-clock-absent.json")
+
+
+@pytest.mark.parametrize("cloud", ["blob", "s3", "gcs"])
+def test_a_record_with_no_time_has_no_audit_modified(cloud, monkeypatch):
+    """Mutation: fall back to this process's clock."""
+    from forgd_verdict.store.base import StoreReadError
+
+    backend = {"blob": _install_fake_azure, "s3": _install_fake_boto3,
+               "gcs": _install_fake_gcs}[cloud](monkeypatch)
+    monkeypatch.setattr(_FakeProperties, "__init__",
+                        lambda self, etag: setattr(self, "last_modified", None))
+    head = FakeS3Client.head_object
+    monkeypatch.setattr(FakeS3Client, "head_object",
+                        lambda self, **kw: {**head(self, **kw), "LastModified": None})
+    get_blob = _FakeGCSBucket.get_blob
+
+    def no_time(self, name, **kw):
+        blob = get_blob(self, name, **kw)
+        if blob is not None:
+            blob.updated = None
+        return blob
+    monkeypatch.setattr(_FakeGCSBucket, "get_blob", no_time)
+    store = backend.make_store("t1")
+    store.put_audit("2026-10-16/probe-clock-x.json", b"{}\n")
+    with pytest.raises(StoreReadError):
+        store.audit_modified("2026-10-16/probe-clock-x.json")
 
 
 @pytest.mark.parametrize("cloud", ["blob", "s3", "gcs"])
