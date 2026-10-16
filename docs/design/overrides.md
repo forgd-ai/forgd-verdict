@@ -957,6 +957,18 @@ since gained.
     outcome is unsigned or signed by another key, or whose `error` outcome
     was deleted. An unsigned request record does not count.
 
+    Only request records whose ids are dated at most a day
+    (`REQUEST_WINDOW`) before the object's head record's are read, found
+    by their names. A record at a later revision was built on that head,
+    so it was written after the head's record; the day allows for writer
+    clocks that disagree. A change applies the same check with the same
+    window, and refuses to write a request dated more than a day before
+    the head it builds on (`clock_behind_head`), whether its clock is
+    behind or it read the head long after it took the time. So every
+    request this release writes is in the window of the head before it.
+    One written by an earlier release from a clock more than a day behind
+    is not seen.
+
   After a write whose outcome is `unknown`, and that did not commit, a
   cold reader is not ready until `recover` commits at that revision.
   Every other change is refused while a signed request is later than
@@ -1058,6 +1070,9 @@ since gained.
   All of this holds only while the later request records remain; see
   below.
 - **What it does not catch.**
+  - **A request record moved to another name** counts as deleted: the
+    check for later requests finds request records by name, and one moved
+    under an older day or another leaf is outside the window it reads.
   - **A rollback that deletes request records.** A storage administrator
     without the signing key can roll the state back to an earlier head in
     two ways.
@@ -1248,12 +1263,20 @@ The operator procedure is "Recovery" in the guide. This is what recover does.
   through deleted request records are under "What it does not catch" in
   [The head anchor](#the-head-anchor).
 
-- **Cost:** recover reads every request record under the audit prefix, to
-  find the highest revision, its candidates and any migration, so it
-  takes longer as the history grows. So does every change, which reads
-  every request record to check that none names a later revision than
-  the object, and a reader holding no state, which does the same on each
-  refresh. A reader holding a last-known-good does not.
+- **Cost:** recover reads every request record under the audit prefix
+  once, to find the highest revision, its candidates and any migration,
+  so it takes longer as the history grows: about 1,000 reads and one
+  listing per day of history for 1,000 changes. A change, and a reader
+  holding no state, check for a later request by reading only the
+  request records within a day of the object's head record, plus the
+  outcome records of the highest revisions. With a chain walk of at most
+  `CHECKPOINT_EVERY` links, the records they read do not grow with the
+  history while the object is at its newest head: about 120 store calls
+  for a change and a dozen for a cold read at 1,000 or 3,000 changes.
+  Listing the day partitions still grows with the number of days, and
+  over an object restored to an older head they read every request
+  record written since it. A reader holding a last-known-good does not
+  check for later requests.
 
 ## Tests for the four cases
 
@@ -1555,8 +1578,8 @@ new chain over it.
   whole verified state, then the change on top of it. So the chain walk
   of a cold read fetches at most about 100 records however long the
   history is, and a warm read's walk fetches only what is new. The check
-  for later requests is separate and reads every request record (see
-  Cost).
+  for later requests reads the request records within a day of the head's
+  (see Cost).
 - **A walk that ends nowhere within 100 links is refused.** The record the
   walk ends at, the reader's own head included, must be at most 100 links
   back from the object's head. Otherwise the object is invalid: a warm
