@@ -61,6 +61,8 @@ ENV_WRITER_ROLES = "FORGD_OVERRIDES_WRITER_ROLES"
 # from the cloud's IAM policy (lockout_evidence), written under the audit
 # prefix. Readers trust only the newest one, and only while it is fresh.
 VERIFY_PREFIX = "verify-"
+# A record a verification's writer creates to read the store's time from.
+CLOCK_PREFIX = "clock-"
 VERIFY_KIND = "lockout_verification"
 VERIFY_EVERY_S = 3600.0
 VERIFIED_FRESH_S = 2 * 3600.0
@@ -101,10 +103,10 @@ def provable(store: Any) -> bool:
 
 
 def is_probe(name: str) -> bool:
-    """Whether an audit record name is a lockout probe's or a lockout
-    verification's, not an override's."""
+    """Whether an audit record name is a lockout probe's, a clock probe's or
+    a lockout verification's, not an override's."""
     return isinstance(name, str) and name.rsplit("/", 1)[-1].startswith(
-        (PROBE_PREFIX, VERIFY_PREFIX))
+        (PROBE_PREFIX, CLOCK_PREFIX, VERIFY_PREFIX))
 
 
 def override_record_leaf(day: str) -> str:
@@ -290,6 +292,9 @@ PROBLEM_VERIFY_EMPTY = "no writer identities verified"
 # Logged, with the base id, when write_verification writes nothing because
 # the newest record's id is too far ahead of this process's clock.
 ERROR_VERIFY_BASE_FUTURE = "verification_base_in_future"
+# Logged, with the offset, when write_verification writes nothing because
+# this process's clock is too far ahead of the store's.
+ERROR_VERIFY_CLOCK_AHEAD = "verification_clock_ahead"
 
 
 @dataclass(frozen=True)
@@ -357,10 +362,20 @@ def write_verification(store: Any, results: Mapping[str, str | None], store_kind
     `signing_key` when given, with `written_by` (WRITTEN_BY_*) when given.
     Returns the record.
 
+    `now` is first checked against the store's time, the last-modified
+    time of a clock probe record written under the audit prefix. When it
+    is more than _SKEW_S ahead, nothing more is written,
+    ERROR_VERIFY_CLOCK_AHEAD is logged at ERROR with the offset, and None
+    is returned. A store that cannot prove a lockout and has no
+    `audit_modified` is not checked; one that can prove it and has none
+    is treated as a clock that cannot be checked, and nothing is written.
+
     A record's id is after its base's. When that puts the id too far from
     `now` for _clock_ok, nothing is written, ERROR_VERIFY_BASE_FUTURE is
     logged at ERROR with the base id, and None is returned."""
     moment = now or datetime.now(UTC)
+    if not _clock_behind_store(store, moment):
+        return None
     base_id = next(_verification_ids(store, newest_first=True), None)
     base_blob = store.get_audit(verification_name(base_id)) if base_id else None
     stamp = f"{moment:%Y%m%dT%H%M%S%f}Z"
@@ -394,6 +409,35 @@ def write_verification(store: Any, results: Mapping[str, str | None], store_kind
     store.put_audit(verification_name(audit_id),
                     (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
     return record
+
+
+def clock_probe_name(now: datetime) -> str:
+    return f"{now:%Y-%m-%d}/{CLOCK_PREFIX}{now:%Y%m%dT%H%M%S%f}Z-{secrets.token_hex(6)}.json"
+
+
+def _clock_behind_store(store: Any, moment: datetime) -> bool:
+    """Whether `moment` is at most _SKEW_S ahead of the store's time, read
+    from a clock probe record. Logs ERROR_VERIFY_CLOCK_AHEAD when it is
+    not."""
+    modified = getattr(store, "audit_modified", None)
+    if not callable(modified):
+        if not provable(store):
+            return True
+        _log.error("writer lockout verification not written: the store cannot say when a "
+                   "record was written, so this process's clock cannot be checked against it",
+                   extra={"fields": {"code": ERROR_VERIFY_CLOCK_AHEAD}})
+        return False
+    name = clock_probe_name(moment)
+    store.put_audit(name, (json.dumps({"version": REPORT_VERSION, "kind": "clock",
+                                       "at": _stamp(moment)}, sort_keys=True) + "\n").encode())
+    ahead = (moment - modified(name)).total_seconds()
+    if ahead <= _SKEW_S:
+        return True
+    _log.error("writer lockout verification not written: this process's clock is ahead of "
+               "the store's, and readers refuse a record dated in the future; fix this "
+               "process's clock", extra={"fields": {
+                   "code": ERROR_VERIFY_CLOCK_AHEAD, "ahead_s": round(ahead)}})
+    return False
 
 
 def _checked_verification(store: Any, now: datetime, verify_keys: Iterable[Any] | None = None,

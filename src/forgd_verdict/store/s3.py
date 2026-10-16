@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Collection, Iterable, Iterator, Sequence
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -346,6 +347,16 @@ class S3Store:
             if self._absent(key, exc):
                 return None
             raise
+
+    def audit_modified(self, name: str) -> datetime:
+        try:
+            head = self._client.head_object(Bucket=self.bucket, Key=self._audit_key(name))
+        except Exception as exc:  # noqa: BLE001 - botocore raises a family
+            raise StoreReadError(type(exc).__name__) from exc
+        modified = head.get("LastModified")
+        if modified is None:
+            raise StoreReadError(f"no last-modified time: {name}")
+        return modified.astimezone(UTC)
 
     def list_audit(self, day: str | None = None, leaf: str = "") -> list[str]:
         root = self._full(AUDIT_PREFIX) + "/"

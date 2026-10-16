@@ -555,8 +555,10 @@ stale. To recover, either:
    the dashboard to verify at once (`kubectl rollout restart
    deployment/<fullname>-dashboard`, where `<fullname>` defaults to
    `<release>-forgd-verdict`; a new ECS deployment; or a new Container
-   Apps revision), or wait for the hourly run. There is no command that
-   triggers a verification.
+   Apps revision), or wait for its retry: the dashboard rewrites a failing
+   verification five minutes after its last run, doubling the wait each
+   time its run fails again, and at least hourly. There is no command
+   that triggers a verification.
 2. **Turn runtime overrides off** (`dashboard.admins.enabled: false`, or
    `dashboard_admins_enabled = false`). Every service serves from
    `policy.yaml` alone.
@@ -600,6 +602,12 @@ as the control identity.
   ahead of this clock. Check this clock first; if it is right, fix the
   writer's clock and delete
   `audit/runtime-overrides/<YYYY>-<MM>-<DD>/verify-<base_id>.json`.
+- **`code: verification_clock_ahead`** in the dashboard's or the CLI's
+  log: no verification record was written. With `ahead_s`, this
+  process's clock is that many seconds ahead of the store's, more than
+  five minutes; fix it (NTP on the node or the operator's machine).
+  Without it, the store cannot say when a record was written, and its
+  adapter needs `audit_modified`.
 - **`refused: retirement_unverified`**: the `legacy.migrate` record that
   retired the markers is missing or altered. Its id is the object's
   `legacy_markers_retired_by`, or the next request record's

@@ -45,6 +45,10 @@ REASON_FAILED = "verification_failed"
 
 # How often the thread checks whether a run is due before the hourly one.
 RETRY_S = 60.0
+# How soon after its last run a dashboard rewrites a dashboard's failing
+# record, doubled for each consecutive run of its own that failed. The
+# hourly run happens whatever the backoff.
+FAILING_RETRY_S = 300.0
 
 _log = logging.getLogger("forgd_verdict.lockout")
 
@@ -195,10 +199,17 @@ class Verifier:
 
     `anchor(head)` writes a record naming a head a change just wrote. Until
     a record names it or a later head, it is pending, and every run names
-    it. Each record carries `written_by` (lockout.WRITTEN_BY_*)."""
+    it. A run that writes nothing is retried after `retry_s`, doubled for
+    each further one, up to `failing_retry_s`. Each record carries
+    `written_by` (lockout.WRITTEN_BY_*).
+
+    A fresh record written by a dashboard that does not show every writer
+    identity locked out is rewritten `failing_retry_s` after this
+    process's last run, doubled for each consecutive run of this process
+    whose record failed, and at `interval_s` whatever the backoff."""
 
     def __init__(self, store: Any, *, interval_s: float = lockout.VERIFY_EVERY_S,
-                 retry_s: float = RETRY_S,
+                 retry_s: float = RETRY_S, failing_retry_s: float = FAILING_RETRY_S,
                  run: Callable[..., Any] | None = None, signing_key: Any = None,
                  trusted: Callable[[], Mapping[str, Any] | None] | None = None,
                  unanchored: Callable[[], Mapping[str, Any] | None] | None = None,
@@ -221,6 +232,11 @@ class Verifier:
                               written_by=written_by)
         self.interval_s = interval_s
         self.retry_s = retry_s
+        self.failing_retry_s = failing_retry_s
+        # Consecutive runs that wrote no record or one that did not show every
+        # writer locked out, and consecutive runs that wrote no record.
+        self._failed_runs = 0
+        self._unwritten_runs = 0
         self._run = run
         self._clock = clock or time.monotonic
         self._last: float | None = None
@@ -253,9 +269,18 @@ class Verifier:
             except Exception as exc:  # noqa: BLE001 - the loop outlives any one run
                 _log.error("writer lockout verification could not be written",
                            extra={"fields": exc_fields(exc)})
+                self._unwritten_runs += 1
+                self._failed_runs += 1
                 return None
             self._seen = (record.get("id") if isinstance(record, dict)
                           else self._newest_id())
+            if isinstance(record, dict):
+                self._unwritten_runs = 0
+                self._failed_runs = (0 if lockout.locks_out_every_writer(record)
+                                     else self._failed_runs + 1)
+            else:
+                self._unwritten_runs += 1
+                self._failed_runs += 1
             named = record.get("head") if isinstance(record, dict) else None
             if (self.pending is not None and isinstance(named, dict)
                     and named.get("revision", 0) >= self.pending["revision"]):
@@ -265,7 +290,7 @@ class Verifier:
     def anchor(self, head: Mapping[str, Any]) -> dict[str, Any] | None:
         """Write a record naming `head`, a head just written. The record, or
         None when it could not be written: `head` is then pending, and the
-        thread retries within `retry_s`."""
+        thread retries it with the backoff for runs that wrote nothing."""
         with self._lock:
             self.pending = lockout.later_head(self.pending, dict(head))
             record = self.once()
@@ -292,25 +317,50 @@ class Verifier:
     def due(self) -> bool:
         """Whether a run is due before `interval_s` has passed: a head is
         pending; the newest fresh record does not show every writer
-        identity locked out, is not the newest one when the last run
-        that did not raise ended, and was not written by a dashboard; or
-        the head a run would name is at a later revision than the one the
-        newest fresh record names."""
+        identity locked out and either is not the newest one when the last
+        run that did not raise ended and was not written by a dashboard, or
+        was written by a dashboard and the failing backoff has passed since
+        the last run; or the head a run would name is at a later revision
+        than the one the newest fresh record names.
+
+        After runs that wrote nothing, none is due until `retry_s` has
+        passed since the last, doubled for each further such run, up to
+        `failing_retry_s`. A passing fresh record, whoever wrote it, resets
+        the failing backoff."""
+        if not self._unwritten_backoff_passed():
+            return False
         if self.pending is not None:
             return True
         try:
             record = lockout.fresh_record(self.store, self.verify_keys)
         except Exception:  # noqa: BLE001 - an unread record is not a fresh one
             record = None
-        if (record is not None and not lockout.locks_out_every_writer(record)
-                and record.get("id") != self._seen
-                and record.get("written_by") != lockout.WRITTEN_BY_DASHBOARD):
-            return True
+        if record is not None and lockout.locks_out_every_writer(record):
+            self._failed_runs = 0
+        if record is not None and not lockout.locks_out_every_writer(record):
+            if record.get("written_by") != lockout.WRITTEN_BY_DASHBOARD:
+                if record.get("id") != self._seen:
+                    return True
+            elif self._failing_backoff_passed():
+                return True
         head = self.head()
         if head is None:
             return False
         fresh = record.get("head") if record is not None else None
         return fresh is None or head["revision"] > fresh["revision"]
+
+    def _unwritten_backoff_passed(self) -> bool:
+        if self._unwritten_runs == 0 or self._last is None:
+            return True
+        doublings = min(self._unwritten_runs - 1, 30)
+        wait = min(self.retry_s * 2.0 ** doublings, self.failing_retry_s)
+        return self._clock() - self._last >= wait
+
+    def _failing_backoff_passed(self) -> bool:
+        if self._last is None:
+            return True
+        doublings = min(max(self._failed_runs - 1, 0), 30)
+        return self._clock() - self._last >= self.failing_retry_s * 2.0 ** doublings
 
     def tick(self) -> bool:
         """Run when `interval_s` has passed since the last run or one is

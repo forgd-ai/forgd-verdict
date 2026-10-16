@@ -11,6 +11,7 @@ import hashlib
 import os
 import threading
 from collections.abc import Collection, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -255,6 +256,13 @@ class LocalFileStore:
             return path.read_bytes()
         except FileNotFoundError:
             return None
+
+    def audit_modified(self, name: str) -> datetime:
+        try:
+            mtime = (self.root / AUDIT_PREFIX / safe_audit_name(name)).stat().st_mtime
+        except FileNotFoundError as exc:
+            raise StoreReadError(f"audit record absent: {name}") from exc
+        return datetime.fromtimestamp(mtime, UTC)
 
     def list_audit(self, day: str | None = None, leaf: str = "") -> list[str]:
         base = self.root / AUDIT_PREFIX

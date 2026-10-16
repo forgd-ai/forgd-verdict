@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Collection, Iterable, Iterator, Sequence
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -341,6 +342,15 @@ class GCSStore:
             if _status(exc) == 404:
                 return None
             raise
+
+    def audit_modified(self, name: str) -> datetime:
+        try:
+            blob = self._bucket.get_blob(self._audit_key(name), **self._bounds())
+        except Exception as exc:  # noqa: BLE001 - google.api_core raises a family
+            raise StoreReadError(type(exc).__name__) from exc
+        if blob is None or blob.updated is None:
+            raise StoreReadError(f"no update time: {name}")
+        return blob.updated.astimezone(UTC)
 
     def list_audit(self, day: str | None = None, leaf: str = "") -> list[str]:
         root = self._full(AUDIT_PREFIX) + "/"
