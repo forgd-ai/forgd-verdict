@@ -127,6 +127,9 @@ class VerdictServer:
         self.preauth = PreAuthBudget(self.policy.preauth_body_budget_bytes)
         self.body_read_timeout_s = self.policy.body_read_timeout_s
         self._started = time.time()
+        from ..behaviour.flags import reader_from_policy
+
+        self.flags = reader_from_policy(self.policy, self.sink.store)
         self.overrides = reader_for(self.policy.raw, self.sink.store, "verdict",
                                     baseline={KEY_MODE: self.baseline_mode}, log=self.log)
         self.overrides.refresh()
@@ -350,7 +353,8 @@ class VerdictServer:
         mode = self.mode
         try:
             result = await asyncio.to_thread(
-                self._scan_whole if whole else self._scan, frame, budget)
+                self._scan_flagged, self._scan_whole if whole else self._scan,
+                frame, budget)
             result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
             verdict = decide(result.findings, self.policy,
                              dropped=result.detectors_skipped)
@@ -575,6 +579,17 @@ class VerdictServer:
             if extra:
                 result.findings = dedupe_findings([*result.findings, *extra])
             result.detectors_skipped = with_left_out(result.detectors_skipped, outcome.dropped)
+        return result
+
+    def _scan_flagged(self, scan, frame: dict, budget: Budget):
+        """`scan`, plus the finding for a session a post-hoc check flagged
+        (behaviour/flags.py), for every frame type. A failed read flags
+        nothing."""
+        result = scan(frame, budget)
+        if self.flags is not None:
+            flagged = self.flags.finding(frame.get("session_id"))
+            if flagged is not None:
+                result.findings = dedupe_findings([*result.findings, flagged])
         return result
 
     def _build_provenance(self):

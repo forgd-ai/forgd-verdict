@@ -282,6 +282,15 @@ class ComplianceScanner:
         from ..behaviour.provenance import from_policy
 
         self._behaviour = from_policy(policy)
+        # The post-hoc judge and the tool baseline, which write a flag on a
+        # session for the verdict server to read (behaviour/flags.py).
+        from ..behaviour import baseline as _baseline
+        from ..behaviour import judge as _judge
+
+        self._judge = _judge.from_policy(policy)
+        self._baseline = _baseline.from_policy(policy, store)
+        self._flag_store = store
+        self.sessions_flagged = 0
         cfg = policy.compliance
         from ..models import env_or_literal
 
@@ -513,6 +522,7 @@ class ComplianceScanner:
             budget_exceeded=bool(result.budget_exceeded),
             tiers_dropped=list(result.detectors_skipped or []),
         )
+        self._flag(session_id, report.product_surface, report.user_id, messages)
         self._sessions_seen.add(session_id)
         self.state.data.setdefault("sessions", {})[session_id] = {
             "updated_at": session.get("updated_at"),
@@ -521,6 +531,43 @@ class ComplianceScanner:
             "findings": len(findings),
         }
         return report
+
+    def _flag(self, session_id: str, surface: str | None, user: str | None,
+              messages: list) -> None:
+        """Ask the judge and the tool baseline about the session, and write
+        a flag when either says to. A failure flags nothing and is logged."""
+        if self._flag_store is None or (self._judge is None and self._baseline is None):
+            return
+        from ..behaviour import baseline as _baseline
+        from ..behaviour import flags as _flags
+
+        found: list[tuple[str, str]] = []
+        if self._baseline is not None:
+            actor = pseudonym(user, self.policy.hash_salt, "user") if user else None
+            reason = self._fail_open("baseline", lambda: self._baseline.observe(
+                surface, actor, session_id, _baseline.tools_in(messages)))
+            if reason:
+                found.append((reason, _flags.SOURCE_BASELINE))
+        if self._judge is not None:
+            reason = self._fail_open("judge", lambda: self._judge.judge(messages))
+            if reason:
+                found.append((reason, _flags.SOURCE_JUDGE))
+        if found:
+            reason, source = found[-1]
+            if self._fail_open("write", lambda: _flags.write_flag(
+                    self._flag_store, session_id, self.policy.hash_salt,
+                    reason, source) or True):
+                self.sessions_flagged += 1
+
+    @staticmethod
+    def _fail_open(check: str, run):
+        """`run()`, or None, logged, when it raises."""
+        try:
+            return run()
+        except Exception as exc:  # noqa: BLE001 - a check that fails flags nothing
+            log.warning("session flag check failed", extra={"fields": {
+                "check": check, "error": type(exc).__name__}})
+            return None
 
     def _behaviour_findings(self, messages, dlp_findings) -> tuple[list, list[str]]:
         """(findings, checks that did not finish) of provenance and taint over

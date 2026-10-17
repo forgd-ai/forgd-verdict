@@ -229,6 +229,7 @@ that sets it. No error prints a value.
   "FORGD_INTAKE_FLEET_TOKEN" "secrets.intakeFleetToken, or the intake-fleet-token key in secrets.existingSecret"
   "FORGD_INTAKE_FLEET_TOKEN_PREVIOUS" "secrets.intakeFleetTokenPrevious, or the intake-fleet-token-previous key in secrets.existingSecret"
   "FORGD_SHARED_HEADER" "secrets.sharedHeader, or the shared-header key in secrets.existingSecret"
+  "FORGD_JUDGE_API_KEY" "secrets.judgeApiKey, or the judge-api-key key in secrets.existingSecret"
 -}}
 {{- $prefixes := dict
   "FORGD_OTEL_TOKEN_" "secrets.otelTokens.<name>, or the otel-token-<name> key in secrets.existingSecret"

@@ -1266,6 +1266,8 @@ SECRET_PATHS: tuple[tuple[str, ...], ...] = (
     ("dashboard", "admins", "form_key"),
     # The Ed25519 key runtime-override records are signed with.
     ("overrides", "signing_key"),
+    # The Anthropic API key the session judge calls the model with.
+    ("behaviour", "judge", "api_key"),
 )
 
 # Adapter 4's per-org bearer tokens live in a list, so they need walking

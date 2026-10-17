@@ -85,6 +85,8 @@ EVERYTHING = (
     "--set", "dashboard.auth.groupsClaim=roles",
     "--set", "dashboard.auth.header=x-user",
     "--set", "dashboard.admins.gcsInheritedAuditedBy=someone",
+    "--set", "ingest.judge.enabled=true",
+    "--set-string", "secrets.judgeApiKey=synthetic-judge-key",
     *SINK_SECRETS,
 )
 
@@ -289,6 +291,7 @@ SECRET_SCOPE = {
     "compliance-key": {"ingest"},
     "compliance-key-": {"ingest"},
     "managed-agents-key-": {"ingest"},
+    "judge-api-key": {"ingest"},
     "dashboard-form-key": {"dashboard"},
     "overrides-signing-key": {"dashboard"},
 }
@@ -334,6 +337,7 @@ POLICY_SECRET_KEYS = {
     ("compliance", "orgs", "api_key"): "compliance-key-",
     ("managed_agents", "workspaces", "api_key"): "managed-agents-key-",
     ("server", "required_headers"): "shared-header",
+    ("behaviour", "judge", "api_key"): "judge-api-key",
 }
 
 
@@ -443,3 +447,15 @@ def test_other_pod_labels_and_annotations_render():
         meta = d["spec"]["template"]["metadata"]
         assert meta["labels"]["team"] == "sec"
         assert meta["annotations"]["prometheus.io/scrape"] == "true"
+
+
+def test_the_judge_key_reaches_the_ingest_job_only_when_the_judge_is_on():
+    """Mutation: render the env without ingest.judge.enabled, or accept the
+    flag without a key."""
+    assert "FORGD_JUDGE_API_KEY" not in env_of(pod_specs(render(*OIDC))["ingest"])
+    err = render_error(*OIDC, "--set", "ingest.judge.enabled=true")
+    assert "secrets.judgeApiKey" in err
+    on = pod_specs(render(*OIDC, "--set", "ingest.judge.enabled=true",
+                          "--set-string", "secrets.judgeApiKey=synthetic-judge-key"))
+    ref = env_of(on["ingest"])["FORGD_JUDGE_API_KEY"]["valueFrom"]["secretKeyRef"]
+    assert ref["key"] == "judge-api-key"

@@ -81,6 +81,15 @@ def _sink_token():
                            "token": UNSET}], ["regex"], background=False)
 
 
+def _judge_key():
+    from forgd_verdict.behaviour.judge import from_policy
+
+    policy = _policy(behaviour={"judge": {"enabled": True, "model": "claude-test",
+                                          "api_key": UNSET}})
+    with pytest.raises(ValueError, match="api_key resolves to nothing"):
+        from_policy(policy)
+
+
 def _managed_key(caplog):
     from forgd_verdict.managed.scanner import run_managed_ingest
 
@@ -115,6 +124,7 @@ REFUSES = {
     ("dashboard", "admins", "form_key"): _form_key,
     ("overrides", "signing_key"): _signing_key,
     ("sinks", "token"): _sink_token,
+    ("behaviour", "judge", "api_key"): _judge_key,
 }
 REPORTED_WHERE_READ = {
     ("managed_agents", "workspaces", "api_key"): "managed",

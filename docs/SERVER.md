@@ -366,6 +366,53 @@ Known limits: a value transformed before sending (hex, splitting) does not
 match its digest (base64 does, since the core decodes it); symlinks are not
 resolved; `cat a b` taints both files.
 
+### Session flags
+
+A post-hoc check can mark a session for the verdict server to stop. Each is
+off by default:
+
+```yaml
+behaviour:
+  judge:                 # asks a Claude model whether each session serves its user
+    enabled: false
+    model: ""            # required when enabled; each session is a billed request
+    api_key: $FORGD_JUDGE_API_KEY   # chart: ingest.judge.enabled, secrets.judgeApiKey
+  baseline:              # flags a tool the user has not used before
+    enabled: false
+    min_sessions: 10     # 1 to 200: sessions in the baseline before it flags anything
+  flags:                 # the verdict server's read of the flags
+    enabled: false
+    severity: warn       # block denies the flagged session's next frame
+    ttl_hours: 24
+```
+
+The Compliance scanner runs the judge and the baseline over each session
+it reads. The judge answers by a forced tool call whose schema allows one
+of `off_task`, `acting_for_third_party` and `unrequested_send`, or that the
+session serves its user; the baseline's answer is `new_tool`, for a tool
+the user has not called in any earlier session on that surface, once the
+baseline holds `min_sessions` sessions. A user whose sessions have called
+more than 500 distinct tools has no usable baseline, and it flags nothing
+for them. Either writes a flag, named by a salted digest of the session
+id. The verdict server reads the flag for every frame of the session,
+prompt and tool call alike, and reports `flag:session-flagged` at
+`behaviour.flags.severity`; at `block`, each frame is denied with the deny
+reason every block gives. A flag found is cached for 60 s and an absent one
+for 5 s, so a flag takes effect within 5 s of being written. It lasts
+`ttl_hours`.
+
+A flag object stays in the store after it expires. A lifecycle rule on the
+bucket's `state/session-flag-` prefix, deleting objects older than
+`ttl_hours`, removes them. Baselines are one object per surface and user.
+
+The verdict server matches the inference hook's `session_id`, and the
+Compliance API names sessions with its own ids. A flag takes effect where
+the two are the same value, as they are expected to be for Claude Code;
+nothing checks it. The judge sends transcripts to the Anthropic API; see
+[PRIVACY.md](PRIVACY.md#what-is-stored-and-where). A failure on either
+side flags nothing ([SECURITY-MODEL.md](SECURITY-MODEL.md)). The judge
+needs the `judge` extra: `pip install 'forgd-verdict[judge]'`.
+
 ### Modes
 
 | Mode | Behaviour |

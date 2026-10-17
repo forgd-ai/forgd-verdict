@@ -29,6 +29,7 @@ matched value, never the value itself.
 | `taint` | `taint:sensitive-data-sent` | behavioural | as `provenance` | `warn` | as `provenance` |
 | `injection` | `injection:<rule>` | T0 | off | `warn` | wherever it is enabled, on tool-result and attachment text in a frame only: the verdict server and the intake's frame `/scan` |
 | `envelope` | `envelope:outside-operator-envelope` | behavioural | off | `warn` | as `provenance`, for the rules whose `applications` match; on the post-hoc scanners only rules with no `applications` |
+| `behaviour.flags` | `flag:session-flagged` | behavioural | off | `warn` (`behaviour.flags.severity`) | the verdict server, for a session the post-hoc judge or the tool baseline flagged (see [SERVER.md § Session flags](SERVER.md#session-flags)) |
 
 `checksums` and `entropy` run without appearing in `policy.yaml`, because
 `DEFAULT_POLICY` enables them. Every T0 rule in `t0_regex` runs; the
