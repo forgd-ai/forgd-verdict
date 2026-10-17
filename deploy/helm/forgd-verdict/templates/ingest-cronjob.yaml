@@ -105,6 +105,13 @@ spec:
                       key: managed-agents-key-{{ $name | lower }}
                       optional: true
                 {{- end }}
+                {{- if .Values.ingest.judge.enabled }}
+                - name: FORGD_JUDGE_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "forgd-verdict.secretName" . }}
+                      key: judge-api-key
+                {{- end }}
                 {{- with .Values.serviceAccounts.writer.clientId }}
                 - name: AZURE_CLIENT_ID
                   value: {{ . | quote }}

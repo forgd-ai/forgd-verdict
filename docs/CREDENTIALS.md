@@ -50,6 +50,7 @@ Two things to keep true in a fork:
 | `FORGD_OVERRIDES_SIGNING_KEY` (`overrides.signing_key`) | runtime overrides | `forgd-verdict overrides keygen` | dashboard env only | only to sign overrides |
 | `FORGD_SINK_TOKEN_<NAME>` (`sinks[].token`) | Adapter 5 | the destination's operator | collector env | **yes**, for a sink with an endpoint |
 | `FORGD_MANAGED_AGENTS_KEY_<NAME>` (`managed_agents.workspaces[].api_key`) | Adapter 6 | the Anthropic console, per workspace | ingest job env | only for adapter 6 |
+| `FORGD_JUDGE_API_KEY` (`behaviour.judge.api_key`) | the session judge | the Anthropic console | ingest job env | only with `behaviour.judge.enabled` |
 
 Nothing above belongs in a committed `policy.yaml`. The policy file
 references environment variables by name (`$WEBHOOK_SECRET`) and is safe to
@@ -657,6 +658,19 @@ old key.
 
 ---
 
+## 16. `behaviour.judge.api_key` — the session judge
+
+An Anthropic API key the ingest job uses to ask `behaviour.judge.model`
+about each session it scans ([SERVER.md § Session flags](SERVER.md#session-flags)).
+Each request carries the session's transcript and is billed to the key's
+workspace; [PRIVACY.md](PRIVACY.md#what-is-stored-and-where) says what is
+sent. Reference it as `$FORGD_JUDGE_API_KEY`; on the chart it is
+`secrets.judgeApiKey`, with `ingest.judge.enabled: true`. Give it a workspace of its own, so its spend and its
+request logs are separate. Rotation has no overlap: create the new key,
+switch the ingest job, confirm a pass succeeds, then delete the old key.
+
+---
+
 ## When a reference resolves to nothing
 
 A credential written as `$NAME` whose variable is unset or empty either
@@ -675,13 +689,14 @@ logs at start as a warning naming the path and the variable, never a value.
 | `intake.fleet[].tokens` | logged when every token in the entry is unset; that fleet is refused with 401. An unset previous token beside a set current one is a normal state |
 | `compliance.api_key`, `compliance.orgs[].api_key` | logged by the ingest job; that org is not scanned |
 | `managed_agents.workspaces[].api_key` | logged and reported in the run's summary as `no api key` |
+| `behaviour.judge.api_key` | the ingest job refuses to start while `behaviour.judge.enabled` |
 | `hook.ship_token`, `hook.scan_token` | the hook says so on stderr; the intake refuses the unauthenticated request, and spooled records stay spooled |
 
 ## Explicitly NOT needed
 
 | Credential | Why not |
 |---|---|
-| `ANTHROPIC_API_KEY` | Nothing reads this variable. The only standard API key the project uses is adapter 6's per-workspace key, referenced as `$FORGD_MANAGED_AGENTS_KEY_<NAME>` (§15), and only when adapter 6 runs. |
+| `ANTHROPIC_API_KEY` | Nothing reads this variable. The standard API keys the project uses are adapter 6's per-workspace key, referenced as `$FORGD_MANAGED_AGENTS_KEY_<NAME>` (§15), and the session judge's, `$FORGD_JUDGE_API_KEY` (§16), each only when its feature is on. |
 | Admin API key (`sk-ant-admin01-...`) | Reaches the Activity Feed **only**. Enough for `forgd-verdict compliance denials`, but the session endpoints return **403** for it — so it cannot do adapter 3's actual job. |
 | Analytics API key | Different API, aggregate usage and cost. Unrelated. |
 | `GITLEAKS_LICENSE` | Only `gitleaks/gitleaks-action` requires one for org-owned repos (free, but registration-gated, and the Action is `NOASSERTION`, not a standard OSS licence). CI installs the **MIT-licensed gitleaks release binary** directly, pinned by version and SHA-256, and the Docker image builds the same MIT-licensed CLI from the v8.30.1 module source, pinned by checksum in `deploy/gitleaks-cli/go.sum`, so there is no key and no non-OSS dependency. |

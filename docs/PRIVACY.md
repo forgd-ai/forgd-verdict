@@ -178,6 +178,8 @@ laptops is 900 there and nothing in the headline.
 | collector records | the findings store, as verdict rows with the collector as their source | as verdict rows, plus `reported_as`, what the sender called itself, such as its `service.name` | no |
 | hook spool | on the laptop, mode 0600, until shipped | the same row shape, with the Claude Code session id and a request id built from the event, the tool name and the tool-use id | no |
 | device salt | on the laptop, `device-salt` beside the spool, mode 0600 | the hook's per-device salt, the key to that laptop's hashes | no |
+| session flags | the findings store, `state/session-flag-<digest>.json`, with `behaviour.flags` | the reason code, which check set it, and when, named by a salted digest of the session id | no |
+| tool baselines | the findings store, `state/behaviour-tools-<digest>.json`, with `behaviour.baseline` | per surface and user pseudonym, the count of sessions, the salted digests of the last 200 session ids and of the tools they called | no |
 | timings CSV | `server.csv_path`, `./timings.csv` in the shipped policy and written by default | per request: time, request id, surface, the org as its `org_` pseudonym in the `tenant_id` column, model, sizes, phase timings, action, finding count, mode | no |
 | verdict log | the service's log stream | as the CSV, the org as its `org_` pseudonym, plus each finding's detector, severity, locator, `excerpt_hash` and tool name | no |
 | runtime override audit | the findings store, under `audit/runtime-overrides/` | each change: the action, key, old and new value, time, and the admin who made it, **in plain text**: issuer, subject and name. A record that would hold a configured org id is refused. Beside them, the writer lockout's probe records (role, instance name with the host name, time) and verification records (the writer identities from `FORGD_OVERRIDES_WRITER_IDENTITIES` **in plain text**, with each one's result) | no prompt content; the admin's identity is readable |
@@ -189,6 +191,17 @@ laptops is 900 there and nothing in the headline.
 | markers | the findings store, `markers/stats_reset` and `markers/excluded_requests` | the stats reset time, and the request ids excluded from the statistics | no |
 | archive | `server.archive_dir`, `./archive`, only in `archive` mode | **whole frames**, written after the response | **yes** |
 | adapter 5's sink | a third party you configure | a copy of the collector's events, with the configured detectors' matches masked; the masked value is scanned again before it leaves | yes, redacted |
+
+**The session judge sends transcripts to the Anthropic API.** With
+`behaviour.judge.enabled`, the Compliance scanner sends each session's
+transcript, rendered as text, to the Claude model `behaviour.judge.model`
+names, with the operator's API key: the user's words, the tool calls and
+their results, each tool input cut to 4,000 characters and each result to
+8,000, and a transcript longer than 200,000 characters cut to its first
+50,000 and its last 150,000. It keeps only the reason code the model
+answers. Anthropic already holds the transcript; the judge's request is a
+new one, made and billed under that key and retained as Anthropic retains
+API requests. It is off by default.
 
 **File modes.** Everything forgd-verdict writes to local disk is owner-only:
 files are 0600 and the directories it creates are 0700, whatever the

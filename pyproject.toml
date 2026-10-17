@@ -48,6 +48,9 @@ dashboard = ["uvicorn>=0.30", "PyJWT[crypto]>=2.13.0"]
 # brings Starlette; PyJWT verifies the identity provider's tokens with the
 # dashboard's verifier.
 connector = ["mcp>=2.2,<3", "uvicorn>=0.30", "PyJWT[crypto]>=2.13.0"]
+# The post-hoc session judge (`behaviour.judge`), which asks a Claude model
+# about each session the Compliance scanner reads.
+judge = ["anthropic>=1.15"]
 # T2 detectors. Heavy; off by default.
 ml = ["llm-guard>=0.3.15", "presidio-analyzer>=2.2"]
 # Presidio without LLM Guard. LLM Guard pulls torch, which is ~2.5 GB of

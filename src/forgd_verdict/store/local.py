@@ -201,10 +201,12 @@ class LocalFileStore:
         write_private(self.root / STATE_PREFIX / safe_state_name(name), blob)
 
     def get_state(self, name: str) -> bytes | None:
+        """None when there is no such state object. Any other failure
+        raises, as the cloud stores' do."""
         path = self.root / STATE_PREFIX / safe_state_name(name)
         try:
             return path.read_bytes()
-        except OSError:
+        except FileNotFoundError:
             return None
 
     # -- runtime overrides ------------------------------------------------

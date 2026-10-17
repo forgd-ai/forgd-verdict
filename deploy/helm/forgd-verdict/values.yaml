@@ -203,6 +203,11 @@ secrets:
   # Each is the variable a managed_agents.workspaces[].api_key names; name it
   # after the workspace's `key`, which every workspace entry must carry.
   managedAgentsKeys: {}
+  # judge-api-key        FORGD_JUDGE_API_KEY, the Anthropic API key the
+  #                      ingest job's session judge sends transcripts with
+  #                      (behaviour.judge). Required while
+  #                      ingest.judge.enabled.
+  judgeApiKey: ""
   # dashboard-form-key   FORGD_DASHBOARD_FORM_KEY, the HMAC key for the
   #                      dashboard's admin form tokens. Required while
   #                      dashboard.admins.enabled; every dashboard replica
@@ -541,6 +546,11 @@ ingest:
   # ANTHROPIC_COMPLIANCE_ACCESS_KEY_<NAME>, from compliance-key-<name>, for
   # that org's compliance.orgs entry. With a list, complianceKey is optional.
   complianceOrgs: []
+  # The session judge (behaviour.judge in policy.inline). While true the job
+  # gets FORGD_JUDGE_API_KEY from judge-api-key: secrets.judgeApiKey, or
+  # that key in secrets.existingSecret.
+  judge:
+    enabled: false
   # Every six hours. The Compliance API exposes sessions updated since a
   # cursor, so the schedule sets staleness, not coverage.
   schedule: "0 */6 * * *"

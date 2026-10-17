@@ -69,7 +69,7 @@ BUILTIN_DETECTORS = frozenset({
 # The prefixes of the finding ids the built-ins emit (`regex:aws-...`).
 BUILTIN_FINDING_PREFIXES = frozenset({
     "regex", "checksum", "entropy", "shell", "gitleaks", "presidio",
-    "llmguard", "provenance", "taint", "envelope", "injection",
+    "llmguard", "provenance", "taint", "envelope", "injection", "flag",
 })
 
 BUILTIN_DETECTOR_CLASSES = (

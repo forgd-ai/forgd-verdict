@@ -1095,3 +1095,20 @@ sinks:
 #     # point of sending it at all.
 #     metadata:
 #       env: prod
+
+# Session flags: post-hoc checks that mark a session for the verdict server
+# to stop. All off. The judge sends each session's transcript to the Claude
+# model named here with this key; see docs/SERVER.md § Session flags and
+# docs/PRIVACY.md.
+# behaviour:
+#   judge:
+#     enabled: false
+#     model: ""
+#     api_key: $FORGD_JUDGE_API_KEY
+#   baseline:
+#     enabled: false
+#     min_sessions: 10
+#   flags:
+#     enabled: false
+#     severity: warn
+#     ttl_hours: 24

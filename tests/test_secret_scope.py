@@ -34,6 +34,7 @@ ENV_SCOPE = {
     "ANTHROPIC_COMPLIANCE_ACCESS_KEY": {"ingest"},
     "ANTHROPIC_COMPLIANCE_ACCESS_KEY_": {"ingest"},
     "FORGD_MANAGED_AGENTS_KEY_": {"ingest"},
+    "FORGD_JUDGE_API_KEY": {"ingest"},
     "FORGD_DASHBOARD_FORM_KEY": {"dashboard"},
     "FORGD_OVERRIDES_SIGNING_KEY": {"dashboard"},
 }
