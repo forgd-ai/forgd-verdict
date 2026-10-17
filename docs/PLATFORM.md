@@ -209,20 +209,22 @@ Each agent is an intake client scoped to `scan`, and its records are filed as
 [AGENT-BUILDERS.md](AGENT-BUILDERS.md) has the token setup, Python
 and TypeScript callbacks, failure and deny handling, and what was measured.
 
-**A block stops the model call, not session-title generation.** Measured
-with Claude Code 2.1.280 and the TypeScript Agent SDK 0.3.280: in
-Agent SDK session mode, Claude Code sends the first prompt to a
-`generate_session_title` request in parallel with the `UserPromptSubmit`
-hook. In the reproduction it left 540 ms before the block landed, so the
-prompt reached Anthropic even though the user saw it blocked. `claude -p`
-does not generate a title, and there a block stopped every model call. No
-documented setting turns title generation off. On an org with inference
-hooks, adapter 1 sees that request, which contradicts the overview's
-statement that title generation is not sent to the endpoint. On an org
-without them, nothing does. Treat adapter 2 as stopping the prompt from
-being answered, not as guaranteeing it never leaves the machine.
+**Before Claude Code 2.1.302, a block did not stop session-title
+generation.** With Claude Code 2.1.302 and the TypeScript Agent SDK 0.3.302,
+in Agent SDK session mode, the `generate_session_title` request is sent with
+the model call, after `UserPromptSubmit` allows the prompt, and a block
+stops both, including a block from a hook that took two seconds to answer.
+With 2.1.280 and 0.3.280, Claude Code sent the first prompt to that request
+in parallel with the hook: in the reproduction it left 540 ms before the
+block landed, so the prompt reached Anthropic even though the user saw it
+blocked. The releases in between were not checked. On an older release,
+treat adapter 2 as stopping the prompt from being answered, not as
+guaranteeing it never leaves the machine. `claude -p` does not generate a
+title. In the 2.1.280 measurement adapter 1 received the title request,
+which contradicts the inference-hooks overview's statement that title
+generation is not sent to the endpoint; that has not been re-measured.
 [AGENT-BUILDERS.md](AGENT-BUILDERS.md#reproducing-the-session-title-request)
-has the steps to check a newer release.
+has the steps to check a release.
 
 **Unmanaged installs are advisory only.** A developer who can edit
 `.claude/settings.json` can remove the hook. For enforcement, deploy the
