@@ -93,6 +93,17 @@ def unhurried_behaviour(monkeypatch):
     monkeypatch.setattr(provenance, "request_time_budget", lambda _budget: 60.0)
 
 
+@pytest.fixture
+def unhurried_scrub(monkeypatch):
+    """The scan core's locator scrub gets 60 s rather than _SCRUB_BUDGET_S.
+    Past 0.25 s it replaces a locator with REDACTED, and on a loaded CI
+    runner it did: the call's DLP finding no longer named the call's input,
+    and taint, which joins on that, found nothing."""
+    from forgd_verdict import core
+
+    monkeypatch.setattr(core, "_SCRUB_BUDGET_S", 60.0)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_dashboard_policy_cache():
     """Tests patch `load_policy` or rewrite the policy between requests; a
