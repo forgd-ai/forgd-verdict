@@ -40,6 +40,10 @@ SIZE_STEP = 4
 # growth over the whole range, with a looser bound on each step.
 MAX_TIME_STEP = 12.0
 MAX_TIME_TOTAL = 3 * SIZE_STEP ** (len(SIZES) - 1)
+# Seconds per scan below which a time is not compared as measured. A function
+# that returns in 0.2us on 32 KB failed a step at 0.2us, 2.9us, 0.9us. A
+# quadratic regex, `a*b` over a run of `a`, takes 0.8 ms at the smallest size.
+TIME_FLOOR_S = 50e-6
 # Each round times every size once, so drift in the machine's speed lands on
 # all sizes alike; the best round per size is kept. A case over the limit is
 # measured again over more rounds before it fails, since noise only ever
@@ -467,7 +471,11 @@ def _ratios(times: list[float]) -> list[float]:
 
 
 def _too_steep(times: list[float]) -> bool:
-    return max(_ratios(times)) > MAX_TIME_STEP or times[-1] / times[0] > MAX_TIME_TOTAL
+    """Whether `times` grow faster than linear, each raised to TIME_FLOOR_S
+    first."""
+    floored = [max(t, TIME_FLOOR_S) for t in times]
+    return (max(_ratios(floored)) > MAX_TIME_STEP
+            or floored[-1] / floored[0] > MAX_TIME_TOTAL)
 
 
 def _assert_linear(name: str, scan: Callable[[str], object], shape: Shape) -> None:
