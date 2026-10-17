@@ -21,7 +21,7 @@ import os
 import re
 import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -988,8 +988,10 @@ class Policy:
     def build_detectors(self, *, include_local_only: bool = False,
                         salt: str | None = None,
                         profile: str | None = None,
-                        probe: bool = True) -> list[Any]:
-        """Instantiate the enabled detectors, in tier order.
+                        probe: bool = True,
+                        leave_out: Collection[str] = ()) -> list[Any]:
+        """Instantiate the enabled detectors, in tier order, but for the
+        built-in detectors named in `leave_out`.
 
         `enabled: auto` means "on if the dependency is present". A detector
         configured `auto` that cannot load is skipped silently; one configured
@@ -1019,7 +1021,7 @@ class Policy:
 
         def add(name: str, factory) -> None:
             cfg = cfgs.get(name)
-            if cfg is None or cfg.enabled is False:
+            if cfg is None or cfg.enabled is False or name in leave_out:
                 return
             detector = factory(cfg.severity, salt)
             if not probe or detector.available():

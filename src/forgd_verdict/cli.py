@@ -298,8 +298,15 @@ def _anchored(anchorer, records) -> None:
               file=sys.stderr)
 
 
+# Added to a refusal because gitleaks could not run here.
+_WITHOUT_GITLEAKS_HINT = ("; on a machine that cannot reach the gitleaks daemon, "
+                          "--without-gitleaks scans the change with the other detectors")
+
+
 def _change(args, store, change, **kwargs) -> tuple[int, object | None]:
-    """Apply one audited change as the CLI. (exit code, Applied or None)."""
+    """Apply one audited change as the CLI. (exit code, Applied or None).
+    With `--without-gitleaks`, the change is scanned with every configured
+    detector but gitleaks."""
     from .overrides import (
         InvalidState,
         NoChange,
@@ -320,12 +327,18 @@ def _change(args, store, change, **kwargs) -> tuple[int, object | None]:
         print(f"refused: the policy could not be loaded ({policy_error(exc)})",
               file=sys.stderr)
         return 2, None
+    without_gitleaks = getattr(args, "without_gitleaks", False)
     try:
-        detectors = policy.build_detectors(profile="dashboard")
+        detectors = policy.build_detectors(
+            profile="dashboard", leave_out=("gitleaks",) if without_gitleaks else ())
         org = org_screen_of(policy)
     except RuntimeError as exc:
-        print(f"refused: {exc}", file=sys.stderr)
+        hint = _WITHOUT_GITLEAKS_HINT if str(exc).startswith("detectors.gitleaks") else ""
+        print(f"refused: {exc}{hint}", file=sys.stderr)
         return 2, None
+    if without_gitleaks:
+        print("warning: gitleaks does not scan this change (--without-gitleaks); "
+              "the other configured detectors do", file=sys.stderr)
     keys = _signing_keys(policy)
     if keys is None:
         return 2, None
@@ -349,7 +362,10 @@ def _change(args, store, change, **kwargs) -> tuple[int, object | None]:
               "`forgd-verdict overrides recover`", file=sys.stderr)
         return 1, None
     except Refused as exc:
-        print(f"refused: {org(str(exc))}", file=sys.stderr)
+        message = org(str(exc))
+        hint = (_WITHOUT_GITLEAKS_HINT if message.startswith("the change could not be checked")
+                and "gitleaks" in message else "")
+        print(f"refused: {message}{hint}", file=sys.stderr)
         return 2, None
     except StoreForbidden as exc:
         print(f"refused: these credentials may not write {org(str(exc))}. Changing runtime "
@@ -1030,6 +1046,9 @@ def main(argv: list[str] | None = None) -> int:
         help="remove every exclusion; with runtime overrides on, the object's "
              "only, never markers/*",
     )
+    p_exc.add_argument("--without-gitleaks", action="store_true",
+                       help="scan the change with every configured detector but gitleaks, "
+                            "on a machine that cannot reach the gitleaks daemon")
     p_exc.set_defaults(func=_cmd_exclude)
 
     p_rst = sub.add_parser(
@@ -1041,6 +1060,9 @@ def main(argv: list[str] | None = None) -> int:
     p_rst.add_argument("--clear", action="store_true",
                        help="remove the reset; with runtime overrides on, the object's "
                             "only, never markers/*")
+    p_rst.add_argument("--without-gitleaks", action="store_true",
+                       help="scan the change with every configured detector but gitleaks, "
+                            "on a machine that cannot reach the gitleaks daemon")
     p_rst.set_defaults(func=_cmd_reset_stats)
 
     p_ovr = sub.add_parser(
@@ -1048,6 +1070,9 @@ def main(argv: list[str] | None = None) -> int:
         help="show or change the runtime overrides (docs/OVERRIDES.md); audited",
     )
     p_ovr.add_argument("--store", default=None)
+    p_ovr.add_argument("--without-gitleaks", action="store_true",
+                       help="scan the change with every configured detector but gitleaks, "
+                            "on a machine that cannot reach the gitleaks daemon")
     ovr = p_ovr.add_subparsers(dest="what", required=True)
     ovr.add_parser("show", help="the object, what is in force, and recent changes")
     ovr.add_parser("init", help="write the genesis record and an empty object; every "
