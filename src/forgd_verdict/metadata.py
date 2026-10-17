@@ -46,7 +46,7 @@ UNTRUSTED_RECORD_FIELDS = (
     "reference_id", "build",
 )
 # The DenialRecord fields copied from an Activity Feed item.
-DENIAL_FIELDS = ("activity_id", "created_at", "reference_id")
+DENIAL_FIELDS = ("activity_id", "created_at", "reference_id", "request_id", "event")
 # The fields `MetadataGuard.records` cleans, for each record class a store
 # writes.
 GUARDED_FIELDS: dict[type, tuple[str, ...]] = {

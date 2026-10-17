@@ -435,11 +435,16 @@ async def record(caller: Caller, reference_id: str | None = None,
         "earlier_observations": len(matches) - 1,
     }
     if reference_id:
-        denial = next((d for d in store.read_denials(since, store.orgs)
-                       if d.reference_id == reference_id), None)
+        # Anthropic's request id first, as the summary joins, when the
+        # record is the inference hook's.
+        request_id = top.request_id if top.source == SOURCE_INFERENCE_HOOK else None
+        denials = list(store.read_denials(since, store.orgs))
+        denial = next((d for d in denials if request_id and d.request_id == request_id),
+                      None) or next((d for d in denials if d.reference_id == reference_id),
+                                    None)
         out["denial"] = None if denial is None else {
             "activity_id": denial.activity_id, "created_at": denial.created_at,
-            **caller.org(denial.org)}
+            "event": denial.event or "prompt", **caller.org(denial.org)}
     return out
 
 
@@ -452,14 +457,29 @@ async def reconciliation(caller: Caller, window: str = "7d", org: str | None = N
     counts = dict(summary_payload(s, window)["reconciliation"],
                   code_hook_withheld=s.reconciliation.code_hook_withheld,
                   post_hoc_only_findings=s.reconciliation.post_hoc_only_findings)
-    references = {r.reference_id for r in store.read_verdicts(since, store.orgs)
-                  if r.reference_id and r.source == SOURCE_INFERENCE_HOOK}
+    requests: set[str] = set()
+    references: set[str] = set()
+    for r in store.read_verdicts(since, store.orgs):
+        if r.source == SOURCE_INFERENCE_HOOK:
+            if r.request_id:
+                requests.add(r.request_id)
+            if r.reference_id:
+                references.add(r.reference_id)
     denials = sorted((d for d in store.read_denials(since, store.orgs)
                       if not since or d.created_at >= since),
                      key=lambda d: d.created_at, reverse=True)
+
+    def joined_by(d: DenialRecord) -> str | None:
+        if d.request_id and d.request_id in requests:
+            return "request_id"
+        if d.reference_id and d.reference_id in references:
+            return "reference_id"
+        return None
+
     rows = [{"activity_id": d.activity_id, "created_at": d.created_at,
-             "reference_id": d.reference_id, **caller.org(d.org),
-             "verdict_found": bool(d.reference_id and d.reference_id in references)}
+             "reference_id": d.reference_id, "request_id": d.request_id,
+             "event": d.event or "prompt", **caller.org(d.org),
+             "joined_by": joined_by(d), "verdict_found": joined_by(d) is not None}
             for d in denials]
     return {"window": window, "counts": counts, "denials": _capped(rows, limit)}
 
@@ -560,8 +580,8 @@ def build_tools(reader: Reader) -> list[Any]:
 
     @tool("reconciliation",
           "Live enforcement against post-hoc scanning: values seen post-hoc and "
-          "never live, and Activity Feed denials joined by reference_id to the inference "
-          "hook's verdicts. "
+          "never live, and Activity Feed denials joined to the inference hook's verdicts by "
+          "Anthropic's request_id, else by reference_id. "
           f"limit 1 to {DENIALS_LIMIT_MAX}.")
     async def reconciliation_tool(window: Window = "7d", org: str | None = None,
                                   limit: int = DENIALS_LIMIT_DEFAULT) -> dict[str, Any]:

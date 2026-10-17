@@ -128,6 +128,39 @@ async def test_reconciliation_joins_a_denial_to_the_inference_hook_only(tmp_path
     assert [d["verdict_found"] for d in rec["denials"]["rows"]] == [True]
 
 
+async def test_reconciliation_joins_by_request_id_to_the_inference_hook_only(tmp_path):
+    """A denial with Anthropic's request id and no reference id joins the
+    inference hook's verdict for that frame, and no token writer's record
+    can stand in for it however it names the request. Mutation: collect
+    request ids from every source."""
+    store = LocalFileStore(tmp_path, instance="t")
+    store.write_denials([DenialRecord(activity_id="act-1", created_at=utcnow(),
+                                      request_id="wh-1", event="tool_call",
+                                      tenant_hash=ORG)])
+    forged = _forged()
+    forged.request_id = "wh-1"
+    await _ship(store, forged)
+    rec = await tools.reconciliation(_caller(store), window="7d")
+    assert [(d["joined_by"], d["event"]) for d in rec["denials"]["rows"]] == [
+        (None, "tool_call")]
+    _real_deny(store)
+    rec = await tools.reconciliation(_caller(store), window="7d")
+    assert [d["joined_by"] for d in rec["denials"]["rows"]] == ["request_id"]
+    assert rec["counts"]["joined_by_request_id"] == 1
+    assert rec["counts"]["denials_tool_call"] == 1
+
+
+async def test_record_finds_the_denial_by_the_verdict_s_request_id(tmp_path):
+    """Mutation: look the denial up by reference_id alone."""
+    store = LocalFileStore(tmp_path, instance="t")
+    _real_deny(store)
+    store.write_denials([DenialRecord(activity_id="act-1", created_at=utcnow(),
+                                      request_id="wh-1", tenant_hash=ORG)])
+    out = await tools.record(_caller(store), reference_id=REF)
+    assert out["denial"]["activity_id"] == "act-1"
+    assert out["denial"]["event"] == "prompt"
+
+
 # -- the class: every token source against every adapter source -------------------
 
 

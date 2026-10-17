@@ -74,7 +74,7 @@ flowchart TD
     P --> C
     C --> A1["A1 · Inference hooks server<br/>HTTPS, Anthropic → us<br/>allow / deny, before inference<br/>+ provenance and taint checks"]
     C --> A2["A2 · Claude Code hook<br/>stdin → verdict, locally or via /scan<br/>allow / deny, before the tool runs"]
-    C --> A3["A3 · Compliance scanner<br/>pull, after the fact<br/>detect only, join by reference_id"]
+    C --> A3["A3 · Compliance scanner<br/>pull, after the fact<br/>detect only, join by request_id"]
     C --> A4["A4 · OTel collector<br/>Anthropic pushes OTLP → us<br/>detect only, near real time"]
     A4 --> A5["A5 · Outbound sink (optional)<br/>redact, filter, annotate → their SIEM<br/>the only adapter that changes what leaves"]
     C --> A6["A6 · Managed Agents scanner (optional)<br/>pull session histories, after the fact<br/>detect only"]

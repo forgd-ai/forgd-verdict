@@ -893,6 +893,8 @@ def _cmd_compliance(args: argparse.Namespace) -> int:
                         "created_at": activity.get("created_at"),
                         "type": activity.get("type"),
                         "reference_id": scanner.extract_reference_id(activity),
+                        "request_id": activity.get("request_id"),
+                        "event": activity.get("event") or "prompt",
                         "actor": (activity.get("actor") or {}).get("email_address"),
                     }
                 )
