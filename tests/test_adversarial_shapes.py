@@ -77,7 +77,10 @@ TIME_RUNS = 2
 GROWTH_BOUND = 2
 TIME_ORDER = ("quarter", "limit", "quarter")
 RETRY_ROUNDS = 3
-CEILING_S = 60.0
+# Wall clock, there only to stop a run. The traced run of
+# collector/dotted_keys_29x29 at its limit takes about 20 s on a fast
+# machine, and a starved CI runner stopped it at the earlier 60 s.
+CEILING_S = 180.0
 CEILING_BYTES = 2 * 2**30
 # Below these, a quarter-size run is too quick or too small for a ratio
 # against it to mean anything.
