@@ -50,6 +50,7 @@ from ..orgregistry import publish_registry
 from ..overrides import KEY_MODE, cold, reader_for, readiness
 from ..plugins import loaded_distributions
 from ..policy import Policy, load_policy, warn_unset_credentials
+from ..store.base import EVENT_OTHER, EVENT_TOOL_CALL
 from ..store.sink import StoreSink
 from .archive import FrameArchive
 from .idempotency import VerdictStore
@@ -649,6 +650,10 @@ class VerdictServer:
             row_for_store["shadow_action"] = shadow_action
         if verdict is not None and verdict.reference_id:
             row_for_store["reference_id"] = verdict.reference_id
+        frame_type = frame.get("type")
+        if frame_type != "prompt":
+            row_for_store["event"] = (EVENT_TOOL_CALL if frame_type == EVENT_TOOL_CALL
+                                      else EVENT_OTHER)
         self.sink.submit(row_for_store, list(verdict.findings) if verdict else [])
         self.metrics.record(
             source_app,

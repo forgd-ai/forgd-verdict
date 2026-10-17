@@ -52,6 +52,10 @@ from ..models import (
 )
 
 SOURCE_INFERENCE_HOOK = "inference_hook"
+# An inference-hook record's `event`: the frame was a tool call frame, or
+# of a type the server did not recognise. A prompt frame leaves it None.
+EVENT_TOOL_CALL = "tool_call"
+EVENT_OTHER = "other"
 SOURCE_COMPLIANCE_SCAN = "compliance_scan"
 # Adapter 2. Kept distinct from `inference_hook` because the two see the
 # same tool call at different moments: the Code hook sees it BEFORE
@@ -234,6 +238,9 @@ class VerdictRecord:
     # What we WOULD have returned, when observe mode collapsed a deny.
     shadow_action: str | None = None
     reference_id: str | None = None
+    # The frame type, for the inference hook: EVENT_TOOL_CALL, EVENT_OTHER,
+    # or None for a prompt frame and for every record written before it.
+    event: str | None = None
     scan_ms: float | None = None
     total_ms: float | None = None
     cache_hit: bool | None = None
@@ -672,6 +679,7 @@ def verdict_from_log_row(row: dict[str, Any], salt: str = "") -> VerdictRecord:
         action=row.get("action") or "allow",
         shadow_action=row.get("shadow_action"),
         reference_id=row.get("reference_id"),
+        event=row.get("event") or None,
         scan_ms=_float(row.get("scan_ms")),
         total_ms=_float(row.get("total_ms")),
         cache_hit=bool(row.get("cache_hit")),

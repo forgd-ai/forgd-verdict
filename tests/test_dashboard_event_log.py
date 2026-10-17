@@ -215,3 +215,14 @@ def test_the_default_view_puts_no_org_in_its_links():
     html = render_events([_rec(1, device="d00000000000a")], window="all", selected="all")
     assert all("org" not in q for q in _links(html).values())
     assert 'name="org"' not in html
+
+
+def test_a_tool_call_verdict_is_labelled_as_one():
+    """A deny there stopped tool calls, not a prompt. Mutation: drop the
+    label."""
+    from forgd_verdict.store.base import EVENT_TOOL_CALL
+
+    tool = _rec(1, action="deny", detector="regex:aws-access-key")
+    tool.event = EVENT_TOOL_CALL
+    html = render_events([tool, _rec(2, action="deny", detector="regex:aws-access-key")])
+    assert html.count("(tool calls)") == 1

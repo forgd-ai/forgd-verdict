@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 
 from ..models import DEVICE_ID, NO_CONTENT_READ
 from ..orgregistry import KIND_WORKSPACE, partition_kind
-from ..store.base import WRITER_INTAKE_TOKEN, is_fleet_partition, writer_class
+from ..store.base import EVENT_TOOL_CALL, WRITER_INTAKE_TOKEN, is_fleet_partition, writer_class
 from ..store.query import Summary, families, family_device_values, family_severities
 from ..store.tally import weight
 from . import charts
@@ -739,7 +739,10 @@ def render(summary: Summary, window: str = "7d", store_desc: dict | None = None,
 
     stats = "".join([
         _stat("Prompts evaluated live", f"{summary.live_requests:,}",
-              "inference hooks"),
+              "inference hooks"
+              + (f" &middot; {summary.tool_call_checks:,} tool call checks, "
+                 f"{summary.tool_call_would_deny:,} would deny"
+                 if summary.tool_call_checks else "")),
         _stat("Sessions audited",
               f"{summary.scanned_sessions + summary.managed_sessions:,}",
               "compliance API" + (f" &middot; {summary.managed_sessions:,} managed agents"
@@ -1314,6 +1317,10 @@ def render_events(records, source: str = "all", action: str = "all",
         )
         if r.deleted_at and act != "deleted":
             shadow += ' <span class="act shadow">(deleted)</span>'
+        if r.event == EVENT_TOOL_CALL:
+            # The verdict covered the tool calls in a model response, not a
+            # prompt.
+            shadow += ' <span class="act shadow">(tool calls)</span>'
         msgs = ("not read" if any(m in r.tiers_dropped for m in NO_CONTENT_READ)
                 else f"{_count_cell(r.messages_scanned)}/{_count_cell(r.messages_total)}")
         n = weight(r)

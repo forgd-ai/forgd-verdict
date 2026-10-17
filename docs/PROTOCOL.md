@@ -260,6 +260,14 @@ The findings store keeps `config-test` records. The dashboard counts them
 as synthetic probes and leaves them out of request totals, surface rows and
 latency percentiles.
 
+A tool call frame's record carries `event: tool_call`, and a frame of a
+type the server does not recognise `event: other`; a prompt frame's record
+has no `event`, as have records written before it. The dashboard counts
+tool call verdicts on their own, beside "Prompts evaluated live", and
+leaves them out of request totals, the deny rate, surface request counts
+and latency percentiles, while their findings count as any other. The
+event log marks them "(tool calls)".
+
 ## Observed `source.application` values
 
 Values seen on inference hooks frames:

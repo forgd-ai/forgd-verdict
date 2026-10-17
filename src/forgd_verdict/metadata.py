@@ -43,7 +43,7 @@ RECORD_FIELDS = (
 # Every other string a writer can set on a record it ships to the intake.
 UNTRUSTED_RECORD_FIELDS = (
     *RECORD_FIELDS, "actor_hash", "salt_namespace", "action", "shadow_action",
-    "reference_id", "build",
+    "reference_id", "build", "event",
 )
 # The DenialRecord fields copied from an Activity Feed item.
 DENIAL_FIELDS = ("activity_id", "created_at", "reference_id", "request_id", "event")

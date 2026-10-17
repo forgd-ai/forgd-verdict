@@ -26,6 +26,7 @@ from ..models import (
     UNSCANNED_PREFIX,
 )
 from .base import (
+    EVENT_TOOL_CALL,
     SOURCE_AGENT_SCAN,
     SOURCE_CODE_HOOK,
     SOURCE_COMPLIANCE_SCAN,
@@ -348,6 +349,13 @@ class Summary:
     # and "only Anthropic's own probe" are different answers, and during an
     # incident the second one is the interesting one.
     synthetic_probes: int = 0
+    # The inference hook's verdicts on tool call frames, also excluded from
+    # everything above but findings: one model response that calls tools is
+    # a prompt frame and then a tool call frame, and counting both as
+    # requests doubles the request totals and mixes the latencies.
+    tool_call_checks: int = 0
+    tool_call_would_deny: int = 0
+    tool_call_denied: int = 0
     # Split out, because a post-hoc session is not a request and summing
     # the two produces a headline number with no meaning.
     live_requests: int = 0
@@ -616,12 +624,38 @@ def build_summary(
     live_reference_ids: set[str] = set()
     device_values: set[tuple[str, str]] = set()
 
+    def count_findings(v: VerdictRecord, key: str) -> None:
+        for f in v.findings:
+            det = detectors.setdefault(f.detector, DetectorRow(f.detector))
+            det.count += 1
+            det.severity = f.severity
+            det.surfaces.add(key)
+            if v.salt_namespace:
+                det.device_values.add((v.salt_namespace, f.excerpt_hash))
+                device_values.add((v.salt_namespace, f.excerpt_hash))
+            else:
+                det.distinct_values.add(f.excerpt_hash)
+                seen_values.add(f.excerpt_hash)
+
     for v in verdicts:
         # Before the totals, not just the surface rows: a connection test
         # counted in total_requests and in the latency percentiles reports
         # coverage and performance nobody exercised.
         if is_synthetic(v.surface):
             out.synthetic_probes += 1
+            continue
+        if v.source == SOURCE_INFERENCE_HOOK and v.event == EVENT_TOOL_CALL:
+            out.tool_call_checks += 1
+            if v.effective_action == "deny":
+                out.tool_call_would_deny += 1
+            if v.action == "deny":
+                out.tool_call_denied += 1
+            out.total_findings += v.findings_count
+            key = normalize_surface(v.surface)
+            if key in surfaces:
+                surfaces[key].findings += v.findings_count
+            count_findings(v, key)
+            recon.live_value_hashes.update(f.excerpt_hash for f in v.findings)
             continue
         # A tally row stands for `n` clean Code hook allows (store/tally.py).
         n = weight(v)
@@ -700,17 +734,7 @@ def build_summary(
         if v.is_inline and effective == "deny":
             day[1] += 1
 
-        for f in v.findings:
-            det = detectors.setdefault(f.detector, DetectorRow(f.detector))
-            det.count += 1
-            det.severity = f.severity
-            det.surfaces.add(key)
-            if v.salt_namespace:
-                det.device_values.add((v.salt_namespace, f.excerpt_hash))
-                device_values.add((v.salt_namespace, f.excerpt_hash))
-            else:
-                det.distinct_values.add(f.excerpt_hash)
-                seen_values.add(f.excerpt_hash)
+        count_findings(v, key)
 
         if v.source == SOURCE_INFERENCE_HOOK:
             out.live_requests += 1
