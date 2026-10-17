@@ -36,7 +36,7 @@ resource "azurerm_storage_account" "findings" {
   # deployment that can reach the storage account privately should set this
   # false and add a private endpoint; it is left open rather than assumed
   # because closing it without one locks the dashboard out silently.
-  public_network_access_enabled = var.public_network_access
+  public_network_access = var.public_network_access ? "Enabled" : "Disabled"
 
   blob_properties {
     # The store is append-only by design and never rewrites an object, so
