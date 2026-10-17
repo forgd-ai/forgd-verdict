@@ -44,6 +44,7 @@ Two things to keep true in a fork:
 | `FORGD_OTEL_TOKEN_<NAME>` (`otel.orgs[].token`) | Adapter 4 | you generate it, one per org | collector env, and that org's OTel exporter | **yes**, for each org the collector accepts |
 | `FORGD_INTAKE_FLEET_TOKEN` (`intake.fleet[].tokens`) | Adapter 2 intake | you generate it, one per managed fleet, two while rotating | intake env, and each fleet laptop's policy through MDM | **yes**, for a managed fleet |
 | `FORGD_INTAKE_TOKEN_<NAME>` (`intake.clients[].token`) | Adapter 2 intake | you generate it, one per agent or laptop outside a fleet | intake env | **yes**, for each client |
+| `intake.devices[].ca_file`, `hook.device_certificate` | Adapter 2 intake, with device certificates | your MDM's CA issues each laptop a certificate and key; the intake holds only the CA certificate | the CA file on the intake; the certificate and key on each laptop, through MDM | no; an alternative to the fleet token. See [deploy/MDM.md](../deploy/MDM.md#device-certificates-instead-of-the-fleet-token) |
 | `hook.ship_token`, `hook.scan_token` | Adapter 2 on the laptop | one of the intake tokens above | the laptop's `policy.yaml`, written by MDM | only with `ship_endpoint` or `scan_endpoint` |
 | `FORGD_DASHBOARD_FORM_KEY` (`dashboard.admins.form_key`) | dashboard admin forms | you generate it | dashboard env | **yes**, when admin groups are set |
 | `FORGD_OVERRIDES_SIGNING_KEY` (`overrides.signing_key`) | runtime overrides | `forgd-verdict overrides keygen` | dashboard env only | only to sign overrides |

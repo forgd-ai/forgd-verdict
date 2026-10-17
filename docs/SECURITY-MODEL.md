@@ -199,6 +199,7 @@ it runs, and a scan when the network is down.
 | Anthropic | collector | a per-org bearer token, which also decides the org a batch is filed under | submit OTLP logs and traces |
 | a laptop in a managed fleet | intake | the fleet's bearer token, shared by every laptop in it, scoped to `intake`, `scan` or both; the device id in `X-Forgd-Device` is the laptop's claim and is not authenticated | append adapter-2 records, or ask `/scan` for a verdict. Neither route reads findings |
 | an agent you build, or a laptop outside a fleet | intake | a per-client bearer token, scoped the same way | the same |
+| a laptop with a device certificate | intake | each request signed with the device's key, over the route, the time and the body's SHA-256, with a certificate that chains to a CA in `intake.devices[].ca_file` and carries its EKU; the device id is the certificate's | the same |
 | a person | dashboard | the mode in `dashboard.auth`: `oidc_jwt`, `trusted_header` behind a proxy that strips the header, or `none`, which binds only loopback unless `--serve-open` is passed (`FORGD_DASHBOARD_SERVE_OPEN=true` in the image, `dashboard.serveOpen` in the chart) | read findings, and with admins configured, change the runtime overrides |
 | dashboard, connector | store | the reader identity | read findings |
 
@@ -217,6 +218,18 @@ appends adapter-2 records and asks `/scan` for verdicts, and nothing else.
 A token used on a route it is not scoped to gets 403, a denied device 403,
 and an unknown token 401. Without the intake, every laptop that ships
 findings would need write access to the store itself.
+
+**A device certificate names the device, and protects it no better than a
+per-device token.** The intake takes the device id from the certificate,
+so a batch's device is the one the certificate names, not one the sender
+chose. The hook reads the key from a file, and the developer it runs as can
+read that file, so whoever copies it signs as that device until the
+certificate expires or `overrides deny-device` refuses it. A signature
+covers the route and the body and is refused more than `max_skew_s` from
+the intake's clock; a copy replayed inside that window is filed again,
+under the same device, except that one intake replica answers a repeat of
+the same batch from its record of what landed. No CRL or OCSP response is
+fetched.
 
 **A fleet token is shared, so it leaks with any one laptop.** Whoever holds
 it can write records into the fleet's org and cannot read any. Those

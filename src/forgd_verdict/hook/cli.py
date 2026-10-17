@@ -354,13 +354,18 @@ def _remote_verdict(policy: Policy, payload: dict[str, Any],
               "scanning locally", file=sys.stderr)
         return None
     token = destination(policy.hook, "scan_token")
-    if not token:
+    from .devicesign import device_signer
+
+    signer = device_signer(policy.hook)
+    if not token and signer is None:
         print("forgd-verdict: hook.scan_endpoint is set but hook.scan_token resolves to "
               "nothing; the intake refuses an unauthenticated scan", file=sys.stderr)
 
     body = json.dumps(payload).encode("utf-8")
     headers = {"content-type": "application/json", "user-agent": USER_AGENT}
-    if token:
+    if signer is not None:
+        headers["authorization"] = signer(body, "scan")
+    elif token:
         headers["authorization"] = f"Bearer {token}"
     device = hook_device_id(policy)
     if device:

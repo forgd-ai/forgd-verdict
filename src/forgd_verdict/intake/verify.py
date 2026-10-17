@@ -68,8 +68,13 @@ class Caller(NamedTuple):
     """A verified request."""
 
     credential: Credential
-    # From DEVICE_HEADER, or None when absent or not in DEVICE_ID's form.
+    # From DEVICE_HEADER, or None when absent or not in DEVICE_ID's form;
+    # for a device certificate, from the certificate.
     device: str | None
+    # A device-signed request's claims: the SHA-256 its body must have, and
+    # the route it was signed for. None for a bearer token.
+    body_sha256: str | None = None
+    route: str | None = None
 
     @property
     def name(self) -> str:
@@ -223,7 +228,7 @@ class ClientTokens(BearerTokens):
         return cls(out)
 
 
-def verifiers(policy: Policy) -> list[BearerTokens]:
+def verifiers(policy: Policy) -> list[Any]:
     """The fleet and client verifiers for `policy`.
 
     Raises ValueError when a fleet and a client share a name or a token: a
@@ -244,7 +249,16 @@ def verifiers(policy: Policy) -> list[BearerTokens]:
         raise ValueError(
             "an intake.fleet token is also an intake.clients token; each "
             "credential needs its own")
-    return [fleet, clients]
+    from .devicecert import DeviceCertificates
+
+    devices = DeviceCertificates.from_policy(policy)
+    device_names = {c.name for c in devices.credentials()}
+    clash = sorted(device_names & (fleet_names | client_names))
+    if clash:
+        raise ValueError(
+            f"{clash[0]!r} names both an intake.devices entry and another intake "
+            "credential; each credential needs its own name")
+    return [fleet, clients, devices]
 
 
 def verify(verifiers_: Sequence[Verifier], headers: Mapping[str, str]) -> Caller | None:

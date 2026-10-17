@@ -792,6 +792,19 @@ intake:
   #    agent: true
   #    labels: [triage]
   clients: []
+  # `devices` accepts requests a laptop signs with a certificate your MDM's
+  # CA issued it, instead of a fleet token: the certificate must chain to
+  # a CA in `ca_file`, carry `eku` (clientAuth by default) and name one
+  # device id in `device_id_from` (san_uri, san_dns or subject_cn) once
+  # `device_id_prefix` is removed. The device id comes from the
+  # certificate. The hook signs with hook.device_certificate. What it does
+  # and does not protect is in deploy/MDM.md.
+  #
+  #  - name: corp-macs
+  #    ca_file: /etc/forgd/device-ca.pem
+  #    org: $FORGD_ORG_ID_PRIMARY
+  #    device_id_prefix: "urn:forgd:device:"
+  devices: []
 
   # Where it writes. Defaults to server.store, because a deployment with two
   # findings stores is a dashboard that shows half the picture.
