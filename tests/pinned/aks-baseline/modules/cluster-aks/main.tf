@@ -67,7 +67,8 @@ resource "azurerm_kubernetes_cluster" "this" {
   # Manual: the default node pool below and no node auto-provisioning,
   # which is what 4.x clusters ran with. azurerm 5 requires the block.
   node_provisioning_profile {
-    mode = "Manual"
+    mode               = "Manual"
+    default_node_pools = "Auto"
   }
 
   default_node_pool {
