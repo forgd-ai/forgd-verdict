@@ -30,7 +30,8 @@ Durability is the point. Laptops are offline constantly, so a fire-and-forget
 upload loses findings silently; a spool turns shipping into a retryable
 operation and leaves the developer their own audit trail either way.
 
-Holds findings only. Never prompt content.
+Holds findings only. Never prompt content in the clear: a matched value
+appears only sealed, with `privacy.sealing` on.
 """
 
 from __future__ import annotations

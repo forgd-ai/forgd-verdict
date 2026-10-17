@@ -1,9 +1,13 @@
 """Core value types shared by the scan core and every adapter.
 
-Privacy invariant: no field on any type in this module may ever hold matched
-secret or PII text. `Finding.excerpt_hash` is the only channel that carries
-anything derived from a match, and it is a one-way digest. Enforced by
-tests/test_privacy.py.
+Privacy invariant: no field on any type in this module may hold matched
+secret or PII text once `core.scan` has returned. `Finding.excerpt_hash`, a
+one-way digest, and `Finding.sealed`, the value encrypted to a KMS key no
+forgd-verdict service holds (`sealing.py`), are the only channels that carry
+anything derived from a match. `Finding.matched` holds the value in the
+clear between a detector and the end of `core.scan`, which seals it when
+`privacy.sealing` is on and drops it either way. Enforced by
+tests/test_privacy.py and tests/test_sealing.py.
 """
 
 from __future__ import annotations
@@ -253,7 +257,7 @@ class Finding:
     # 5 needs them to replace a matched span without destroying the prose
     # around it, and nothing else reads them.
     #
-    # They are deliberately NOT on FindingRow. `from_finding` copies five
+    # They are deliberately NOT on FindingRow. `from_finding` copies six
     # fields by position, so a span cannot reach the store by accident, and
     # that is the property to preserve: offsets plus the original text are
     # the matched value, and the store is the one place that must never be
@@ -275,6 +279,14 @@ class Finding:
     # like the span: adapter 5 files findings under it, and nothing else
     # reads it. It is sender data, so it is kept out of repr and equality.
     raw_locator: str | None = field(default=None, repr=False, compare=False)
+    # The matched value, set by a built-in detector. IN MEMORY ONLY, and
+    # only inside `core.scan`, which replaces it with `sealed` or drops it
+    # before returning. None for a detector that reports no single value.
+    matched: str | None = field(default=None, repr=False, compare=False)
+    # `matched` sealed by `sealing.Sealer`, when `privacy.sealing` is on.
+    # This one is stored, on FindingRow; nothing in a forgd-verdict
+    # service can open it.
+    sealed: str | None = field(default=None, repr=False, compare=False)
 
     def to_log(self) -> dict[str, Any]:
         return {

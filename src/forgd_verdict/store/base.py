@@ -20,8 +20,10 @@ The cost is that aggregation is a full scan in Python. At small volume
 milliseconds; past that this wants a real analytical store, and the Store
 protocol is where that swap happens.
 
-PRIVACY: this store never holds prompt content. It holds findings --
-detector, locator, and a one-way digest -- exactly as Finding does. In
+PRIVACY: this store never holds prompt content in the clear. It holds
+findings -- detector, locator, a one-way digest and, with `privacy.sealing`
+on, the matched value sealed to a KMS key no forgd-verdict service can
+decrypt with -- exactly as Finding does. In
 verdict and denial rows, organization and person identifiers are hashed on
 the way in, so the store supports "group by user" without naming anyone;
 the intake's rows are the exception, filed under the client's configured
@@ -50,6 +52,7 @@ from ..models import (
     Finding,
     pseudonym,
 )
+from ..sealing import SEALED
 
 SOURCE_INFERENCE_HOOK = "inference_hook"
 # An inference-hook record's `event`: the frame was a tool call frame, or
@@ -168,10 +171,23 @@ class FindingRow:
     locator: str
     excerpt_hash: str
     tool_name: str | None = None
+    # The matched value sealed to a KMS key (`sealing.py`), or None. Left
+    # out of the JSON when None, so a deployment without sealing writes
+    # the rows it always has.
+    sealed: str | None = None
 
     @classmethod
     def from_finding(cls, f: Finding) -> FindingRow:
-        return cls(f.detector, f.severity, f.locator, f.excerpt_hash, f.tool_name)
+        return cls(f.detector, f.severity, f.locator, f.excerpt_hash, f.tool_name, f.sealed)
+
+
+def _row_dict(record: Any) -> dict[str, Any]:
+    """`asdict(record)` without a finding's `sealed` when it is None."""
+    out = asdict(record)
+    for f in out.get("findings") or ():
+        if f.get("sealed") is None:
+            f.pop("sealed", None)
+    return out
 
 
 @dataclass
@@ -341,7 +357,7 @@ class VerdictRecord:
         return self.observed_at[:10]
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), default=str, separators=(",", ":"))
+        return json.dumps(_row_dict(self), default=str, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, line: str | bytes, *, strict: bool = False,
@@ -442,8 +458,11 @@ def _typed(cls, name: str, value, strict: bool):
 def _finding_from_raw(raw, strict: bool) -> FindingRow:
     if not isinstance(raw, dict):
         raise ValueError("a finding is a JSON object")
-    return FindingRow(**{k: _typed(FindingRow, k, v, strict) for k, v in raw.items()
-                         if k in FindingRow.__dataclass_fields__})
+    row = FindingRow(**{k: _typed(FindingRow, k, v, strict) for k, v in raw.items()
+                        if k in FindingRow.__dataclass_fields__})
+    if row.sealed is not None and not SEALED.fullmatch(row.sealed):
+        row.sealed = None
+    return row
 
 
 _ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")

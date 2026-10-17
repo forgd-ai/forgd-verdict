@@ -221,7 +221,7 @@ def evaluate(payload: dict[str, Any], policy: Policy) -> tuple[int, str, SpoolJo
     local, no_t1 = _without_path_gitleaks(_without_project_daemon(policy).for_profile("hook"))
     detectors = local.build_detectors(include_local_only=True, salt=salt, profile="hook")
     no_t1 = no_t1 or _missing_gitleaks(local, detectors)
-    result: ScanResult = scan(units, detectors, Budget(budget_ms))
+    result: ScanResult = scan(units, detectors, Budget(budget_ms), policy.sealer())
     dropped = with_left_out(result.detectors_skipped, ["gitleaks"] if no_t1 else [])
     verdict = decide(result.findings, policy, dropped=dropped)
 

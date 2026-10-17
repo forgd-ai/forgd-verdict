@@ -55,12 +55,12 @@ SHARED = {
 # Every top-level name under the package root must appear here.
 LAYERS = {
     0: ("models", "budget", "normalize", "azure_auth", "applog", "entitlements", "fsmode",
-        "orgregistry", "_hookenv", "safehttp"),
+        "orgregistry", "_hookenv", "safehttp", "sealing"),
     1: ("core", "policy", "extract", "cache", "detectors", "overrides_signing",
         "plugins"),
     2: ("store", "behaviour", "lockout", "lockout_evidence", "overrides", "metadata"),
     3: ("server", "hook", "compliance", "otel", "sink", "managed", "intake"),
-    4: ("dashboard", "connector", "cli", "spotcheck", "testing", "policycheck"),
+    4: ("dashboard", "connector", "cli", "spotcheck", "unseal", "testing", "policycheck"),
 }
 LAYER_OF = {mod: n for n, mods in LAYERS.items() for mod in mods}
 

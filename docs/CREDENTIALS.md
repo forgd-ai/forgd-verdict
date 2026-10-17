@@ -484,7 +484,8 @@ command and the rollout.
 `--sign-in-audience AzureADMyOrg` restricts sign-in to your tenant, so by
 default anyone in the tenant can read the dashboard. Whether that is
 acceptable is the deployer's choice: the store holds findings rather than
-prompt content, which can make tenant-wide read reasonable for an
+prompt content, and with `privacy.sealing` matched values only sealed to a
+key the dashboard cannot decrypt with, which can make tenant-wide read reasonable for an
 evaluation, but a deployment carrying a real organization's traffic should
 narrow it. Two levers, and they answer different questions:
 

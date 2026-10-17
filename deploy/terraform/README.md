@@ -1,6 +1,6 @@
 # Terraform
 
-Twelve modules, composed by one root per deployment.
+Fifteen modules, composed by one root per deployment.
 
 ```
 modules/store-azure/   the findings store and the identities that reach it
@@ -15,6 +15,9 @@ modules/cluster-gke/   the same on Google Cloud: a GKE Autopilot cluster, and th
 modules/monitor-azure/ adapter 5's Azure Monitor destination (optional)
 modules/ci-aws/        the AWS CD role that scripts/deploy_aws.sh runs as
 modules/ci-gcp/        the GCP CD service account that scripts/deploy_gcp.sh runs as
+modules/seal-azure/    the Key Vault key privacy.sealing seals matched values to (optional)
+modules/seal-aws/      the same on AWS: an asymmetric KMS key (optional)
+modules/seal-gcp/      the same on Google Cloud: an asymmetric Cloud KMS key (optional)
 examples/aks/          the AKS root
 ```
 
@@ -887,6 +890,60 @@ and `/healthz` without it:
 
 "Readiness" in [docs/OVERRIDES.md](../../docs/OVERRIDES.md#readiness) has
 the per-platform detail.
+
+## Sealing matched values: `seal-azure`, `seal-aws`, `seal-gcp`
+
+With `privacy.sealing` on, each finding carries its matched value
+encrypted to an RSA key in the cloud's KMS
+([docs/PRIVACY.md § `privacy.sealing`](../../docs/PRIVACY.md#privacysealing)).
+Each `seal-*` module creates that key, grants decryption with it to the
+group you name and makes no other grant, and outputs `sealing_key`, the
+`privacy.sealing.key` block: the KMS, the key by version and its public
+half.
+
+```hcl
+module "seal" {
+  source                = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/seal-azure?ref=vX.Y.Z"
+  resource_group_name   = azurerm_resource_group.this.name
+  location              = azurerm_resource_group.this.location
+  key_vault_name        = "kv-forgd-seal"
+  decrypt_principal_ids = [var.findings_responders_group_id]
+  service_principal_ids = compact([
+    module.store.identity_principal_id,
+    module.store.reader_identity_principal_id,
+    module.store.control_identity_principal_id,
+  ])
+}
+```
+
+Put `module.seal.sealing_key` into the policy as `privacy.sealing.key`;
+`id` and `public_key` are not secrets, so `$VAR` references set from these
+outputs or literal values both work.
+
+**No service gets a grant.** Every forgd-verdict service seals with the
+public key, which is in its policy. Pass every service identity as
+`service_principal_ids`, `service_principal_arns` or `service_members`:
+the plan fails if one is also listed among the decrypters, and on AWS the
+key policy denies the listed roles `kms:Decrypt` outright. The check
+compares the two lists and nothing more. A service identity that is a
+member of the decrypters' group, or on AWS a service role that may assume
+the decrypters' role, can decrypt; keep services out of that group and
+that role's trust policy. A grant the module does not make still counts:
+on Google Cloud a project-level role that can decrypt reaches the key.
+
+**The deployer holds no decryption.** On Azure the vault uses access
+policies, so the identity running Terraform holds create, read and delete
+on the key and not `Decrypt`; every built-in Azure RBAC role that can
+create a key can also decrypt with it. On AWS the account keeps every
+action on the key except `kms:Decrypt` and `kms:CreateGrant`, so an IAM
+policy allowing `kms:Decrypt` on `*` does not reach it. Whoever can change
+the vault's access policies, the key policy (`kms:PutKeyPolicy`) or the
+key's IAM, the deployer usually among them, can grant themselves
+decryption; the KMS's audit log records that change.
+
+**Losing the key loses the values.** Key Vault's purge protection is on,
+the AWS key's deletion waits `deletion_window_in_days`, and the Cloud KMS
+key has `deletion_policy = "PREVENT"` and a 30-day scheduled destruction.
 
 ## Dashboard admins: the control identity
 

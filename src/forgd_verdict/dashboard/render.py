@@ -1345,6 +1345,29 @@ def _finding_pills(findings, limit: int = 8) -> str:
     return "".join(pills)
 
 
+SEALED_SHOWN = 20
+
+
+def _sealed_commands(findings) -> str:
+    """A collapsed list of the `forgd-verdict unseal` command for each
+    distinct sealed value among `findings`, at most SEALED_SHOWN; empty when
+    none is sealed. The values are ciphertext: the dashboard cannot open
+    them, and the command runs under the reader's own cloud login."""
+    seen = list(dict.fromkeys((f.detector, f.sealed) for f in findings
+                              if getattr(f, "sealed", None)))
+    if not seen:
+        return ""
+    lines = "".join(
+        f'<code style="display:block;font-size:10px;word-break:break-all;'
+        f'margin-top:4px">forgd-verdict unseal {escape(d)} {escape(s)}</code>'
+        for d, s in seen[:SEALED_SHOWN])
+    more = (f'<div style="color:var(--text-dim);font-size:10px">'
+            f'+{len(seen) - SEALED_SHOWN} more</div>' if len(seen) > SEALED_SHOWN else "")
+    return (f'<details style="margin-top:4px"><summary style="font-size:10px;'
+            f'color:var(--text-dim);cursor:pointer">{len(seen)} sealed</summary>'
+            f'{lines}{more}</details>')
+
+
 def render_events(records, source: str = "all", action: str = "all",
                  limit: int = 200, store_desc: dict | None = None,
                  client: str = "", device: str = "",
@@ -1365,8 +1388,8 @@ def render_events(records, source: str = "all", action: str = "all",
     allow rows are shown.
 
     The overview answers "how much". This answers "what happened at 20:44".
-    Findings appear as detector and locator only, because the store holds no
-    matched content -- there is none to show even here.
+    Findings appear as detector pills. A matched value appears only sealed,
+    with `privacy.sealing` on, as the `unseal` command that opens it.
 
     Each request or session id is shown through `id_screen`
     (overrides.OrgScreen) when one is given. A row whose id the screen
@@ -1410,7 +1433,7 @@ def render_events(records, source: str = "all", action: str = "all",
             # A tally row: clean allows counted since the intake's last flush.
             shadow += (f' <span style="color:var(--text-dim);font-size:10px">'
                        f'{n:,} allow{"" if n == 1 else "s"}</span>')
-        dets = _finding_pills(r.findings)
+        dets = _finding_pills(r.findings) + _sealed_commands(r.findings)
         ts = escape((r.observed_at or "").replace("T", " ").rstrip("Z"))
         # For a post-hoc scan, when the session actually happened is the more
         # useful fact; observed_at is just when the job last ran.

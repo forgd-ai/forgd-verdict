@@ -29,7 +29,7 @@ import logging
 import re
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -781,12 +781,23 @@ class PluginDetector:
             except Exception:  # noqa: BLE001 - a malformed finding is refused, never raised
                 check = "type"
             if check is None:
-                out.append(f)
+                # The value is the span the hash was checked against, never
+                # one the plugin supplied, and only the core seals.
+                out.append(replace(f, matched=self._span_value(f, texts), sealed=None))
                 continue
             where = FOREIGN_LOCATOR if check in ("type", "locator") else self.scrub(f.locator)
             log.error("plugin finding refused", extra={"fields": {
                 "detector": self.name, "check": check, "locator": where}})
         return out
+
+    def _span_value(self, f: Finding, texts: dict[tuple[str, str | None], list[str]]
+                    ) -> str | None:
+        """The text at `f`'s span whose digest is `f.excerpt_hash`."""
+        for t in texts[(f.locator, f.tool_name)]:
+            s = t[f.start:f.end]
+            if self._hasher(s) == f.excerpt_hash:
+                return s
+        return None
 
     def _refusal(self, f: Any, texts: dict[tuple[str, str | None], list[str]]) -> str | None:
         """The first check `f` fails, or None.

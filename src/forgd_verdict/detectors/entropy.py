@@ -159,6 +159,7 @@ class EntropyDetector:
                         severity=self.severity,
                         locator=unit.locator,
                         excerpt_hash=digest(value, self._salt),
+                        matched=value,
                         tool_name=unit.tool_name,
                     )
                 )

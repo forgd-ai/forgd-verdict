@@ -44,6 +44,7 @@ from .models import (
     SEVERITIES,
     env_or_literal,
     hasher_for,
+    pseudonym,
     require_strong_token,
     shown_text,
     shown_url,
@@ -60,6 +61,8 @@ from .plugins import (
     parse_allow,
     store_scheme,
 )
+from .sealing import Sealer, Sealing
+from .sealing import parse as parse_sealing
 
 log = logging.getLogger("forgd_verdict.policy")
 
@@ -210,7 +213,8 @@ DEFAULT_POLICY: dict[str, Any] = {
         # filler and the tier that would have denied never runs.
         "on_tier_dropped": "allow",
         # Durable findings sink. Empty disables it. A local path or a
-        # blob URL; see store.open_store. Findings only, never content.
+        # blob URL; see store.open_store. Findings only, never content in
+        # the clear.
         "store": "",
         # Batching for the findings sink. Larger batches mean fewer
         # objects, and the dashboard reads one object per HTTP request.
@@ -298,6 +302,7 @@ class Policy:
                                      repr=False, compare=False)
     # Unknown, disabled detector names already warned about for this load.
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    _sealing: Any = field(default=None, init=False, repr=False, compare=False)
 
     # --- shared ---------------------------------------------------------
     @property
@@ -322,6 +327,32 @@ class Policy:
             "sha256 of a low-entropy value can be reversed. Set privacy.hash_salt "
             "(FORGD_HASH_SALT in the shipped policy) to a deployment secret, or set "
             "privacy.allow_unsalted: true in the policy file to accept that.")
+
+    @property
+    def sealing(self) -> Sealing | None:
+        """`privacy.sealing`, parsed, or None when it is off. Read from the
+        policy file only: no `ENV_OVERRIDES` entry or runtime override
+        reaches `privacy`. SealingInvalid on a shape that cannot seal."""
+        if self._sealing is None:
+            parsed = parse_sealing((self.raw.get("privacy") or {}).get("sealing"))
+            self._sealing = parsed if parsed is not None else False
+        return self._sealing or None
+
+    def sealer(self, org_id: str | None = None) -> Sealer | None:
+        """The sealer for `org_id`'s findings, or None when sealing is off."""
+        sealing = self.sealing
+        return sealing.for_org(org_id) if sealing is not None else None
+
+    def sealer_for_pseudonym(self, org: str | None) -> Sealer | None:
+        """`sealer` for the org whose pseudonym is `org`, as an intake
+        credential records it."""
+        sealing = self.sealing
+        if sealing is None:
+            return None
+        for org_id in sealing.orgs:
+            if org and pseudonym(org_id, self.hash_salt, "org") == org:
+                return sealing.orgs[org_id]
+        return sealing.default
 
     @property
     def budget_ms(self) -> int:
@@ -780,7 +811,6 @@ class Policy:
         and an id that resolves to nothing, which would take the single-org
         cursor file.
         """
-        from .models import env_or_literal, pseudonym, usable_secret
 
         cfg = self.compliance
         salt = self.hash_salt
@@ -1945,6 +1975,7 @@ def load_policy(path: str | os.PathLike[str] | None = None, *,
         p.absolute().parent, refuse=written_from_env(p))
     parse_allow(policy.raw.get("plugins"))
     refuse_unknown_compliance_keys(policy.raw.get("compliance"))
+    policy.sealing  # noqa: B018 -- refuses a privacy.sealing that cannot seal
     hook = policy.raw.get("hook") or {}
     parse_expansions(hook.get("expansions"))
     parse_watchdog_ms(hook.get("watchdog_ms"))

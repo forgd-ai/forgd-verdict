@@ -36,6 +36,11 @@ azure = ["azure-storage-blob>=12.19", "azure-identity>=1.16"]
 # Amazon S3 findings store. PutObject's IfNoneMatch, which keeps a record
 # immutable, is not in botocore 1.35.0's model; 1.36 has it.
 aws = ["boto3>=1.36"]
+# `forgd-verdict unseal` with a key in Azure Key Vault. AWS KMS uses boto3,
+# in `aws`.
+kms-azure = ["azure-keyvault-keys>=4.9", "azure-identity>=1.16"]
+# `forgd-verdict unseal` with a key in Cloud KMS.
+kms-gcp = ["google-cloud-kms>=3.0"]
 # Google Cloud Storage findings store. download_as_bytes and the per-call
 # retry argument are not in google-cloud-storage 1.28; Retry.with_timeout
 # needs google-api-core 2.11.

@@ -225,7 +225,8 @@ class ManagedScanner:
             log_as=self.meta.one(session["id"], where="managed:log"), status=status))
         start = time.perf_counter()
         messages = events_to_messages(events)
-        result = scan(frame_units(messages), self.detectors, Budget(self.policy.budget_ms))
+        result = scan(frame_units(messages), self.detectors, Budget(self.policy.budget_ms),
+                      self.policy.sealer())
         result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
         if not status["complete"]:
             result.detectors_skipped = [*result.detectors_skipped, UNSCANNED_PARTIAL]

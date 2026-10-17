@@ -478,7 +478,11 @@ a worse values file with a Go controller attached to maintain.
 * **Never emit `permissionDecision: "allow"`.** On `PreToolUse` that
   auto-approves the call and bypasses the normal permission flow, turning a
   DLP scanner into a permission bypass. Silence means "no decision".
-* **The store holds findings, never content.** Organization and person
-  identifiers are hashed on the way in. `session_id` stays in the clear:
+* **The store holds findings, never content in the clear.** With
+  `privacy.sealing` on, a finding also carries its matched value encrypted
+  to a KMS key that the store, the dashboard and every other service
+  cannot decrypt with, so an export is as safe as that key's access policy
+  ([PRIVACY.md § `privacy.sealing`](PRIVACY.md#privacysealing)).
+  Organization and person identifiers are hashed on the way in. `session_id` stays in the clear:
   it is the handle needed to fetch a transcript back through
   the Compliance API during review.

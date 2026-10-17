@@ -203,6 +203,7 @@ class GitleaksDetector:
                     severity=self.severity,
                     locator=unit.locator,
                     excerpt_hash=digest(secret, self._salt),
+                    matched=secret or None,
                     tool_name=unit.tool_name,
                     start=span_start,
                     end=span_end,

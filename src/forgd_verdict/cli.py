@@ -144,6 +144,43 @@ def _cmd_gitleaks_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_unseal(args: argparse.Namespace) -> int:
+    """Open a finding's sealed value with the KMS, under the caller's own
+    cloud login, and print it to the terminal and nowhere else."""
+    from .sealing import SealingInvalid, open_sealed
+    from .spotcheck import mask
+    from .unseal import UNWRAPPERS, UnsealError, resolve
+
+    sealing = None
+    if not (args.kms and args.key_id):
+        from .policy import load_policy
+
+        try:
+            sealing = load_policy(args.policy).sealing
+        except SealingInvalid as exc:
+            print(f"{exc}. Pass --kms and --key-id to name the key directly.",
+                  file=sys.stderr)
+            return 2
+    try:
+        kms, key_id = resolve(args.sealed, sealing, args.kms, args.key_id)
+        value, truncated = open_sealed(args.sealed, args.detector, UNWRAPPERS[kms](key_id))
+    except UnsealError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"{exc}. Check the detector is the finding's own.", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 -- a KMS refusal is the operator's to read
+        print(f"the KMS refused to decrypt: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(value if args.reveal else mask(value))
+    if not args.reveal:
+        print("[masked; --reveal for full]", file=sys.stderr)
+    if truncated:
+        print("[cut short when sealed: privacy.sealing.max_chars]", file=sys.stderr)
+    return 0
+
+
 def _cmd_spotcheck(args: argparse.Namespace) -> int:
     """Judge a detector's precision against the content that produced it.
 
@@ -1029,6 +1066,22 @@ def main(argv: list[str] | None = None) -> int:
         help="print values in full instead of masked (they are PII; do not paste)",
     )
     p_spot.set_defaults(func=_cmd_spotcheck)
+
+    p_unseal = sub.add_parser(
+        "unseal",
+        help="open a finding's sealed value with the KMS, under your own cloud login",
+    )
+    p_unseal.add_argument("detector", help="the finding's detector, e.g. regex:aws-access-key")
+    p_unseal.add_argument("sealed", help="the finding's sealed value (fvs1....)")
+    p_unseal.add_argument("--kms", choices=["azure", "aws", "gcp"], default=None,
+                          help="with --key-id, the key to use instead of the policy's")
+    p_unseal.add_argument("--key-id", default=None,
+                          help="the KMS key by version: a Key Vault key URL, a KMS key "
+                               "ARN or a Cloud KMS cryptoKeyVersion name")
+    p_unseal.add_argument(
+        "--reveal", action="store_true",
+        help="print the value in full instead of masked (it is a secret; do not paste)")
+    p_unseal.set_defaults(func=_cmd_unseal)
 
     p_exc = sub.add_parser(
         "exclude",

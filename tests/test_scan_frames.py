@@ -215,9 +215,9 @@ async def test_sessions_are_keyed_by_client(tmp_path, monkeypatch):
     keys = []
     real = scan_frame
 
-    def spy(messages, units, dets, budget, cache, key):
+    def spy(messages, units, dets, budget, cache, key, **kw):
         keys.append(key)
-        return real(messages, units, dets, budget, cache, key)
+        return real(messages, units, dets, budget, cache, key, **kw)
 
     monkeypatch.setattr("forgd_verdict.intake.app.scan_frame", spy)
     c = ASGIClient(app)

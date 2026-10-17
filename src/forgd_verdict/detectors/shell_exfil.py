@@ -190,6 +190,7 @@ class ShellExfilDetector:
                             severity=self.severity,
                             locator=unit.locator,
                             excerpt_hash=digest(unit.text[start:end], self._salt),
+                            matched=unit.text[start:end],
                             tool_name=unit.tool_name,
                         )
                     )
