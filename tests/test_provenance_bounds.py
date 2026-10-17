@@ -551,6 +551,7 @@ def test_a_lone_surrogate_in_any_string_or_key_of_a_session_raises_nothing():
         assert out.error is None and out.dropped == [], path
 
 
+@pytest.mark.usefixtures("unhurried_behaviour")
 async def test_a_lone_surrogate_in_the_frame_keeps_the_server_finding(tmp_path):
     from conftest import ASGIClient, sign
 

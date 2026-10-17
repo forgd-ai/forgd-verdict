@@ -103,6 +103,7 @@ async def test_a_secret_in_a_tool_result_is_found(intake):
     assert body["shadow_action"] == "deny" and "regex:ssn" in body["detectors"]
 
 
+@pytest.mark.usefixtures("unhurried_behaviour")
 async def test_the_behavioural_checks_run_on_frames(tmp_path):
     app = Intake(_policy(detectors={"provenance": {"enabled": True, "severity": "warn"}}),
                  store=LocalFileStore(tmp_path, instance="t"))
