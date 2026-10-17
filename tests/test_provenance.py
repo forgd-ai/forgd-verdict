@@ -182,6 +182,7 @@ def _injected_frame():
     ])
 
 
+@pytest.mark.usefixtures("unhurried_behaviour")
 async def test_the_server_records_it_and_allows_even_in_enforce(policy):
     """`warn`: recorded, never a deny. The policy fixture is enforce mode, so
     this also shows the finding cannot deny by accident."""
@@ -198,6 +199,7 @@ async def test_the_server_records_it_and_allows_even_in_enforce(policy):
     assert verdict["findings_count"] == 1
 
 
+@pytest.mark.usefixtures("unhurried_behaviour")
 async def test_at_block_severity_it_denies_with_its_own_reason(policy):
     """Not the shipped setting, but the lever exists and says why."""
     from conftest import ASGIClient, sign

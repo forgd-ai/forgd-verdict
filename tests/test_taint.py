@@ -152,6 +152,7 @@ def test_taint_resumes_across_frames():
 
 # -- through the verdict server ---------------------------------------------
 
+@pytest.mark.usefixtures("unhurried_behaviour")
 async def test_the_server_reports_taint_at_warn_and_allows(policy):
     from conftest import ASGIClient, frame, make_policy, sign
 

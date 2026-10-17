@@ -83,6 +83,16 @@ def pytest_sessionfinish(session):
             encoding="utf-8")
 
 
+@pytest.fixture
+def unhurried_behaviour(monkeypatch):
+    """A behavioural pass inside a request gets 60 s rather than
+    TIME_BUDGET_S. On a loaded CI runner the 0.25 s pass was cut short
+    before it reached the sending call, and the test saw no finding."""
+    from forgd_verdict.behaviour import provenance
+
+    monkeypatch.setattr(provenance, "request_time_budget", lambda _budget: 60.0)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_dashboard_policy_cache():
     """Tests patch `load_policy` or rewrite the policy between requests; a
