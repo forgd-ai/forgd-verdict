@@ -221,7 +221,7 @@ def _azure(block: str, kind: str, name: str) -> dict:
                 "resource_manager_id": f"{RG}/providers/Microsoft.Storage/storageAccounts/forgdfindings"
                                        "/blobServices/default/containers/findings"}
     if kind == "azurerm_user_assigned_identity":
-        digit = {"app": "1", "reader": "2", "control": "3"}[name]
+        digit = {"app": "1", "reader": "2", "control": "3", "control_plane": "5"}[name]
         return {"id": f"{RG}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{name}",
                 "principal_id": f"{digit * 8}-0000-0000-0000-000000000000",
                 "client_id": f"{digit * 8}-1111-1111-1111-111111111111",

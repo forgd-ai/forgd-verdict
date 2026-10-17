@@ -184,3 +184,41 @@ variable "entra_admin_group_object_ids" {
   default     = []
   description = "Entra groups given cluster-admin when local_account_disabled is true. Ignored otherwise."
 }
+
+# --- network -------------------------------------------------------------
+
+variable "vnet_subnet_id" {
+  type        = string
+  default     = null
+  description = "A subnet of your own VNet for the nodes and the private API server's endpoint. Null lets AKS create a VNet in the node resource group. Set, the control plane runs as a user-assigned identity given Network Contributor on the subnet. Setting or clearing it on an existing cluster replaces the cluster."
+  validation {
+    condition     = var.vnet_subnet_id == null || can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/virtualNetworks/[^/]+/subnets/[^/]+$", var.vnet_subnet_id))
+    error_message = "vnet_subnet_id must be a subnet's resource id: /subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>."
+  }
+}
+
+variable "pod_cidr" {
+  type        = string
+  default     = null
+  description = "The overlay range pods get addresses from. Null is AKS's 10.244.0.0/16. It must not overlap the cluster's VNet or anything that VNet routes to. Changing it replaces the cluster."
+  validation {
+    condition     = var.pod_cidr == null || can(cidrhost(var.pod_cidr, 0))
+    error_message = "pod_cidr must be a CIDR block."
+  }
+}
+
+variable "service_cidr" {
+  type        = string
+  default     = null
+  description = "The range Kubernetes services get addresses from. Null is AKS's 10.0.0.0/16, which overlaps many VNets. It must not overlap the cluster's VNet or anything that VNet routes to. Set with dns_service_ip. Changing it replaces the cluster."
+  validation {
+    condition     = var.service_cidr == null || can(cidrhost(var.service_cidr, 0))
+    error_message = "service_cidr must be a CIDR block."
+  }
+}
+
+variable "dns_service_ip" {
+  type        = string
+  default     = null
+  description = "The cluster DNS service's address, inside service_cidr. Null is AKS's 10.0.0.10. Set with service_cidr."
+}
