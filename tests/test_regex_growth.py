@@ -24,7 +24,7 @@ import pytest
 
 from forgd_verdict import core, extract
 from forgd_verdict.behaviour import provenance
-from forgd_verdict.detectors import checksums, entropy, mlpii, shell_exfil, t0_regex
+from forgd_verdict.detectors import checksums, entropy, injection, mlpii, shell_exfil, t0_regex
 from forgd_verdict.intake import app as intake_app
 from forgd_verdict.intake import verify as intake_verify
 from forgd_verdict.otel import extract as otel_extract
@@ -98,6 +98,12 @@ RULE_PREFIXES: dict[str, tuple[str, ...]] = {
     "checksum:imei": ("imei ", "imei 1"),
     "shell:pipe-to-net": ("cat ~/.ssh/id_rsa ", ".env | ", "id_rsa |"),
     "shell:net-upload-sensitive": ("curl -d ", "curl -F ", "wget --data "),
+    "injection:ignore-instructions": ("ignore ", "ignore all ", "ignore all previous ", " \n"),
+    "injection:role-override": ("you are now", "from now on, you ", "enter dan ", " \n"),
+    "injection:template-marker": (" \n", "\n", " ", "##", " ## ", "<|", "[inst"),
+    "injection:hidden-instruction": ("<!--", "<!-- claude ", "<!-- ai", " \n"),
+    "injection:conceal-from-user": ("do not tell ", "never ", "without telling the ", " \n"),
+    "injection:send-secrets": ("send ", "send credentials ", "send the api key ", " \n"),
     "shell:env-to-net": ("env ", "env |", "printenv | "),
     "shell:remote-exec": ("curl ", "curl | ", "wget | sudo "),
 }
@@ -131,11 +137,12 @@ ALL_RULES: tuple[tuple[str, Callable[[str], object]], ...] = tuple(
     [(f"regex:{r.id}", _t0_scan(r)) for r in t0_regex.RULES]
     + [(f"checksum:{c.id}", _finditer(c.pattern)) for c in checksums.CHECKS]
     + [(f"shell:{r.id}", _spans_scan(r.find)) for r in shell_exfil.RULES]
+    + [(f"injection:{r.id}", _finditer(r.pattern)) for r in injection.RULES]
 )
 
 # Modules whose module-level patterns run on request or scanned content.
 CONTENT_MODULES = (
-    core, extract, t0_regex, checksums, entropy, mlpii, shell_exfil, provenance,
+    core, extract, t0_regex, checksums, entropy, mlpii, shell_exfil, provenance, injection,
     otel_extract, intake_app, intake_verify,
 )
 
@@ -277,6 +284,8 @@ PATTERN_SHAPES: dict[str, tuple[Shape, ...]] = {
                                                  Shape("0", head="d", tail="!")),
     "forgd_verdict.intake.app._NAME": (Shape("a"), Shape("a:", tail="!")),
     "forgd_verdict.intake.app._DIGITS": (Shape("0"), Shape("0", tail="x")),
+    "forgd_verdict.behaviour.provenance._SETS_HOME": (
+        Shape("HOME"), Shape("$HOME"), Shape("HOMEx"), Shape("a", tail="HOME")),
     "forgd_verdict.intake.verify.INTAKE_CLIENT_NAME": (Shape("a"), Shape("a-", tail="!")),
     "forgd_verdict.intake.verify.DEVICE_ID": (Shape("a"), Shape("a-", tail="!"),
                                               Shape("a.", tail=" ")),
@@ -294,6 +303,12 @@ SHELL_SHAPES = (
     Shape("U=https://a.example; "), Shape("$U "), Shape("-sSLd"), Shape("a.", "curl -d @f "),
     Shape("@"), Shape("a@"), Shape("a.b "), Shape("::"), Shape("0."), Shape("x=@"),
     Shape("$(cat ~/.aws/credentials) "),
+)
+# What `_programs` follows into another command: substitutions, `eval`,
+# `xargs`, `find -exec` and nested `sh -c`.
+NESTED_SHAPES = (
+    Shape("$("), Shape("`"), Shape("$(", tail=")"), Shape("eval "), Shape("xargs "),
+    Shape("find -exec "), Shape("bash -c 'sh -c \"eval "),
 )
 
 # Patterns whose own finditer never runs on content: `_JWT` runs only through
@@ -336,6 +351,7 @@ FUNCTION_SHAPES: dict[str, tuple[Callable[[str], object], tuple[Shape, ...]]] = 
          Shape(".env ", "curl -T "), Shape("Content-Type ", "curl ", ".env"),
          Shape("curl -d\n"), Shape(" -d .env", "curl")),
     ),
+    "provenance._programs": (provenance._programs, SHELL_SHAPES + NESTED_SHAPES),
     **{
         f"provenance.{name}": (fn, SHELL_SHAPES)
         for name, fn in (
@@ -350,6 +366,7 @@ FUNCTION_SHAPES: dict[str, tuple[Callable[[str], object], tuple[Shape, ...]]] = 
                 {"role": "user", "content": [{"type": "text", "text": text}]})),
             ("_bare_destination", provenance._bare_destination),
             ("_host", provenance._host),
+            ("_bare_host", provenance._bare_host),
             ("_url_host", lambda text: provenance._url_host("http://" + text)),
         )
     },

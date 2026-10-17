@@ -131,12 +131,14 @@ class _Collector:
     marks the result capped, so a cap reached with nothing left but empty
     containers is not reported as one."""
 
-    __slots__ = ("_rev", "_limit", "_structural")
+    __slots__ = ("_rev", "_limit", "_structural", "tool_content")
 
     def __init__(self) -> None:
         self._rev: list[ScanUnit] = []
         self._limit = MAX_SCAN_UNITS
         self._structural: set[str] = set()
+        # Set while a tool_result's content or an attachment's text is added.
+        self.tool_content = False
 
     def full(self) -> bool:
         """Whether a unit past the cap has been added."""
@@ -153,7 +155,8 @@ class _Collector:
             self._structural.add(text)
         head, tail, gap = head_and_tail(text, MAX_UNIT_BYTES, TAIL_UNIT_BYTES)
         unit = ScanUnit(locator=locator, tool_name=tool_name, text=head,
-                        truncated=gap > 0, structural=structural)
+                        truncated=gap > 0, structural=structural,
+                        tool_content=self.tool_content)
         if tail:
             self._rev.append(tail_unit(unit, tail))
             if self.full():
@@ -278,11 +281,15 @@ def _frame(out: _Collector, messages: list[Any], offset: int) -> None:
             elif btype == "tool_result":
                 # `content` is the tool's output as text, parts newline-joined.
                 _rest(out, block, base, tool_name, {"content"})
+                out.tool_content = True
                 _walk(out, block.get("content"), f"{base}.content", tool_name)
+                out.tool_content = False
             elif btype == "attachment":
                 _rest(out, block, base, tool_name, {"text", "file_name"})
                 out.add(f"{base}.file_name", tool_name, block.get("file_name"))
+                out.tool_content = True
                 out.add(f"{base}.text", tool_name, block.get("text"))
+                out.tool_content = False
             else:
                 # Unrecognized block type: accepted, and its string fields
                 # scanned like any other block's.
@@ -492,7 +499,9 @@ def compliance_units(messages: list[Any]) -> Units:
                     _walk(out, raw, f"{base}.input", tool_name)
             elif btype == "tool_result":
                 _rest(out, block, base, tool_name, {"content"})
+                out.tool_content = True
                 _walk(out, block.get("content"), f"{base}.content", tool_name)
+                out.tool_content = False
             else:
                 _walk(out, block, base, tool_name, skip=_SKIP_KEYS)
     return out.units()

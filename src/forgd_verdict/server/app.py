@@ -552,7 +552,11 @@ class VerdictServer:
             # and the stored row records them.
             from ..behaviour.provenance import request_time_budget, run
 
+            actor = frame.get("actor") if isinstance(frame.get("actor"), dict) else {}
+            actors = [v for v in (actor.get("id"), actor.get("email_address"))
+                      if isinstance(v, str) and v]
             outcome = run(self.provenance, messages, session=key, findings=result.findings,
+                          context=(_source_application(frame), actors),
                           time_budget_s=request_time_budget(budget))
             if outcome.error is not None:
                 self.metrics.bump("provenance_error")

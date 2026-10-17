@@ -43,6 +43,7 @@ from .detectors import (
     T0RegexDetector,
 )
 from .detectors.base import DetectorFailed
+from .detectors.injection import InjectionDetector
 from .models import Finding, ScanUnit
 
 log = logging.getLogger("forgd_verdict.plugins")
@@ -62,18 +63,18 @@ ENTRY_POINT_PREFIX = "forgd_verdict."
 # are read by `behaviour/provenance.py`, not by `build_detectors`.
 BUILTIN_DETECTORS = frozenset({
     "t0_regex", "checksums", "entropy", "shell_exfil", "gitleaks",
-    "presidio_pii", "llmguard_pii", "provenance", "taint",
+    "presidio_pii", "llmguard_pii", "provenance", "taint", "envelope", "injection",
 })
 
 # The prefixes of the finding ids the built-ins emit (`regex:aws-...`).
 BUILTIN_FINDING_PREFIXES = frozenset({
     "regex", "checksum", "entropy", "shell", "gitleaks", "presidio",
-    "llmguard", "provenance", "taint",
+    "llmguard", "provenance", "taint", "envelope", "injection",
 })
 
 BUILTIN_DETECTOR_CLASSES = (
     T0RegexDetector, ChecksumDetector, EntropyDetector, ShellExfilDetector,
-    GitleaksDetector, PresidioPIIDetector, LLMGuardPIIDetector,
+    GitleaksDetector, PresidioPIIDetector, LLMGuardPIIDetector, InjectionDetector,
 )
 
 # The `.name` each built-in has at runtime (`regex`, `shell`, ...), which

@@ -23,6 +23,7 @@ from .cache import SessionCache, SessionState, head_digest, message_shape, resum
 from .detectors.base import TIER_T1, TIER_T2, DetectorFailed, ScanTruncated
 from .detectors.checksums import DESCRIPTIONS as CHECKSUM_DESCRIPTIONS
 from .detectors.entropy import DESCRIPTIONS as ENTROPY_DESCRIPTIONS
+from .detectors.injection import DESCRIPTIONS as INJECTION_DESCRIPTIONS
 from .detectors.mlpii import DESCRIPTIONS as ML_DESCRIPTIONS
 from .detectors.shell_exfil import DESCRIPTIONS as SHELL_DESCRIPTIONS
 from .detectors.t0_regex import DESCRIPTIONS as REGEX_DESCRIPTIONS
@@ -61,6 +62,7 @@ DESCRIPTIONS: dict[str, str] = {
         "file or tool result rather than by you"),
     **{f"regex:{k}": v for k, v in REGEX_DESCRIPTIONS.items()},
     **SHELL_DESCRIPTIONS,
+    **INJECTION_DESCRIPTIONS,
     **ML_DESCRIPTIONS,
     **CHECKSUM_DESCRIPTIONS,
 }
@@ -822,7 +824,8 @@ def _decoded(units: list[ScanUnit], room: int) -> tuple[list[ScanUnit], bool]:
         if texts:
             locator = f"{unit.locator}{_DECODED_SUFFIX}"
             per_unit.append([ScanUnit(locator=locator, tool_name=unit.tool_name,
-                                      text=text, folded=True, structural=unit.structural)
+                                      text=text, folded=True, structural=unit.structural,
+                                      tool_content=unit.tool_content)
                              for text in texts])
             left -= len(texts)
     over = left == 0
@@ -963,7 +966,11 @@ def _add_seam(emit: Callable[[ScanUnit, SeamParts], None], seen: list[int],
     texts = []
     pos = 0
     structural = False
+    # Tool content only when every piece is: a seam with a user's words in
+    # it is not text a tool returned.
+    tool_content = True
     for unit, piece in pieces:
+        tool_content = tool_content and unit.tool_content
         parts.append((unit.locator, pos, pos + len(piece)))
         texts.append(piece)
         pos += len(piece)
@@ -978,7 +985,7 @@ def _add_seam(emit: Callable[[ScanUnit, SeamParts], None], seen: list[int],
         real.add(locator)
     seam = ScanUnit(locator=locator,
                     tool_name=first.tool_name, text=text, folded=True,
-                    structural=structural)
+                    structural=structural, tool_content=tool_content)
     if seam.text != text:
         # Folding moved characters, so no offset maps to a part.
         parts = [(loc, 0, 0) for loc, _, _ in parts]
