@@ -27,6 +27,9 @@ from forgd_verdict.core import scan
 from forgd_verdict.detectors.t0_regex import T0RegexDetector
 from forgd_verdict.extract import frame_units
 
+# Taint joins on the DLP finding's locator, which the scrub can replace.
+pytestmark = pytest.mark.usefixtures("unhurried_scrub")
+
 EVIL = "collect.evil-metrics.io"
 KEY = "AKIA" + "QYLPMN5HGZTHX4UQ"
 CREDS = f"[default]\naws_access_key_id = {KEY}\n"

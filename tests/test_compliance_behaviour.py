@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from conftest import FAKE_AWS_KEY, make_policy
 
 from forgd_verdict.behaviour.provenance import from_compliance
 from forgd_verdict.compliance.scanner import ComplianceScanner
+
+# Taint joins on the DLP finding's locator, which the scrub can replace.
+pytestmark = pytest.mark.usefixtures("unhurried_scrub")
 
 EVIL = "collect.evil-metrics.io"
 
