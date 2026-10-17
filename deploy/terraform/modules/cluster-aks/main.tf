@@ -20,6 +20,38 @@ terraform {
   }
 }
 
+locals {
+  # cidrhost masks the address it is given to the prefix, so the two agree
+  # exactly when dns_service_ip is inside service_cidr.
+  dns_in_service_cidr = try(
+    cidrhost("${var.dns_service_ip}/${split("/", var.service_cidr)[1]}", 0) == cidrhost(var.service_cidr, 0)
+    && var.dns_service_ip != cidrhost(var.service_cidr, 0),
+    false,
+  )
+}
+
+# With vnet_subnet_id, the control plane runs as this identity, which needs
+# Network Contributor on the subnet to join the nodes and the API server's
+# private endpoint to it. AKS checks the permission when it creates the
+# cluster, so the assignment comes first. A system-assigned identity cannot
+# be granted anything before the cluster exists.
+resource "azurerm_user_assigned_identity" "control_plane" {
+  count               = var.vnet_subnet_id == null ? 0 : 1
+  name                = "${var.cluster_name}-control-plane"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  tags                = var.tags
+}
+
+resource "azurerm_role_assignment" "control_plane_subnet" {
+  count                = var.vnet_subnet_id == null ? 0 : 1
+  scope                = var.vnet_subnet_id
+  role_definition_name = "Network Contributor"
+  principal_id         = azurerm_user_assigned_identity.control_plane[0].principal_id
+  # The identity is new, so the assignment can race the directory's view of it.
+  skip_service_principal_aad_check = true
+}
+
 resource "azurerm_kubernetes_cluster" "this" {
   name                = var.cluster_name
   resource_group_name = var.resource_group_name
@@ -38,6 +70,8 @@ resource "azurerm_kubernetes_cluster" "this" {
   # rather than as an authentication error.
   oidc_issuer_enabled       = true
   workload_identity_enabled = true
+
+  depends_on = [azurerm_role_assignment.control_plane_subnet]
 
   private_cluster_enabled = var.private_cluster_enabled
   local_account_disabled  = var.local_account_disabled
@@ -59,9 +93,11 @@ resource "azurerm_kubernetes_cluster" "this" {
   }
 
   # The control plane's own identity. Separate from the kubelet's, and
-  # separate again from the two the workloads federate to.
+  # separate again from the two the workloads federate to. Changing its type
+  # replaces the cluster.
   identity {
-    type = "SystemAssigned"
+    type         = var.vnet_subnet_id == null ? "SystemAssigned" : "UserAssigned"
+    identity_ids = var.vnet_subnet_id == null ? null : [azurerm_user_assigned_identity.control_plane[0].id]
   }
 
   default_node_pool {
@@ -87,6 +123,7 @@ resource "azurerm_kubernetes_cluster" "this" {
     # node_vm_size for how that error reads. Check `az vm list-usage`
     # before changing either number.
     node_count           = var.node_count
+    vnet_subnet_id       = var.vnet_subnet_id
     auto_scaling_enabled = false
     os_disk_size_gb      = 64
     upgrade_settings {
@@ -104,6 +141,12 @@ resource "azurerm_kubernetes_cluster" "this" {
     network_plugin_mode = "overlay"
     network_data_plane  = "cilium"
     load_balancer_sku   = "standard"
+    # Null leaves AKS's defaults: pods 10.244.0.0/16, services 10.0.0.0/16.
+    # Neither may overlap the VNet vnet_subnet_id is in, or anything it
+    # routes to.
+    pod_cidr       = var.pod_cidr
+    service_cidr   = var.service_cidr
+    dns_service_ip = var.dns_service_ip
   }
 
   # The managed nginx add-on, rather than an ingress-nginx Helm release
@@ -132,6 +175,14 @@ resource "azurerm_kubernetes_cluster" "this" {
     precondition {
       condition     = var.private_cluster_enabled || length(var.api_server_authorized_ip_ranges) > 0 || var.allow_unrestricted_public_api_server
       error_message = "The API server is public and api_server_authorized_ip_ranges is empty, so it admits every address. Set private_cluster_enabled, list the ranges that need the API, or set allow_unrestricted_public_api_server to accept that."
+    }
+    precondition {
+      condition     = (var.service_cidr == null) == (var.dns_service_ip == null)
+      error_message = "service_cidr and dns_service_ip are set together: dns_service_ip is an address inside service_cidr."
+    }
+    precondition {
+      condition     = var.service_cidr == null || var.dns_service_ip == null || local.dns_in_service_cidr
+      error_message = "dns_service_ip must be an address inside service_cidr other than its first."
     }
     precondition {
       condition     = !var.private_cluster_enabled || length(var.api_server_authorized_ip_ranges) == 0

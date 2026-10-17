@@ -128,4 +128,9 @@ module "cluster" {
   allow_unrestricted_public_api_server = var.allow_unrestricted_public_api_server
   local_account_disabled               = var.local_account_disabled
   entra_admin_group_object_ids         = var.entra_admin_group_object_ids
+
+  vnet_subnet_id = var.vnet_subnet_id
+  pod_cidr       = var.pod_cidr
+  service_cidr   = var.service_cidr
+  dns_service_ip = var.dns_service_ip
 }

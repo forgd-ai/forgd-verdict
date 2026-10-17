@@ -158,8 +158,113 @@ def _reaching_the_aks_api() -> str:
     return text.split("\n### Reaching the AKS API\n", 1)[1].split("\n## ", 1)[0]
 
 
-def test_the_module_takes_no_subnet():
-    assert "vnet_subnet_id" not in AKS_MAIN.read_text(encoding="utf-8")
+SUBNET = ("/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-net/providers/"
+          "Microsoft.Network/virtualNetworks/vnet-corp/subnets/aks")
+CONTROL_PLANE_PRINCIPAL = "55555555-0000-0000-0000-000000000000"
+# main before vnet_subnet_id.
+BEFORE_SUBNET = "e288b35"
+
+
+def _stack(tmp_path: Path, **variables) -> dict:
+    return tr.render_aks_stack_once(tmp_path, {**STACK_REQUIRED, **variables})["module.cluster"]["render"]
+
+
+@requires_terraform
+def test_without_a_subnet_the_cluster_keeps_its_system_assigned_identity(tmp_path):
+    rendered = _stack(tmp_path)
+    cluster = rendered["azurerm_kubernetes_cluster.this"]
+    assert [i["type"] for i in cluster["identity"]] == ["SystemAssigned"]
+    assert cluster["default_node_pool"][0]["vnet_subnet_id"] is None
+    assert rendered["azurerm_user_assigned_identity.control_plane"] == []
+    assert rendered["azurerm_role_assignment.control_plane_subnet"] == []
+
+
+def _stack_at(tmp: Path, commit: str) -> Path:
+    """examples/aks and modules/cluster-aks as they were at `commit`, laid out
+    like deploy/terraform."""
+    if subprocess.run(["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=tr.ROOT).returncode:
+        pytest.skip(f"{commit} is not in this repository's history")
+    import tarfile
+    archive = subprocess.run(["git", "archive", commit, "deploy/terraform/examples/aks",
+                              "deploy/terraform/modules/cluster-aks"],
+                             cwd=tr.ROOT, capture_output=True, check=True).stdout
+    tmp.mkdir(parents=True)
+    (tmp / "src.tar").write_bytes(archive)
+    with tarfile.open(tmp / "src.tar") as t:
+        t.extractall(tmp, filter="data")
+    return tmp / "deploy" / "terraform"
+
+
+@requires_terraform
+def test_without_a_subnet_the_plan_is_what_it_was_before_the_option(tmp_path):
+    """So an existing cluster is not replaced. Mutation: switch the identity
+    type, or set any network_profile range, with vnet_subnet_id unset."""
+    source = _stack_at(tmp_path / "src", BEFORE_SUBNET)
+
+    def cluster(name, **kw):
+        return tr.render_aks_stack_once(tmp_path / name, STACK_REQUIRED, **kw)[
+            "module.cluster"]["render"]
+
+    old, old_again = cluster("old", source=source), cluster("old2", source=source)
+    new, new_again = cluster("new"), cluster("new2")
+    noise = tr._noise(old, old_again) | tr._noise(new, new_again)
+    assert tr.diff(old, new, noise) == []
+
+
+@requires_terraform
+def test_a_subnet_puts_the_nodes_there_under_a_user_assigned_control_plane(tmp_path):
+    """Mutation: grant the role on the VNet, to another principal, or create
+    the cluster before the assignment."""
+    rendered = _stack(tmp_path, vnet_subnet_id=SUBNET)
+    cluster = rendered["azurerm_kubernetes_cluster.this"]
+    [identity] = rendered["azurerm_user_assigned_identity.control_plane"]
+    [grant] = rendered["azurerm_role_assignment.control_plane_subnet"]
+    assert [(i["type"], i["identity_ids"]) for i in cluster["identity"]] == [
+        ("UserAssigned", [identity["id"]])]
+    assert cluster["default_node_pool"][0]["vnet_subnet_id"] == SUBNET
+    assert (grant["scope"], grant["role_definition_name"], grant["principal_id"]) == (
+        SUBNET, "Network Contributor", CONTROL_PLANE_PRINCIPAL)
+    assert identity["name"] == "aks-forgd-verdict-control-plane" or identity["name"].endswith(
+        "-control-plane")
+    main = AKS_MAIN.read_text(encoding="utf-8")
+    assert "depends_on = [azurerm_role_assignment.control_plane_subnet]" in main
+
+
+@requires_terraform
+def test_the_service_range_and_its_dns_address_reach_the_cluster(tmp_path):
+    cluster = _stack(tmp_path, vnet_subnet_id=SUBNET, pod_cidr="192.168.0.0/16",
+                     service_cidr="172.16.0.0/16", dns_service_ip="172.16.0.10")[
+        "azurerm_kubernetes_cluster.this"]
+    [profile] = cluster["network_profile"]
+    assert (profile["pod_cidr"], profile["service_cidr"], profile["dns_service_ip"]) == (
+        "192.168.0.0/16", "172.16.0.0/16", "172.16.0.10")
+
+
+@requires_terraform
+@pytest.mark.parametrize("variables, refusal", [
+    ({"service_cidr": "172.16.0.0/16"}, "are set together"),
+    ({"dns_service_ip": "172.16.0.10"}, "are set together"),
+    ({"service_cidr": "172.16.0.0/16", "dns_service_ip": "172.17.0.10"}, "inside service_cidr"),
+    ({"service_cidr": "172.16.0.0/16", "dns_service_ip": "172.16.0.0"}, "inside service_cidr"),
+], ids=["range-alone", "address-alone", "address-outside", "network-address"])
+def test_the_dns_address_must_come_with_its_range_and_inside_it(tmp_path, variables, refusal):
+    """Mutation: drop either precondition."""
+    assert refusal in _refusal(tmp_path, **variables)
+
+
+@requires_terraform
+@pytest.mark.parametrize("subnet, ok", [
+    (SUBNET, True),
+    (SUBNET.replace("resourceGroups", "resourcegroups"), True),
+    ("/subscriptions/0/resourceGroups/rg-net/providers/Microsoft.Network/virtualNetworks/vnet-corp",
+     False),
+    ("aks", False),
+], ids=["subnet", "lowercase-segment", "vnet", "name"])
+def test_vnet_subnet_id_must_be_a_subnet_resource_id(tmp_path, subnet, ok):
+    out = _module_variables(tmp_path, vnet_subnet_id=subnet)
+    assert (out.returncode == 0) == ok, out.stderr
+    if not ok:
+        assert "must be a subnet's resource id" in " ".join(out.stderr.split())
 
 
 def test_the_private_cluster_text_names_the_managed_vnet_and_command_invoke_with_files():
@@ -168,8 +273,24 @@ def test_the_private_cluster_text_names_the_managed_vnet_and_command_invoke_with
     assert "node resource group" in flat, flat
     assert "az aks command invoke" in flat and "--file ." in flat, flat
     assert "orgIds.primary" in flat and "policy.inline=policy.yaml" in flat, flat
-    for claim in ("vnet_subnet_id", "subnet_id", "the cluster's virtual network or a peered one"):
-        assert claim not in flat, claim
+    assert "the cluster's virtual network or a peered one" not in flat
+
+
+def test_the_readme_says_a_subnet_replaces_an_existing_cluster_and_how_to_move():
+    section = " ".join(_reaching_the_aks_api().split("\n### Your own VNet\n", 1)[1].split())
+    for variable in ("vnet_subnet_id", "pod_cidr", "service_cidr", "dns_service_ip"):
+        assert f"| `{variable}` | `null` |" in section, variable
+    assert "on an existing cluster replaces it" in section
+    assert "Network Contributor" in section and "User Access Administrator" in section
+    assert "1. Plan with the new values" in section and "verify-deployment" in section
+
+
+def test_the_example_declares_the_network_variables_with_the_module_s_defaults():
+    example = (tr.TERRAFORM / "examples" / "aks").joinpath("variables.tf").read_text(encoding="utf-8")
+    module = (conn.AKS / "variables.tf").read_text(encoding="utf-8")
+    for variable in ("vnet_subnet_id", "pod_cidr", "service_cidr", "dns_service_ip"):
+        pattern = rf'variable "{variable}" {{[^}}]*?default\s*=\s*null'
+        assert re.search(pattern, example) and re.search(pattern, module), variable
 
 
 AKS_OUTPUTS = Path(__file__).resolve().parent.parent / "deploy" / "terraform" / "examples" / "aks" / "outputs.tf"

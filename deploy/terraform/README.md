@@ -675,10 +675,11 @@ as whoever `az` is signed in as, which needs
 
 With the cluster private, `kubectl`, `helm` and `scripts/bootstrap_aks.sh`
 must run from a network that reaches the API server's private endpoint.
-`cluster-aks` does not place the cluster in an existing virtual network. AKS
-creates the VNet itself, in the node resource group (`MC_<resource
-group>_<cluster>_<region>`), so that is the network a self-hosted runner or
-jump host has to be in, peered with, or reach over a VPN.
+By default AKS creates the VNet itself, in the node resource group
+(`MC_<resource group>_<cluster>_<region>`), so that is the network a
+self-hosted runner or jump host has to be in, peered with, or reach over a
+VPN. To put the cluster in a subnet of your own VNet instead, next to your
+runners and private DNS, see [Your own VNet](#your-own-vnet).
 
 Without a host there, run the install through `az aks command invoke`. It
 runs the command in a pod inside the cluster that has `kubectl` and `helm`,
@@ -743,6 +744,64 @@ to every address.
 Turning local accounts off on an existing cluster is an in-place update.
 Making a public cluster private replaces it, and the federated credentials
 with it, because the OIDC issuer URL changes.
+
+### Your own VNet
+
+| Variable | Default | |
+|---|---|---|
+| `vnet_subnet_id` | `null` | A subnet of your VNet for the nodes and the private API server's endpoint. With it, the control plane runs as a user-assigned identity, `<cluster>-control-plane`, which the module gives Network Contributor on the subnet before it creates the cluster. |
+| `pod_cidr` | `null` | The overlay range pods get addresses from. Null is AKS's `10.244.0.0/16`. |
+| `service_cidr` | `null` | The range services get addresses from. Null is AKS's `10.0.0.0/16`. Set with `dns_service_ip`. |
+| `dns_service_ip` | `null` | The cluster DNS service's address, inside `service_cidr` and not its first. Null is AKS's `10.0.0.10`. |
+
+`examples/aks` declares each with the module's default and passes it
+through. With all four unset the plan is the one the module made before
+they existed.
+
+The pod and service ranges must not overlap the VNet or anything it routes
+to, such as a peered VNet or an on-premises range over a VPN. AKS's default
+service range, `10.0.0.0/16`, overlaps many VNets, so with your own subnet
+set `service_cidr` and `dns_service_ip` too. The nodes are in overlay mode,
+so pods take no addresses from the subnet; it needs one per node, one more
+for each node `max_surge` adds during an upgrade, and one for the API
+server's private endpoint, on top of the five addresses Azure reserves in
+every subnet. The subnet must route out to AKS's required outbound
+endpoints, the container registry and Anthropic's APIs. A VNet with its own
+DNS servers must forward the cluster's private zone,
+`privatelink.<region>.azmk8s.io`, to Azure DNS (`168.63.129.16`), or
+nothing in it resolves the API server's name.
+
+`vnet_subnet_id` must be known when Terraform plans, because it decides
+whether the identity and the role assignment exist: give an existing
+subnet's id, or create the subnet in an earlier apply. A subnet created in
+the same apply fails the plan with `Invalid count argument`.
+
+The applying identity needs `Microsoft.Authorization/roleAssignments/write`
+on the subnet, as `User Access Administrator` or `Owner` on it gives, to
+create the Network Contributor assignment. The cluster is created after the
+assignment, but Azure can take a few minutes to apply a new assignment; if
+the first apply fails with an authorization error on the subnet, run it
+again.
+
+**Setting `vnet_subnet_id`, or changing any of the four, on an existing
+cluster replaces it**: the control plane's identity type and the node
+pool's subnet cannot change in place. The OIDC issuer URL changes with the
+cluster, so the federated credentials are replaced too. To move a running
+deployment:
+
+1. Plan with the new values and confirm the plan replaces
+   `module.cluster.azurerm_kubernetes_cluster.this` and the federated
+   credentials, and nothing in `module.store`. The store, its identities
+   and the findings are untouched.
+2. Apply. The verdict server is down from when the old cluster is destroyed
+   until the chart is running on the new one, and Anthropic's calls in that
+   window fail. Schedule it.
+3. Install the chart on the new cluster as on any new one (see
+   [`cluster-aks` does not install the chart](#cluster-aks-does-not-install-the-chart)),
+   from a host that reaches the API server's endpoint, which is now in your
+   subnet.
+4. Point DNS for the ingress hostname at the new ingress address, and run
+   `forgd-verdict verify-deployment`.
 
 ## The findings connector in the app modules
 

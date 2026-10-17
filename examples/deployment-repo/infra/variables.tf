@@ -91,6 +91,27 @@ variable "entra_admin_group_object_ids" {
   default = []
 }
 
+# Null, as in the module, keeps the VNet AKS creates and AKS's ranges.
+variable "vnet_subnet_id" {
+  type    = string
+  default = null
+}
+
+variable "pod_cidr" {
+  type    = string
+  default = null
+}
+
+variable "service_cidr" {
+  type    = string
+  default = null
+}
+
+variable "dns_service_ip" {
+  type    = string
+  default = null
+}
+
 # store-azure's default; see its variables.tf. It also sets the provider's
 # storage settings in main.tf.
 variable "shared_access_key_enabled" {
