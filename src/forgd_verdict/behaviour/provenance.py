@@ -55,6 +55,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from ..models import BLOCK_LOCATOR, NOT_TAINT_SOURCES, Finding, digest, load_json
+from . import envelope as _envelope
 
 DETECTOR = "provenance:untrusted-destination"
 TAINT_DETECTOR = "taint:sensitive-data-sent"
@@ -167,6 +168,21 @@ def _host(raw: str) -> str | None:
     except (UnicodeError, ValueError):
         return None
     return h if _HOSTNAME.match(h) else None
+
+
+def _bare_host(raw: str) -> str | None:
+    """The host of a URL written without a scheme: `host`, `host:443/path`,
+    `user@host:443/path`. None when there is none."""
+    raw = raw.strip()
+    if not raw or len(raw) > 2048 or any(c.isspace() for c in raw):
+        return None
+    if (h := _host(raw)):
+        return h
+    try:
+        name = urlsplit(raw if raw.startswith("//") else "//" + raw).hostname
+    except ValueError:
+        return None
+    return _host(name) if name else None
 
 
 _INET_PART = re.compile(r"0x[0-9a-f]{1,8}|0[0-7]{0,11}|[1-9][0-9]{0,9}", re.IGNORECASE)
@@ -371,6 +387,9 @@ _SHELL_TOKEN = re.compile(
 _QUOTED = re.compile(r"""'([^']*+)'?|"((?:[^"\\]++|\\.)*+)"?|\\(.)""", re.DOTALL)
 _DQ_ESCAPE = re.compile(r"""\\([$`"\\])""")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}=")
+# A command that names HOME other than to read it: `HOME=/etc`, `HOME+=x`,
+# `unset HOME`, `read HOME`, `export HOME`. Any of these can move `~`.
+_SETS_HOME = re.compile(r"(?<![$\w{])HOME(?![\w}])")
 _VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]{0,63})\}|([A-Za-z_][A-Za-z0-9_]{0,63}))")
 _SOCAT_ADDRESS = re.compile(
     r"(?:tcp|tcp4|tcp6|udp|udp4|udp6|openssl|ssl|tcp-connect|udp-sendto)[:-]"
@@ -764,7 +783,11 @@ def _canon(word: str) -> str | None:
     if len(word) > 4 * 1024:
         return None
     w = _strip_shell_wrap(word.strip())
-    w = w.lstrip("$(").strip("'\"`")
+    # A command substitution's opener, `$(<file` or `$(cat`; the `$` of a
+    # variable stays, so `$HOME/x` reaches `_HOME` below.
+    while w.startswith(("$(", "(")):
+        w = w[2:] if w.startswith("$(") else w[1:]
+    w = w.strip("'\"`")
     # Upload and redirect prefixes: `-F f=@path`, `--data=@path`, `@path`,
     # `<path`. A plain `key=value` is an assignment, not a file.
     m = re.match(r"^[^=@<>]*=@(.+)\Z", w) or re.match(r"^[@<>]+(.+)\Z", w)
@@ -1093,12 +1116,15 @@ class Outcome:
 
 
 def run(detector: ProvenanceDetector, messages: Sequence, *, session: tuple | None,
-        findings: Sequence[Finding], time_budget_s: float) -> Outcome:
+        findings: Sequence[Finding], time_budget_s: float,
+        context: tuple[str | None, Iterable[str]] | None = None) -> Outcome:
     """`detector.check`, with an exception returned as an Outcome that drops
     every check rather than raised. Every adapter calls this, so a failed or
-    cut-short pass reaches its `detectors_skipped` the same way."""
+    cut-short pass reaches its `detectors_skipped` the same way. `context` is
+    the frame's (application, actor id and email), which chooses the
+    operator envelope."""
     try:
-        return detector.check(messages, session, time_budget_s, findings)
+        return detector.check(messages, session, time_budget_s, findings, context)
     except Exception as exc:  # noqa: BLE001 - reported as dropped checks
         return Outcome([], detector.checks, exc)
 
@@ -1127,10 +1153,16 @@ class ProvenanceDetector:
     def __init__(self, severity: str = "warn", salt: str = "",
                  allow_hosts: Sequence[str] = (),
                  max_sessions: int = MAX_SESSIONS, *, provenance: bool = True,
-                 taint_severity: str | None = None) -> None:
+                 taint_severity: str | None = None,
+                 envelope_rules: Sequence[_envelope.Rule] = (),
+                 envelope_severity: str | None = None) -> None:
         self.severity = severity
         self.provenance = provenance
         self.taint_severity = taint_severity
+        self.envelope_rules = list(envelope_rules)
+        self.envelope_severity = envelope_severity
+        # The envelope rule for the frame a worker thread is checking.
+        self._frame = threading.local()
         self._salt = salt
         # A path digest must not be recoverable. `digest(path, "")` is a bare
         # sha256, and `~/.aws/credentials` is one guess. With no deployment
@@ -1153,7 +1185,8 @@ class ProvenanceDetector:
         """The policy names of the checks this runs: what a caller records as
         dropped when a pass raises or is cut short."""
         return (["provenance"] if self.provenance else []) + (
-            ["taint"] if self.taint_severity else [])
+            ["taint"] if self.taint_severity else []) + (
+            ["envelope"] if self.envelope_severity else [])
 
     def analyze(self, messages: Sequence, session: tuple | None = None,
                 time_budget_s: float = TIME_BUDGET_S,
@@ -1163,18 +1196,32 @@ class ProvenanceDetector:
 
     def check(self, messages: Sequence, session: tuple | None = None,
               time_budget_s: float = TIME_BUDGET_S,
-              findings: Sequence[Finding] = ()) -> Outcome:
+              findings: Sequence[Finding] = (),
+              context: tuple[str | None, Iterable[str]] | None = None) -> Outcome:
         """`findings` are the frame's DLP findings, which taint joins on.
 
         The scan core re-emits a session's earlier findings on every frame,
-        so they cover the whole transcript, not only what is new.
+        so they cover the whole transcript, not only what is new. `context`
+        is the frame's (application, actor), which chooses the envelope rule.
         """
-        if session is None:
-            return self._analyze(messages, None, time_budget_s, findings)
-        with self._lock:
-            lock = self._session_locks.setdefault(session, threading.Lock())
-        with lock:
-            return self._analyze(messages, session, time_budget_s, findings)
+        application, actors = context or (None, ())
+        self._frame.rule = (_envelope.select(self.envelope_rules, application, actors)
+                            if self.envelope_severity else None)
+        if session is not None and self.envelope_severity:
+            # A session's progress is kept per rule: calls read under one
+            # rule are read again when a frame of the session selects another.
+            rule = self._frame.rule
+            session = (*session, "envelope",
+                       None if rule is None else self.envelope_rules.index(rule))
+        try:
+            if session is None:
+                return self._analyze(messages, None, time_budget_s, findings)
+            with self._lock:
+                lock = self._session_locks.setdefault(session, threading.Lock())
+            with lock:
+                return self._analyze(messages, session, time_budget_s, findings)
+        finally:
+            self._frame.rule = None
 
     def _analyze(self, messages: Sequence, session: tuple | None,
                  time_budget_s: float, findings: Sequence[Finding]) -> Outcome:
@@ -1292,6 +1339,7 @@ class ProvenanceDetector:
     def _check_call(self, block: dict, base: str, state: _State,
                     own: Sequence[Finding], clock: _Clock | None = None) -> list[Finding]:
         tool = block.get("tool_name") if isinstance(block.get("tool_name"), str) else None
+        rule = getattr(self._frame, "rule", None)
         words = _name_words(tool) if tool else set()
         if tool and (tool.lower().replace("_", "") in _TO_USER_TOOLS
                      or ("draft" in words and not words & _SEND_VERBS)):
@@ -1299,7 +1347,7 @@ class ProvenanceDetector:
             # nothing leaves on the agent's say-so. A `to` field on a draft
             # made it look like a send. A name with a sending verb as well --
             # `send_draft` -- is a send, and an MCP server picks its names.
-            return []
+            return self._outside(rule, base, tool, (), (), ())
         shell = _shell_tool(tool)
         sending_tool = _sending_tool(tool) or _sends_by_method(block.get("input"))
         out: list[Finding] = []
@@ -1311,6 +1359,12 @@ class ProvenanceDetector:
         sends = sending_tool
         unclassified = False
         read: set[str] = set()
+        programs: set[str] = set()
+        # A shell tool's string fields other than its command, such as
+        # `description`, used when the call has no command field.
+        loose: set[str] = set()
+        command_field = False
+        home_set = False
         internal = False
 
         for locator, key, text in _walk(block.get("input"), f"{base}.input"):
@@ -1319,6 +1373,13 @@ class ProvenanceDetector:
             command = shell or _command_key(key)
             if command or key in _READ_KEYS:
                 read |= _read_paths("command" if command else key, text)
+            if command and rule is not None:
+                if _command_key(key):
+                    command_field = True
+                    programs |= _programs(text)
+                    home_set = home_set or bool(_SETS_HOME.search(text))
+                else:
+                    loose |= _programs(text)
             if key in _INTERNAL_KEYS:
                 internal = True
                 continue
@@ -1332,7 +1393,7 @@ class ProvenanceDetector:
                 targets = _recipient_hosts(text)
                 sends = True
             elif _url_key(key):
-                targets = _urls(text) or {h for h in [_host(text)] if h}
+                targets = _urls(text) or {h for h in [_bare_host(text)] if h}
                 if not sending_tool:
                     # A fetch: its URL is no destination for provenance,
                     # but a value carried in it reaches that host.
@@ -1364,6 +1425,14 @@ class ProvenanceDetector:
             while len(state.paths_by_call) > MAX_PENDING_CALLS:
                 state.paths_by_call.pop(next(iter(state.paths_by_call)))
 
+        if rule is not None:
+            if shell and not command_field:
+                programs = loose
+            if home_set:
+                # `~` and `$HOME` name wherever the command pointed HOME.
+                read = {"$HOME" + p[1:] if p == "~" or p.startswith("~/") else p
+                        for p in read}
+        out.extend(self._outside(rule, base, tool, programs, destinations | fetched, read))
         # Only when every other field is understood: `agent_id` beside an
         # unread `queue="#evil"` says nothing about where the rest goes.
         if internal and not destinations and not opaque and not unclassified:
@@ -1379,6 +1448,18 @@ class ProvenanceDetector:
                     locator=locator, excerpt_hash=excerpt,
                     tool_name=_safe_tool_name(tool, self._path_key)))
         return out
+
+    def _outside(self, rule: _envelope.Rule | None, base: str, tool: str | None,
+                 programs, hosts, paths) -> list[Finding]:
+        """A finding for each part of this call outside the frame's envelope
+        rule; nothing when no rule applies."""
+        if rule is None:
+            return []
+        return [Finding(detector=_envelope.DETECTOR, severity=self.envelope_severity or "warn",
+                        locator=f"{base}#{kind}",
+                        excerpt_hash=digest(f"{kind}:{value}", self._path_key),
+                        tool_name=_safe_tool_name(tool, self._path_key))
+                for kind, value in _envelope.violations(rule, tool, programs, hosts, paths)]
 
     def _taint(self, base: str, texts, destinations: set[str], opaque: list[str],
                unclassified: bool, shell: bool, state: _State,
@@ -1445,6 +1526,87 @@ def _in_url_key(rest: str) -> bool:
     return any(_url_key(segment.lower()) for segment in re.split(r"[.\[#]", rest)[2:])
 
 
+# How deep `_programs` follows `sh -c`, `eval` and substitutions.
+_PROGRAM_DEPTH = 8
+# Programs that run another program named in their arguments.
+_RUNS_ARGUMENTS = frozenset({"xargs", "eval", "exec", "command", "builtin", "watch",
+                             "parallel"})
+
+
+def _substitutions(command: str) -> list[str]:
+    """The text inside each `$(...)`, `<(...)`, `>(...)` and backtick
+    substitution of `command`, outermost first. A parenthesis inside quotes
+    does not count. Unbalanced text runs to the end."""
+    out: list[str] = []
+    i, n = 0, len(command)
+    while i < n and len(out) < 64:
+        if command.startswith(("$(", "<(", ">("), i):
+            depth, j, quote = 1, i + 2, ""
+            while j < n and depth:
+                c = command[j]
+                if quote:
+                    if c == quote:
+                        quote = ""
+                    elif c == "\\" and quote == '"':
+                        j += 1
+                elif c in "'\"":
+                    quote = c
+                elif c == "\\":
+                    j += 1
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                j += 1
+            out.append(command[i + 2:j - 1 if not depth else j])
+            i = j
+        elif command[i] == "`":
+            j = command.find("`", i + 1)
+            j = n if j < 0 else j
+            out.append(command[i + 1:j])
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def _programs(command: str, depth: int = 0) -> set[str]:
+    """The programs a shell command runs, by name: each segment's program,
+    and those it runs in turn through `sh -c`, `eval`, `xargs`,
+    `find -exec` and command substitution, `_PROGRAM_DEPTH` deep."""
+    out: set[str] = set()
+    command = command[:MAX_BLOCK_CHARS]
+    for seg, _ in _segments(command, limit=_PATH_LIMIT):
+        seg = [w for w in _unwrap(seg) if not _ASSIGNMENT.match(w)]
+        if not seg:
+            continue
+        prog = _prog(seg[0])
+        out.add(prog)
+        if depth >= _PROGRAM_DEPTH:
+            continue
+        if prog in _SHELLS:
+            inner = _shell_c_command(seg[1:])
+            if inner is not None:
+                out |= _programs(inner, depth + 1)
+        elif prog in _RUNS_ARGUMENTS:
+            # Past its options, and a number after one: `watch -n 2 curl`.
+            rest = seg[1:]
+            while rest and (rest[0].startswith("-")
+                            or re.fullmatch(r"[0-9.]+[smhd]?", rest[0])):
+                rest = rest[1:]
+            if rest:
+                out |= _programs(" ".join(rest), depth + 1)
+        elif prog == "find":
+            for k, w in enumerate(seg):
+                if w in ("-exec", "-execdir", "-ok", "-okdir") and k + 1 < len(seg):
+                    out |= _programs(" ".join(seg[k + 1:]), depth + 1)
+                    break
+    if depth < _PROGRAM_DEPTH:
+        for inner in _substitutions(command):
+            out |= _programs(inner, depth + 1)
+    return out
+
+
 def _sends_by_method(value) -> bool:
     """A call whose input names a sending HTTP method and a URL:
     `http_request(method="POST", url=...)`."""
@@ -1465,9 +1627,11 @@ def from_policy(policy) -> ProvenanceDetector | None:
     dets = policy.raw.get("detectors") or {}
     prov = dets.get("provenance") or {}
     taint = dets.get("taint") or {}
+    env = dets.get("envelope") or {}
     prov_on = prov.get("enabled") is True
     taint_on = taint.get("enabled") is True
-    if not (prov_on or taint_on):
+    env_on = env.get("enabled") is True
+    if not (prov_on or taint_on or env_on):
         return None
     return ProvenanceDetector(
         severity=str(prov.get("severity") or "warn"),
@@ -1475,6 +1639,8 @@ def from_policy(policy) -> ProvenanceDetector | None:
         allow_hosts=[str(h) for h in (prov.get("allow_hosts") or [])],
         provenance=prov_on,
         taint_severity=str(taint.get("severity") or "warn") if taint_on else None,
+        envelope_rules=_envelope.parse_rules(env) if env_on else (),
+        envelope_severity=str(env.get("severity") or "warn") if env_on else None,
     )
 
 

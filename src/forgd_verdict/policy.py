@@ -38,6 +38,7 @@ from .detectors import (
     T0RegexDetector,
 )
 from .detectors.gitleaks import BASELINE_CONFIG, GITLEAKS_CONFIG_ENV
+from .detectors.injection import InjectionDetector
 from .models import (
     ORG_UNATTRIBUTED,
     SEVERITIES,
@@ -165,6 +166,9 @@ DEFAULT_POLICY: dict[str, Any] = {
         # Behavioural, adapter 1 only. Off unless a profile turns it on.
         "provenance": {"enabled": False, "severity": "warn"},
         "taint": {"enabled": False, "severity": "warn"},
+        "envelope": {"enabled": False, "severity": "warn"},
+        # Instructions aimed at the model in tool results, frames only.
+        "injection": {"enabled": False, "severity": "warn"},
         "shell_exfil": {"enabled": False, "severity": "warn"},
     },
     "scan": {
@@ -1048,6 +1052,7 @@ class Policy:
         add("entropy", lambda sev, salt: EntropyDetector(sev, salt))
         if include_local_only:
             add("shell_exfil", lambda sev, salt: ShellExfilDetector(sev, salt))
+        add("injection", InjectionDetector)
         gl = self.raw["detectors"].get("gitleaks") or {}
 
         def gitleaks(sev: str, salt: str) -> GitleaksDetector:

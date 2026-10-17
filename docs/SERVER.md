@@ -239,10 +239,91 @@ and is not reported. Four things that look like sends are not:
 Each of these is an ordinary step in agent work, and counting it would make
 most findings from the two checks false positives.
 
+The **injection** detector (`detectors.injection`, off by default) reads
+the text of tool results, and of attachments in an Inference hooks frame,
+never the user's own words, for
+the shapes a prompt injection leaves: `injection:ignore-instructions`,
+`injection:role-override`, `injection:template-marker` (a chat-template
+or system-turn marker), `injection:hidden-instruction` (an HTML comment
+addressing the model), `injection:conceal-from-user` and
+`injection:send-secrets`. Every tool result reaches the verdict server
+before the model reasons over it, so at `block` the frame carrying the
+result is denied and the model never reads the instruction. The session
+cache means each result is read once, in the frame that first carries it,
+within `scan.budget_ms` like any T0 detector. They are patterns: a page
+that discusses prompt injection matches them, which is why it ships at
+`warn`. A failure is the same as any T0 tier's.
+
+A third check, the **operator envelope** (`envelope:outside-operator-envelope`),
+is off unless `detectors.envelope.enabled` is true. It reports a tool call
+outside what the operator listed:
+
+```yaml
+detectors:
+  envelope:
+    enabled: true
+    severity: warn
+    rules:
+      - applications: [claude-code]   # source.application; omitted: any
+        # actors: [user_01Abc]        # actor ids or emails; omitted: any
+        tools: [bash, read, edit]     # tool names; omitted: any
+        commands: [git, ls, npm]      # programs a shell tool may run
+        hosts: [github.com]           # destinations, subdomains included
+        path_classes: [project, /tmp] # what it may read, by class
+```
+
+The first rule that matches the frame's application and actor applies; a
+frame no rule matches has no envelope. An empty `applications` or `actors`
+list is refused, since it would match nothing. A path is compared by class:
+`~/.<dir>` for a dot-directory in the home directory, `~` elsewhere in it,
+`/<dir>` for an absolute path's first component, `project` for a relative
+path, and `variable` for one a shell variable places (`$P`, `${DIR}/x`, or
+`~` in a command that assigns `HOME`). The programs a shell call runs
+include those it runs through `sh -c`, `eval`, `xargs`, `find -exec` and
+`$(...)` or backtick substitution.
+
+The envelope reads the call's text. A program on the list that runs code
+(`python -c`, `node -e`, `make`, a script in the project, `git` with an
+alias or a hook) can run anything, and a symlink, alias or function is not
+resolved. An agent set on leaving the envelope can do so through any of
+these. The finding
+names the kind in its locator (`#tool`, `#command`, `#host`, `#path`) and
+carries a salted digest of the tool, program, host or path class; no raw
+command, host or path. On the intake's frame `/scan` the application is
+`agent:<client>`. The Compliance and Managed Agents scanners carry no
+application, so only a rule without `applications` applies to them.
+
 Both ship at `warn`: they record and never deny. The hook sees the input to
 each model call, never the response, so it sees an action one frame after it
 ran. At `block` a check would halt the agent's next step, not stop the request
 already sent. They are there to be measured first.
+
+#### Moving a behavioural check to `block`
+
+A check moves to `block` only when its findings are known to be right often
+enough that halting the agent is the better outcome. Before changing it,
+measure in your own deployment, at `warn`:
+
+- **How often it fires.** Findings per thousand frames over at least two
+  working weeks, per application, from the dashboard's Detectors table.
+  Two weeks covers the release cycle and the monthly jobs agents run.
+- **How many are right.** Review a sample of at least fifty findings, or
+  all of them if fewer, by `request_id` in the Event Log, and count the
+  ones where the agent was acting for someone other than its user, or
+  outside what its operator meant it to do. Move a check only when nearly
+  all are; a false positive at `block` stops a person's work mid-task.
+- **What the false ones share.** A tool, a destination or a workflow that
+  accounts for most of them is added to `provenance.allow_hosts` or to the
+  envelope's rule, and the measurement repeats.
+- **What halting costs.** At `block` the check denies the agent's next
+  step, not the action already taken (the hook sees each action one frame
+  after it ran). Confirm the application handles a deny mid-task: the
+  user sees the deny reason and the session can continue or be restarted.
+
+Move one check, for one application if its rule allows, and watch its deny
+rate for a week before the next. `envelope` is the closest to deterministic
+of the three, since it compares against a list the operator wrote, and is
+the natural first candidate once its rules are complete.
 
 Findings carry the detector id, a structural locator and a salted digest,
 never a destination, path or value. The checks run after the DLP scan with

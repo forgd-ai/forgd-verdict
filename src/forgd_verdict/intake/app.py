@@ -778,8 +778,12 @@ class Intake:
                 len(messages) if isinstance(messages, list) else 0)
         findings = list(result.findings)
         if prompt and self._behaviour is not None:
+            actor = frame.get("actor") if isinstance(frame.get("actor"), dict) else {}
+            actors = [v for v in (actor.get("id"), actor.get("email_address"))
+                      if isinstance(v, str) and v]
             outcome = run_behaviour(self._behaviour, messages, session=key, findings=findings,
-                                    time_budget_s=request_time_budget(budget))
+                                    time_budget_s=request_time_budget(budget),
+                                    context=(f"agent:{client}", actors))
             if outcome.error is not None:
                 self.bump("behaviour_error")
                 _log.warning("behavioural check failed",

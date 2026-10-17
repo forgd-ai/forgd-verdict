@@ -73,6 +73,16 @@ does. So adapter 2 stops a prompt from being answered and does not
 guarantee it never reaches Anthropic. See
 [PLATFORM.md § Adapter 2](PLATFORM.md#adapter-2--claude-code-hook-cli).
 
+**The behavioural checks read the transcript's text.** The operator
+envelope compares each call's tool, programs, hosts and path classes with
+the operator's list. A program on the list that runs code (`python -c`, a
+project script, `make`) can run anything, a symlink, alias or shell
+function is not resolved, and an agent set on leaving the envelope can do
+so through any of these. The injection detector matches patterns in tool
+results and attachments, and text written to avoid them is not found. Both
+record drift for review; neither is a sandbox
+([SERVER.md](SERVER.md#behavioural-checks)).
+
 ## The Claude Code hook's threat model
 
 The hook runs on the developer's machine, as the developer, in the
@@ -384,7 +394,7 @@ prompt.
 | a signed frame whose `type` is not `prompt`, or has none | scanned whole, outside the envelope fields, and decided like a prompt: a `block` finding denies in `enforce`. A scan error follows `on_internal_error` | — |
 | an internal scan error on the verdict server | in `observe` and `archive`, allow. In `enforce`, `fail` returns a 500 so the org's own failure handling in Anthropic decides; `allow` allows | `server.on_internal_error: fail` |
 | a blocking tier did not run, because the budget dropped it or it failed | `allow` decides on the tiers that ran; `deny` denies and names the tier. The stored row records `tiers_dropped` either way | `server.on_tier_dropped: allow` |
-| the behavioural checks (`provenance`, `taint`) stopped at their time limit or raised, on the verdict server, the intake's frame `/scan`, or the Compliance and Managed Agents scanners | the checks that did not finish are added to `tiers_dropped`, and `on_tier_dropped` applies to them as to any tier: `deny` denies when one is at `block`. A session's next frame resumes where the pass stopped. The verdict server counts `provenance_cut_short` or `provenance_error`, the intake `behaviour_cut_short` or `behaviour_error` | 250 ms per frame, or what is left of `scan.budget_ms`; 5 s per session on the post-hoc scanners. Not configurable |
+| the behavioural checks (`provenance`, `taint`, `envelope`) stopped at their time limit or raised, on the verdict server, the intake's frame `/scan`, or the Compliance and Managed Agents scanners | the checks that did not finish are added to `tiers_dropped`, and `on_tier_dropped` applies to them as to any tier: `deny` denies when one is at `block`. A session's next frame resumes where the pass stopped. The verdict server counts `provenance_cut_short` or `provenance_error`, the intake `behaviour_cut_short` or `behaviour_error` | 250 ms per frame, or what is left of `scan.budget_ms`; 5 s per session on the post-hoc scanners. Not configurable |
 | a value over the scan size limit: 4,194,304 characters per block on adapters 1, 2, 3 and 6, 1,000,000 per attribute on adapter 4 | the first 4,194,304 (or 1,000,000) characters and the last eighth of that are scanned, and the middle is not. `unscanned:oversize` is added to `tiers_dropped` and denies whenever the policy has a `block` detector, under either `on_tier_dropped`. Under `on_tier_dropped: allow`, a `block` finding in what was scanned is named in the deny reason; under `deny`, the reason is the size limit; with none, the reason says part of the request is over the size limit. `/metrics` on the verdict server and `/stats` on the collector count it as `oversize_unscanned` | not configurable |
 | more than 30,000 scan units in one request, hook payload or OTel turn (`MAX_SCAN_UNITS`). Each string and each number is a unit, so 60 KB of `[0,0,…]` reaches the cap | the last 30,000 units are scanned and the earlier ones are not. On the hook, `command`, `content`, `new_string`, `file_text`, `prompt` and `query` are always among them. `unscanned:capped` is added to `tiers_dropped` and denies whenever the policy has a `block` detector, under either `on_tier_dropped`. Under `on_tier_dropped: allow`, a `block` finding in what was scanned is named in the deny reason; under `deny`, the reason is the size limit; with none, the reason says part of the request is over the size limit. `/metrics` and `/stats` count it as `oversize_unscanned` | not configurable |
 | more than 5,000 findings in one scan (`MAX_SCAN_FINDINGS`) | every unit is scanned, and 5,000 findings are kept, `block` findings first. `findings:capped` is added to `tiers_dropped` and decides nothing: the kept findings decide, under either `on_tier_dropped`. A sink that redacts masks every value of the group whole | not configurable |

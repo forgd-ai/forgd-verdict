@@ -155,6 +155,9 @@ class ScanUnit:
     # An identifier field of a content block (`id`, `tool_use_id`, `name`).
     # The entropy detector skips it; every other detector scans it.
     structural: bool = False
+    # Text a tool returned or an attachment carried: a tool_result's
+    # content or an attachment's text, as `extract.frame_units` marks them.
+    tool_content: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str):  # pragma: no cover - guard
@@ -236,7 +239,7 @@ def tail_unit(head: ScanUnit, text: str) -> ScanUnit:
     """
     return ScanUnit(locator=head.locator + TAIL_SUFFIX, tool_name=head.tool_name,
                     text=text, folded=True, truncated=head.truncated, tail=True,
-                    structural=head.structural)
+                    structural=head.structural, tool_content=head.tool_content)
 
 
 @dataclass(frozen=True)
