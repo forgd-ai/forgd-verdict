@@ -360,7 +360,12 @@ forgd-verdict reset-stats [--at <RFC 3339>]
 forgd-verdict reset-stats --clear
 ```
 
-Each takes `--store`. `--clear` clears the object's field only; until
+Each takes `--store`, and `--without-gitleaks`: the CLI scans every value
+it writes with the `dashboard` profile's detectors, built on the
+operator's machine, and refuses every change when that profile requires
+the gitleaks daemon and the socket is not reachable there. With the flag,
+every configured detector but gitleaks scans the change, and the CLI says
+so. `--clear` clears the object's field only; until
 `migrate-markers`, a marker object's value stays in effect, and the CLI
 warns. CLI changes are audited as issuer `cli`, `<os user>@<hostname>`,
 and shown as "CLI, unverified".

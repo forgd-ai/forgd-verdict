@@ -1630,6 +1630,13 @@ follows.
     is scanned with the deployment's configured detectors. A finding
     refuses the change, and the refusal names only the detectors. So does
     a detector that did not run, or an empty detector set.
+  - The dashboard scans with its own detectors. The CLI builds the
+    `dashboard` profile's detectors on the operator's machine, plugins
+    included. Where that profile requires the gitleaks daemon and the
+    socket is not reachable there, every CLI change is refused, and the
+    refusal names `--without-gitleaks`. With that flag, every configured
+    detector but gitleaks scans the change, and the CLI prints that
+    gitleaks did not. It is off by default.
   - An exclusion equal to an org id the policy names is refused before
     anything is read. The ids come from `orgs`, `compliance` and
     `otel.orgs` (and the entitlements map), with `$FORGD_ORG_ID_*`
