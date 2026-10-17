@@ -454,6 +454,44 @@ provider instead, and the same two outputs become per-service-account
 chart then needs each role ARN as a service-account annotation, which
 `helm_values_hint` lists.
 
+### Variables
+
+| Variable | Default | |
+|---|---|---|
+| `cluster_name` | required | The EKS cluster's name, and the prefix of the module's IAM role and policy names: a letter, then at most 34 letters, digits and hyphens. |
+| `kubernetes_version` | `"1.36"` | The EKS minor version. Moving it forward upgrades the control plane in place; EKS does not go back. |
+| `tags` | `{}` | Tags on every resource the module creates that takes them. |
+| `vpc_id` | required | The VPC holding `subnet_ids`. The module creates no VPC. It is passed to the Load Balancer Controller, which would otherwise read it from instance metadata that pods cannot reach. |
+| `subnet_ids` | required | Private subnets, in at least two availability zones, for the nodes and the control plane's network interfaces. They need a route out to ECR, S3, STS and Anthropic's APIs. |
+| `public_subnet_ids` | `[]` | Public subnets for the internet-facing ALB. Empty leaves the controller to find subnets by tag; see [Subnet tags](#subnet-tags). |
+| `endpoint_public_access` | `false` | Whether the Kubernetes API is reachable from outside the VPC. Private access is always on. |
+| `public_access_cidrs` | `[]` | Who may reach the public endpoint. Required, and not empty, when `endpoint_public_access` is `true`; there is no `0.0.0.0/0` default. |
+| `api_allowed_security_group_ids` | `[]` | Security groups whose members may reach the private endpoint on 443; see [Reaching the API](#reaching-the-api). |
+| `api_allowed_cidrs` | `[]` | Ranges that may reach the private endpoint on 443. A `/0` is refused. |
+| `cluster_admin_principal_arns` | `[]` | IAM roles or users made cluster admin through access entries, besides the identity that applies; see [Reaching the API](#reaching-the-api). |
+| `log_retention_days` | `365` | Retention of the control plane's api, audit and authenticator logs, in a value CloudWatch Logs accepts. The audit log records who read the forgd-verdict secret. |
+| `secrets_kms_key_arn` | `""` | A KMS key for envelope encryption of Kubernetes secrets. Empty creates one, with rotation on. The encryption cannot be turned off once the cluster has it. |
+| `node_instance_type` | `"m6i.xlarge"` | The node group's instance type: 4 vCPU and 16 GiB. See the sizing note on the node group in `main.tf` before going smaller. |
+| `node_capacity_type` | `"ON_DEMAND"` | `ON_DEMAND` or `SPOT`. A reclaimed spot node takes the verdict server with it, and a governed prompt that cannot reach it fails. |
+| `node_desired_size` | `2` | The node group's desired size. |
+| `node_min_size` | `2` | The node group's minimum size. |
+| `node_max_size` | `3` | The node group's maximum size. An update replaces nodes one at a time and needs room for one more than desired. |
+| `node_disk_size_gb` | `64` | Each node's disk, in GiB. |
+| `enable_network_policy` | `true` | Run the managed `vpc-cni` add-on with NetworkPolicy enforced; see [NetworkPolicy enforcement](#networkpolicy-enforcement). |
+| `identity_mode` | `"pod_identity"` | How pods get AWS credentials: `pod_identity` (EKS Pod Identity associations) or `irsa` (an IAM OIDC provider and annotated service accounts), as above. |
+| `namespace` | `"forgd"` | The namespace the chart is installed into. It is part of every association and IRSA subject, so a mismatch authenticates as nothing. |
+| `dashboard_oidc_secret_name` | `"forgd-dashboard-oidc"` | The secret named in the dashboard Ingress's `auth-idp-oidc` annotation, holding the IdP client's `clientID` and `clientSecret`. The only secret the Load Balancer Controller may read. |
+| `writer_service_account` | `"forgd-verdict-writer"` | The chart's writer service account: `<release fullname>-writer`, or `serviceAccounts.writer.name`. |
+| `reader_service_account` | `"forgd-verdict-reader"` | The chart's reader service account: `<release fullname>-reader`, or `serviceAccounts.reader.name`. |
+| `writer_role_arn` | required | `store-s3`'s `writer_role_arn`, for the verdict server, the collector and the ingest job. |
+| `reader_role_arn` | required | `store-s3`'s `reader_role_arn`, for the dashboard. |
+| `lb_controller_enabled` | `true` | Create the AWS Load Balancer Controller's IAM role. `false` means you supply an ingress controller, and the chart's Ingress objects do nothing until you do. |
+| `connector_enabled` | `false` | Bind the chart's connector service account to the store's reader identity; set it with `connector.enabled` in the chart. |
+| `connector_service_account` | `"forgd-verdict-connector"` | The chart's connector service account: `<release fullname>-connector`, or `serviceAccounts.connector.name`. Used only with `connector_enabled`. |
+| `control_enabled` | `false` | Give the chart's control service account `store-s3`'s control role, for `dashboard.admins.enabled`; see [Dashboard admins](#dashboard-admins-the-control-identity). |
+| `control_role_arn` | `""` | `store-s3`'s `control_role_arn`. Required with `control_enabled`, and different from both other roles. |
+| `control_service_account` | `"forgd-verdict-control"` | The chart's control service account: `<release fullname>-control`, or `serviceAccounts.control.name`. Used only with `control_enabled`. |
+
 ### Reaching the API
 
 The API endpoint is private unless `endpoint_public_access` is set, and its
