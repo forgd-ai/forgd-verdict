@@ -2078,7 +2078,7 @@ def parse_expansions(section: Any) -> dict[str, Any]:
 # `for_profile("compliance")` merges.
 COMPLIANCE_KEYS = frozenset({
     "anthropic_version", "api_key", "base_url", "detectors", "lookback_minutes",
-    "org_id", "orgs", "page_limit", "scan", "state_path",
+    "org_id", "orgs", "page_limit", "retention_days", "scan", "state_path",
 })
 
 
@@ -2093,6 +2093,11 @@ def refuse_unknown_compliance_keys(section: Any) -> None:
         raise ValueError(
             f"compliance has {', '.join(unknown)}, which nothing reads; it takes "
             f"{', '.join(sorted(COMPLIANCE_KEYS))}. cors_origins belongs under otel.")
+    retention = section.get("retention_days")
+    if retention is not None and (not isinstance(retention, int) or isinstance(retention, bool)
+                                  or not 1 <= retention <= 3650):
+        raise ValueError("compliance.retention_days must be a whole number of days from 1 "
+                         "to 3650: the organization's Compliance API retention period")
 
 
 # The hook's destinations, credentials, timeout and shipping mode. A Claude

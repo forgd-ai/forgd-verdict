@@ -420,6 +420,87 @@ def _surfaces_cell(surfaces: set[str], limit: int = 2) -> str:
     )
 
 
+_STATE_CLASS = {"ok": "status-ok", "warn": "status-warn", "bad": "status-warn",
+                "unknown": "status-warn"}
+_STATE_WORD = {"ok": "ok", "warn": "watch", "bad": "broken", "unknown": "unknown"}
+
+
+def _state_cell(state: str, detail: str = "") -> str:
+    word = escape(_STATE_WORD.get(state, state))
+    note = f' <span class="det-what">{escape(detail)}</span>' if detail else ""
+    return f'<span class="status {_STATE_CLASS.get(state, "status-warn")}">{word}</span>{note}'
+
+
+def _minutes(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value / 60:.1f} h" if value >= 120 else f"{value:.0f} min"
+
+
+def _pipeline_section(pipe) -> str:
+    """Delivery lag, join rate, cursor health, per-detector silence and
+    daily delivery per source: the pipeline's own health, apart from what
+    it found (store/pipeline.py)."""
+    if pipe is None:
+        return ""
+    lag = "".join(
+        f"<tr><td><code>{escape(r.source)}</code></td><td class='num'>{r.samples or '—'}</td>"
+        f"<td class='num'>{_minutes(r.p50_min)}</td><td class='num'>{_minutes(r.p95_min)}</td>"
+        f"<td class='num'>{_minutes(r.max_min)}</td><td>{_state_cell(r.state, r.detail)}</td></tr>"
+        for r in pipe.lag)
+    joins = "".join(
+        f"<tr><td>{escape(j.name)}</td><td class='num'>{j.matched:,} of {j.total:,}</td>"
+        f"<td class='num'>{'—' if j.rate is None else f'{j.rate * 100:.0f}%'}</td>"
+        f"<td>{_state_cell(j.state, j.detail)}</td></tr>" for j in pipe.joins)
+    cursors = "".join(
+        f"<tr><td><code>{escape(c.reader)}</code> {escape(c.name)}</td>"
+        f"<td class='num'>{'—' if c.age_hours is None else f'{c.age_hours:,.1f} h ago'}</td>"
+        f"<td class='num'>{'—' if c.limit_days is None else f'{c.limit_days} d'}</td>"
+        f"<td>{_state_cell(c.state, c.detail)}</td></tr>" for c in pipe.cursors
+    ) or "<tr><td colspan='4'>No pulling reader is configured</td></tr>"
+    if pipe.silent:
+        silent = "".join(
+            f"<tr><td><code>{escape(s.detector)}</code></td><td>{escape(s.last_fired)}</td>"
+            f"<td class='num'>{s.active_days} of {s.baseline_days} days</td></tr>"
+            for s in pipe.silent)
+        silence = (f"<p>{_state_cell(pipe.silence_state)}</p><table><thead><tr>"
+                   "<th>Detector</th><th>Last fired</th><th>Fired on</th></tr></thead>"
+                   f"<tbody>{silent}</tbody></table>")
+    else:
+        silence = f"<p>{_state_cell(pipe.silence_state, pipe.silence_detail)}</p>"
+    sources = sorted({s for _, per in pipe.daily for s in per})
+    dropped = set(pipe.dropped)
+    days = "".join(
+        f"<tr><td>{escape(day)}</td>" + "".join(
+            f"<td class='num'>{per.get(s, 0):,}"
+            + (" <span class='status status-warn'>stopped</span>" if (day, s) in dropped
+               else "") + "</td>" for s in sources) + "</tr>"
+        for day, per in pipe.daily[:7])
+    daily = ("<table><thead><tr><th>Day</th>"
+             + "".join(f"<th><code>{escape(s)}</code></th>" for s in sources)
+             + f"</tr></thead><tbody>{days}</tbody></table>") if sources else charts.empty(
+        "No records in this window")
+    return f"""  <section>
+    <div class="eyebrow">Pipeline</div>
+    <h2>Delivery</h2>
+    <p class="unit">whether each reader is still delivering, apart from what it found</p>
+    <div class="card-grid cols-2">
+      <div class="card"><h3>Delivery lag</h3><table><thead><tr><th>Source</th>
+        <th>Records</th><th>p50</th><th>p95</th><th>Max</th><th>State</th></tr></thead>
+        <tbody>{lag}</tbody></table></div>
+      <div class="card"><h3>Join rate</h3><table><thead><tr><th>Join</th><th>Matched</th>
+        <th>Rate</th><th>State</th></tr></thead><tbody>{joins}</tbody></table></div>
+      <div class="card"><h3>Cursor health</h3><table><thead><tr><th>Reader</th>
+        <th>Last pass</th><th>Limit</th><th>State</th></tr></thead>
+        <tbody>{cursors}</tbody></table></div>
+      <div class="card"><h3>Silent detectors</h3>{silence}</div>
+    </div>
+    <div class="card" style="overflow-x:auto;margin-top:16px"><h3>Records per source per
+      day</h3>{daily}</div>
+  </section>
+"""
+
+
 def _detector_table(summary: Summary) -> str:
     if not summary.detectors:
         return charts.empty("No findings recorded")
@@ -804,6 +885,7 @@ def render(summary: Summary, window: str = "7d", store_desc: dict | None = None,
       {_detector_table(summary)}</div>
   </section>
 
+{_pipeline_section(summary.pipeline)}
   <section>
     <div class="eyebrow">Over time</div>
     <h2>Per day</h2>

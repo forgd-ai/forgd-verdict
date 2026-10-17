@@ -448,6 +448,41 @@ class CompliancePlan:
     team: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class CursorReader:
+    """A pulling reader whose cursor the pipeline panel watches."""
+
+    reader: str
+    name: str
+    state_key: str
+    # Days after which what it has not read is gone; None when unknown.
+    limit_days: int | None
+    # The store partition it scans; None when it cannot be resolved here.
+    partition: str | None
+
+
+def cursor_readers(policy, plan: CompliancePlan, labels: dict[str, str]) -> list[CursorReader]:
+    """Adapter 3's orgs, judged against `compliance.retention_days`, and each
+    Managed Agents workspace, against its `window_days`. `labels` maps a
+    partition to the org label the dashboard shows."""
+    raw = getattr(policy, "raw", {}) or {}
+    compliance = raw.get("compliance") or {}
+    retention = compliance.get("retention_days") if isinstance(compliance, dict) else None
+    out = [CursorReader("compliance", labels.get(o.partition or "", f"org {i + 1}"),
+                        o.state_key, retention, o.partition)
+           for i, o in enumerate(plan.orgs)]
+    managed = raw.get("managed_agents") or {}
+    window = int(managed.get("window_days", 30)) if isinstance(managed, dict) else 30
+    for ws in (managed.get("workspaces") or []) if isinstance(managed, dict) else []:
+        if isinstance(ws, dict) and ws.get("key"):
+            key = str(ws["key"])
+            partition = policy.workspace_pseudonym(key) if hasattr(
+                policy, "workspace_pseudonym") else None
+            out.append(CursorReader("managed", str(ws.get("label") or key),
+                                    f"managed-{key}.json", window, partition))
+    return out
+
+
 def compliance_plan(policy) -> CompliancePlan:
     from ..models import env_or_literal
 

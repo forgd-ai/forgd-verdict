@@ -490,6 +490,11 @@ compliance:
   anthropic_version: "2023-06-01"
   page_limit: 100
   lookback_minutes: 10
+  # Your organization's Compliance API retention period, in days. The
+  # dashboard's cursor health compares each org's last completed scan with
+  # it, to show a scan gap before it outlives what the API keeps. The API
+  # does not report it, so it is unknown until set.
+  # retention_days: 30
 
 dashboard:
   # The dashboard reads the store and nothing else: no signing secret, no

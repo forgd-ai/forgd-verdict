@@ -186,7 +186,7 @@ class Dashboard:
                  overrides=None, baseline_mode: str = "observe",
                  baseline_source: str = "policy.yaml", lockout=None,
                  signing_key=None, branding: Branding | None = None,
-                 compliance=None, fleets: Fleets = None):
+                 compliance=None, fleets: Fleets = None, cursor_readers=None):
         from ..lockout import LockoutReports, expected_roles
         from ..overrides import OverlaidStore, deployment_enabled
 
@@ -235,6 +235,9 @@ class Dashboard:
         # When set, the scan's state is decided per view from it, and
         # scan_state_keys is not read.
         self.compliance = compliance
+        # The pulling readers whose cursors the pipeline panel judges
+        # (topology.cursor_readers).
+        self.cursor_readers = list(cursor_readers or [])
         # The fleet partitions and their orgs. With none, a scoped viewer's
         # reads read no fleet partition.
         self.fleets = fleets
@@ -511,6 +514,13 @@ class Dashboard:
                                 heartbeats=beats, intervals=intervals)
         surfaces = surface_states(summary, configured, watch=self.watch,
                                   heartbeats=beats, intervals=intervals)
+        if summary.pipeline is not None:
+            from ..store.pipeline import cursor_health
+
+            readers = [r for r in self.cursor_readers
+                       if scoped is None or r.partition in scoped]
+            summary.pipeline.cursors = cursor_health(
+                self.store, [(r.reader, r.name, r.state_key, r.limit_days) for r in readers])
         from ..store import store_is_empty
 
         html = render.render(summary, window, desc,
@@ -1295,7 +1305,13 @@ def create_app(store_spec: str | None = None, require_principal: bool | None = N
     if policy is not None:
         fleets = policy_fleets(policy)
         warn_unresolved_fleets(policy, "dashboard")
+    readers = None
+    if policy is not None and compliance is not None:
+        from .topology import cursor_readers
+
+        readers = cursor_readers(policy, compliance, labels or {})
     return Dashboard(store, auth=auth, fleets=fleets,
                      entitlements=entitlements, org_labels=labels,
                      configured=configured, sink_name=sink_name,
-                     scan_state_keys=scan_state_keys, watch=watch, **extra)
+                     scan_state_keys=scan_state_keys, watch=watch,
+                     cursor_readers=readers, **extra)
