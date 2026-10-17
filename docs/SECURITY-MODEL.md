@@ -60,6 +60,16 @@ Claude's file reads; Claude Code's permissions documentation says it makes
 a best-effort attempt to apply them to `@` file mentions too. See
 [deploy/MDM.md](../deploy/MDM.md#keeping-sensitive-files-out-of-claudes-reads).
 
+**A blocked prompt can still leave the machine in a session-title
+request.** In Agent SDK session mode, Claude Code sends the first prompt to
+a `generate_session_title` request in parallel with `UserPromptSubmit`, and
+a block from the hook does not recall it. `claude -p` generates no title.
+No documented setting turns it off. On an organization with inference
+hooks, adapter 1 sees that request and scans it; without them, no adapter
+does. So adapter 2 stops a prompt from being answered and does not
+guarantee it never reaches Anthropic. See
+[PLATFORM.md § Adapter 2](PLATFORM.md#adapter-2--claude-code-hook-cli).
+
 ## The Claude Code hook's threat model
 
 The hook runs on the developer's machine, as the developer, in the
