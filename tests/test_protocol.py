@@ -591,3 +591,54 @@ def test_a_short_metrics_token_refuses_to_start_the_server():
     )
     with pytest.raises(ValueError, match="server.metrics_token is 6 characters"):
         VerdictServer(policy)
+
+
+# -- tool call frames --------------------------------------------------------
+
+
+def _tool_call_frame(command: str, tool_info: dict | None = None) -> dict:
+    """A tool call frame as docs/PROTOCOL.md describes it: the assistant
+    message alone, with one tool_use block per call."""
+    return frame(type="tool_call", messages=[{
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Listing the reports."},
+            {"type": "tool_use", "id": "toolu_01HiJkLmNoPqRsTuVwXyZaBc", "tool_name": "bash",
+             "input": {"command": command},
+             "tool_info": tool_info or {"type": "client", "tool_type": "bash_20250124"}},
+        ],
+    }])
+
+
+async def test_a_tool_call_frame_with_a_credential_denies(policy, caplog):
+    """Counted as a tool call frame, not an unrecognized type, and scanned
+    whole rather than through the transcript path. Mutation: count it as
+    unknown, or scan it with _scan."""
+    import logging
+
+    caplog.set_level(logging.INFO)
+    server = VerdictServer(policy)
+
+    def transcript_scan(*_a, **_k):
+        raise AssertionError("a tool call frame went through the transcript scan")
+
+    server._scan = transcript_scan
+    try:
+        raw = json.dumps(_tool_call_frame(f"export AWS_ACCESS_KEY_ID={FAKE_AWS_KEY}")).encode()
+        status, verdict = await ASGIClient(server).post("/hook", raw, sign(raw))
+        counters = server.metrics.snapshot()["counters"]
+    finally:
+        server.close()
+    assert status == 200 and verdict["action"] == "deny"
+    assert counters["tool_call_frames"] == 1
+    assert "unknown_frame_type" not in counters
+    assert "unrecognized frame type" not in caplog.text
+
+
+async def test_a_benign_tool_call_frame_allows(client):
+    """`tool_info` names who runs the tool; a server's origin is not a
+    finding."""
+    status, verdict = await post_frame(client, _tool_call_frame(
+        "ls -la reports/", {"type": "third_party", "toolset_name": "reports",
+                            "origin": "https://mcp.example.com", "verified_origin": True}))
+    assert status == 200 and verdict == {"action": "allow", "findings_count": 0}

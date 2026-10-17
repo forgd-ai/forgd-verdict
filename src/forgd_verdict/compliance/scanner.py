@@ -718,21 +718,10 @@ class ComplianceScanner:
 
     @staticmethod
     def extract_reference_id(activity: dict[str, Any]) -> str | None:
-        """Pull our reference_id out of a denial activity.
-
-        The Activity object's per-type fields are documented in the API
-        reference rather than the guide pages, so the exact key on
-        inference_hooks_request_denied is not pinned here. `reference_id` is
-        the documented name of the value we return, so try that first, then a
-        couple of plausible variants, then give up rather than guess wrong.
-        Confirm the real key during a live shadow run and
-        delete the fallbacks.
-        """
-        for key in ("reference_id", "inference_hooks_reference_id", "hook_reference_id"):
-            value = activity.get(key)
-            if isinstance(value, str) and value:
-                return value
-        return None
+        """Our reference_id from a denial activity: its `reference_id` field,
+        as the API reference documents on inference_hooks_request_denied."""
+        value = activity.get("reference_id")
+        return value if isinstance(value, str) and value else None
 
     def join_denials(
         self, reports: list[SessionReport], since: str | None = None

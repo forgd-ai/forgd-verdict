@@ -247,12 +247,14 @@ def test_denials_are_joined_by_reference_id(scanner):
     assert summary["sessions_would_deny"] == 1
 
 
-def test_denial_without_a_known_reference_key_is_counted_not_guessed(scanner):
-    """The per-type field name is not pinned in the guide docs, so an
-    activity we cannot join must be reported as unjoinable rather than
-    matched against a guessed key."""
+@pytest.mark.parametrize("key", ["some_other_key", "inference_hooks_reference_id",
+                                 "hook_reference_id"])
+def test_denial_without_a_reference_id_is_counted_not_guessed(scanner, key):
+    """The API reference names the field `reference_id` on
+    inference_hooks_request_denied, so a value under any other key is not
+    joined. Mutation: try a fallback key."""
     scan, stub = scanner
-    stub._activities = [{**DENIAL, "reference_id": None, "some_other_key": "fv_x_01"}]
+    stub._activities = [{**DENIAL, "reference_id": None, key: "fv_x_01"}]
     summary = scan.join_denials([])
     assert summary["with_reference_id"] == 0
     assert summary["without_reference_id"] == 1
