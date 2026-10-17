@@ -12,7 +12,9 @@ enforced depends on the adapter: the verdict server enforces it only in
 the after-the-fact scanners only record it. A `warn` finding is recorded
 and never denies.
 Findings carry the detector name, a locator and a one-way digest of the
-matched value, never the value itself.
+matched value, never the value itself in the clear. With `privacy.sealing`
+on they also carry the value encrypted to a KMS key
+([PRIVACY.md § `privacy.sealing`](PRIVACY.md#privacysealing)).
 
 ## The detectors
 

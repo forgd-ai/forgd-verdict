@@ -334,6 +334,7 @@ class T0RegexDetector:
                             severity=self.severity,
                             locator=unit.locator,
                             excerpt_hash=digest(matched, self._salt),
+                            matched=matched,
                             tool_name=unit.tool_name,
                             start=start,
                             end=end,

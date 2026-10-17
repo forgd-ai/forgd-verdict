@@ -283,6 +283,9 @@ PATTERN_SHAPES: dict[str, tuple[Shape, ...]] = {
     "forgd_verdict.intake.app._SALT_NAMESPACE": (Shape("0", head="d"),
                                                  Shape("0", head="d", tail="!")),
     "forgd_verdict.intake.app._NAME": (Shape("a"), Shape("a:", tail="!")),
+    "forgd_verdict.intake.app.SEALED": (
+        Shape("a"), Shape("fvs1."), Shape("a", head="fvs1.0123456789abcdef.f.", tail="!"),
+        Shape("a.", head="fvs1.0123456789abcdef.t."), Shape("fvs1.0123456789abcdef.f.a")),
     "forgd_verdict.intake.app._DIGITS": (Shape("0"), Shape("0", tail="x")),
     "forgd_verdict.behaviour.provenance._SETS_HOME": (
         Shape("HOME"), Shape("$HOME"), Shape("HOMEx"), Shape("a", tail="HOME")),

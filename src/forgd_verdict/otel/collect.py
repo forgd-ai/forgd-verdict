@@ -209,6 +209,7 @@ def collect(
 
     left_out = (["gitleaks"] if policy is not None and gitleaks_left_out(policy, detectors)
                 else [])
+    sealer = policy.sealer(org_id or None) if policy is not None else None
     out: list[VerdictRecord] = []
     # Every unit text the scan placed a finding on, across the batch.
     matched_all: set[str] = set()
@@ -220,7 +221,7 @@ def collect(
         # were scanned last got nothing -- silently, and always the same
         # ones, because dict order follows arrival order.
         budget = Budget(budget_ms)
-        result = scan(units, detectors, budget)
+        result = scan(units, detectors, budget, sealer)
         result.detectors_skipped = with_left_out(result.detectors_skipped, left_out)
         # A payload value written to the record is replaced when the scan
         # matched it, whichever tier did; `meta.records` probes only the

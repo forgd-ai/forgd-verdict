@@ -44,7 +44,7 @@ adapter.
 |---|---|---|---|
 | `detectors` | which detectors run and at what severity: T0 regex, checksums, entropy, gitleaks (T1), Presidio and LLM Guard (T2), behavioural checks | every adapter | [SERVER.md § Scan core](SERVER.md#scan-core) |
 | `scan` | the scan budget and the session cache | every adapter | [SERVER.md § Scan budget](SERVER.md#scan-budget) |
-| `privacy` | `hash_salt`, the salt on every `excerpt_hash`, and `allow_unsalted`, which lets a service that logs or records findings start without one | every adapter that writes findings. The hook, on a laptop, is not given the salt: see the `hook` comments | [SERVER.md § Privacy invariant](SERVER.md#privacy-invariant) |
+| `privacy` | `hash_salt`, the salt on every `excerpt_hash`; `allow_unsalted`, which lets a service that logs or records findings start without one; and `sealing`, which stores each matched value encrypted to a KMS key ([PRIVACY.md § `privacy.sealing`](PRIVACY.md#privacysealing)) | every adapter that writes findings. The hook, on a laptop, is not given the salt: see the `hook` comments | [SERVER.md § Privacy invariant](SERVER.md#privacy-invariant) |
 | `deny` | `contact_line`, appended to deny reasons | every adapter that returns a deny | the comments in `policy.yaml` |
 | `server` | the verdict server: mode, signing secrets, signature enforcement, body limits, the metrics token, failure behaviour, the findings store | adapter 1 | [SERVER.md § Adapter 1](SERVER.md#adapter-1--inference-hooks-verdict-server) |
 | `hook` | the Claude Code hook: its detectors, the local spool, shipping decisions, remote scanning | adapter 2 | [PLATFORM.md § Adapter 2](PLATFORM.md#adapter-2--claude-code-hook-cli) |
@@ -252,6 +252,7 @@ What "no value" does depends on the key:
 | `server.secrets` | the server starts and logs an error; every hook request gets 503. A secret that resolves but does not decode to a key is logged as an error at startup, and every hook request gets 401 |
 | `server.metrics_token` | `/metrics` on the verdict server and `/stats` on the collector and the intake are disabled and answer 404. A placeholder counts as unset; a value under 24 characters stops the verdict server and the collector from starting |
 | `privacy.hash_salt` | every service that logs or records findings refuses to start, with or without a store: the verdict server, the collector, the intake and both ingest jobs. With `privacy.allow_unsalted: true` in the file it starts and warns; hashes are bare sha256, and the org registry is not published. `forgd-verdict scan` hashes with a random per-run key and says so on stderr. The dashboard and the connector read a store and never need the salt |
+| `privacy.sealing.key.id`, `.public_key`, an `orgs` key | with `sealing.enabled: true`, the policy is refused: every service refuses to start, and the hook acts on `hook.on_error` |
 | `otel.orgs[].token` | that org is skipped without a log line, and its exports get 401. When no org has a token, the collector starts and logs an error, and every export gets 401 |
 | `otel.orgs[].id`, with its token set | the collector refuses to start: with no id, the cross-check against the payload's `organization.id` cannot run |
 | `intake.fleet[].tokens`, `intake.clients[].token` | that credential is skipped. With none left, the intake starts and logs that every submission will be refused |

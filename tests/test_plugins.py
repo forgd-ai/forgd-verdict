@@ -705,6 +705,13 @@ def test_a_well_formed_finding_passes():
     assert det.scan([UNIT]) == [Finding(**GOOD)]
 
 
+def test_a_plugin_findings_value_is_the_checked_span_and_it_cannot_seal():
+    planted = Finding(**GOOD, matched="something else", sealed="fvs1.plaintext")
+    (f,) = PluginDetector("zebra", _Inner([planted]), "block", HASHER).scan([UNIT])
+    assert f.matched == AWS
+    assert f.sealed is None
+
+
 @pytest.mark.parametrize("check,over", [
     ("locator", {"locator": AWS}),
     ("locator", {"tool_name": "Read"}),

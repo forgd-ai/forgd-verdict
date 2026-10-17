@@ -1022,8 +1022,12 @@ there is no locking, no migrations, and no shared-filesystem corruption risk.
 The cost is that aggregation is a full scan in Python, fine at modest
 volume, and `Store` is the seam when it stops being fine.
 
-**The store holds findings, never content**, the same invariant as `Finding`
-itself. Organization and person identifiers are hashed on the way in, so the
+**The store holds findings, never content in the clear**, the same
+invariant as `Finding` itself. With `privacy.sealing` on, a finding also
+carries its matched value encrypted to a KMS key no service can decrypt
+with, and an export is then as safe as that key's access policy
+([PRIVACY.md § `privacy.sealing`](PRIVACY.md#privacysealing)).
+Organization and person identifiers are hashed on the way in, so the
 dashboard can group by user without naming anyone. `session_id` stays in the
 clear: it is the opaque handle needed to fetch a transcript back
 through the Compliance API during review.

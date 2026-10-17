@@ -340,6 +340,7 @@ class PresidioPIIDetector:
                         severity=self.severity,
                         locator=unit.locator,
                         excerpt_hash=digest(matched, self._salt),
+                        matched=matched,
                         tool_name=unit.tool_name,
                         # Translated back to the ORIGINAL text, not left in
                         # Presidio's coordinates. `analyze` was given

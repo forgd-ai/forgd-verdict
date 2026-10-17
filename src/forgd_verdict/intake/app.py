@@ -45,6 +45,7 @@ from ..orgregistry import publish_registry, unresolved_org_references
 from ..overrides import KEY_MODE, cold, reader_for, readiness
 from ..plugins import loaded_distributions
 from ..policy import Policy, load_policy, warn_unset_credentials
+from ..sealing import SEALED
 from ..store.base import (
     ORG_UNATTRIBUTED,
     SOURCE_AGENT_SCAN,
@@ -271,6 +272,9 @@ class Intake:
         self.policy = policy if policy is not None else load_policy(policy_path)
         self.config = self.policy.raw.get("intake") or {}
         self.verifiers = verifiers(self.policy)
+        sealing = self.policy.sealing
+        self._sealing_keys = (frozenset(k.fingerprint for k in sealing.current_keys())
+                              if sealing is not None else frozenset())
         self.max_body = int(self.config.get("max_body_bytes", DEFAULT_MAX_BODY))
         # Read once: a placeholder or a token under 24 characters stops the
         # intake here, as it stops the verdict server and the collector.
@@ -618,7 +622,8 @@ class Intake:
         that hook will enforce, recorded and returned as such."""
         event = payload.get("hook_event_name")
         units = hook_units(payload)
-        result = scan(units, self._detectors(), Budget(self._budget_ms))
+        result = scan(units, self._detectors(), Budget(self._budget_ms),
+                      self.policy.sealer_for_pseudonym(conf.org))
         dropped = with_left_out(result.detectors_skipped, self._left_out)
         verdict = decide(result.findings, self.policy, dropped=dropped)
         if blocks and verdict.action != ACTION_DENY and t1_dropped(dropped):
@@ -767,13 +772,15 @@ class Intake:
             cache = self._frame_cache if _blocks(messages) <= MAX_CACHED_BLOCKS else None
             budget = Budget(server.budget_ms)
             result = scan_frame(messages, frame_units, self._frame_detectors(),
-                                budget, cache, key)
+                                budget, cache, key,
+                                sealer=self.policy.sealer_for_pseudonym(conf.org))
         else:
             # Any other frame is scanned whole, without the session cache or
             # the behavioural checks, which assume a prompt transcript.
             self.bump("unknown_frame_type")
             result = scan(unknown_frame_units(frame), self._frame_detectors(),
-                          Budget(server.budget_ms))
+                          Budget(server.budget_ms),
+                          self.policy.sealer_for_pseudonym(conf.org))
             result.messages_total = result.messages_scanned = (
                 len(messages) if isinstance(messages, list) else 0)
         findings = list(result.findings)
@@ -963,7 +970,8 @@ class Intake:
                 rejected += 1
                 continue
             salt = self.policy.hash_salt
-            records.append(_bind_to_writer(_clamp_shipped(record, salt), conf, salt=salt))
+            records.append(_bind_to_writer(_clamp_shipped(record, salt, self._sealing_keys),
+                                           conf, salt=salt))
         if records:
             records = tallied(self._guard_shipped(records))
         return records, rejected
@@ -1237,12 +1245,18 @@ def _shipped_digest(value: str, salt: str) -> str:
     return value if _SHIPPED_DIGEST.match(value) else digest(value, salt)
 
 
-def _clamp_shipped(record: VerdictRecord, salt: str = "") -> VerdictRecord:
+def _clamp_shipped(record: VerdictRecord, salt: str = "",
+                   sealing_keys: frozenset[str] = frozenset()) -> VerdictRecord:
     """`record` with each enum, id and finding field held to the form
     `hook/cli.py` `_spool` writes. A value outside it is dropped or replaced,
     and `findings_count` is the number of findings kept. The fields `_spool`
     never writes are dropped by `_bind_to_writer` (`_NOT_SHIPPED`). The
-    caller has already refused an action other than allow or deny."""
+    caller has already refused an action other than allow or deny.
+
+    A finding's `sealed` is kept only when it is a sealed value under one
+    of `sealing_keys`, the fingerprints of this intake's own current
+    `privacy.sealing` keys, never a retired one. The intake cannot open it, so that is all it can
+    check; with sealing off nothing is kept."""
     from ..core import MAX_SCAN_FINDINGS
     from ..models import REFERENCE_ID_MAX, SEVERITY_BLOCK, SEVERITY_WARN
 
@@ -1269,6 +1283,8 @@ def _clamp_shipped(record: VerdictRecord, salt: str = "") -> VerdictRecord:
             tool_name=f.tool_name if (f.tool_name is not None
                                       and len(f.tool_name) <= _TOOL_MAX_CHARS
                                       and _NAME.match(f.tool_name)) else None,
+            sealed=f.sealed if (f.sealed is not None and SEALED.fullmatch(f.sealed)
+                                and f.sealed.split(".")[1] in sealing_keys) else None,
         )
         for f in record.findings[:MAX_SCAN_FINDINGS]
     ]

@@ -520,11 +520,16 @@ class VerdictServer:
     def _key_part(value: Any) -> str:
         return value if isinstance(value, str) else ""
 
+    def _sealer(self, frame: dict):
+        """The sealer for the frame's org, or None when sealing is off."""
+        return self.policy.sealer(self._key_part(frame.get("tenant_id")) or None)
+
     def _scan_whole(self, frame: dict, budget: Budget):
         """A tool call frame or a frame of an unrecognized type, scanned
         whole without the session cache or the behavioural checks, which
         assume a transcript."""
-        result = scan(unknown_frame_units(frame), self.detectors, budget)
+        result = scan(unknown_frame_units(frame), self.detectors, budget,
+                      self._sealer(frame))
         messages = frame.get("messages")
         result.messages_total = result.messages_scanned = (
             len(messages) if isinstance(messages, list) else 0)
@@ -543,7 +548,8 @@ class VerdictServer:
         key = (self._key_part(frame.get("tenant_id")),
                self._key_part(frame.get("session_id")))
         result = scan_frame(
-            messages, frame_units, self.detectors, budget, self.cache, key
+            messages, frame_units, self.detectors, budget, self.cache, key,
+            sealer=self._sealer(frame),
         )
         if self.provenance is not None:
             # Over the whole transcript on every frame. It needs the order

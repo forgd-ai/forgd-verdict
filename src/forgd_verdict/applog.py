@@ -150,8 +150,8 @@ def warn_if_unsalted(log, policy) -> bool:
     `excerpt_hash` is sha256(salt + matched_text). With an empty salt a
     findings export can be brute-forced back to the value for anything
     low-entropy -- an SSN has ~1e9 possibilities, a PAN fewer once Luhn is
-    applied -- so the store's "findings, never content" claim stops being
-    true for exactly the values that matter most.
+    applied -- so the store's "findings, never content in the clear" claim
+    stops being true for exactly the values that matter most.
 
     A service that logs or records findings refuses to start without a
     salt (`Policy.refuse_unsalted`), so this is logged only by one whose

@@ -147,8 +147,11 @@ organization, so a false positive is a blocked user.
 
 Matched secrets and PII never reach logs, the timing CSV, `/metrics`,
 `reference_id`, or `deny_reason`. Findings carry a detector name, a locator,
-and `excerpt_hash`, and nothing else. The test suite seeds known secrets and
-fails if any of them appears in one of those sinks.
+and `excerpt_hash`, and with `privacy.sealing` on the matched value sealed
+to a KMS key the server cannot decrypt with
+([PRIVACY.md § `privacy.sealing`](PRIVACY.md#privacysealing)). The test
+suite seeds known secrets and fails if any of them appears in one of those
+sinks.
 
 Two exceptions. Archive mode writes whole frames to disk, so treat
 `archive_dir` as a transcript store: 0600 files, encrypted volume, its

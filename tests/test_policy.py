@@ -665,6 +665,8 @@ def test_a_required_header_placeholder_renders_as_written(monkeypatch):
 NOT_CREDENTIALS = {
     # dashboard.auth.header: the NAME of the identity header a proxy sets.
     "header",
+    # privacy.sealing.*.public_key: the public half of a KMS key.
+    "public_key",
 }
 # Resolved as credentials and redacted outside the three tuples.
 REDACTED_ELSEWHERE = {

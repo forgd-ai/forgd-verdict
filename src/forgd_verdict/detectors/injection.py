@@ -91,5 +91,6 @@ class InjectionDetector:
                         detector=f"injection:{rule.id}", severity=self.severity,
                         locator=unit.locator,
                         excerpt_hash=digest(match.group(0), self._salt),
+                        matched=match.group(0),
                         tool_name=unit.tool_name))
         return findings

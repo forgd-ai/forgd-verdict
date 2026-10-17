@@ -51,6 +51,7 @@ from .models import (
 )
 from .plugins import PluginDetector
 from .policy import Policy
+from .sealing import Sealer
 
 # detector id -> user-facing noun phrase. Used to build deny_reason.
 DESCRIPTIONS: dict[str, str] = {
@@ -1225,6 +1226,7 @@ def scan(
     units: Iterable[ScanUnit],
     detectors: Sequence[Any],
     budget: Budget | None = None,
+    sealer: Sealer | None = None,
 ) -> ScanResult:
     """Run detectors over units in tier order, dropping T2 if budget is gone.
 
@@ -1234,6 +1236,10 @@ def scan(
     `ScanTruncated`. At most MAX_SCAN_FINDINGS findings are kept, chosen by
     `_keep`, once every detector has run; over that, FINDINGS_CAPPED is
     recorded.
+
+    Each finding's `matched` value is sealed with `sealer` into `sealed`
+    when one is given, and dropped either way, so no finding this returns
+    holds a matched value in the clear.
     """
     capped = getattr(units, "capped", False)
     units = list(units)
@@ -1312,9 +1318,30 @@ def scan(
                                       "count": len(result.truncated)}})
     # After dedupe: scrubbing changes the locator, and two findings that
     # differ only in a scrubbed segment are the same finding.
-    result.findings = _scrub(dedupe_findings(_scrub_keys(result.findings, paths)),
-                             detectors)
+    result.findings = _sealed(_scrub(dedupe_findings(_scrub_keys(result.findings, paths)),
+                                     detectors), sealer)
     return result
+
+
+def _sealed(findings: Sequence[Finding], sealer: Sealer | None) -> list[Finding]:
+    """`findings` with `matched` sealed into `sealed` by `sealer`, or
+    dropped when there is no sealer. A seal that raises leaves the finding
+    unsealed and is logged without the value."""
+    out = []
+    for f in findings:
+        if f.matched is None:
+            out.append(f)
+            continue
+        sealed = None
+        if sealer is not None:
+            try:
+                sealed = sealer.seal(f.matched, f.detector)
+            except Exception as exc:  # noqa: BLE001 -- a seal must not decide a verdict
+                log.warning("could not seal a matched value; the finding is kept "
+                            "without it", extra={"fields": {
+                                "detector": f.detector, "error": type(exc).__name__}})
+        out.append(replace(f, matched=None, sealed=sealed))
+    return out
 
 
 def _any_blocking(policy: Policy) -> bool:
@@ -1477,6 +1504,7 @@ def scan_frame(
     budget: Budget,
     cache: SessionCache | None = None,
     cache_key: tuple[str | None, str | None] | None = None,
+    sealer: Sealer | None = None,
 ) -> ScanResult:
     """Incremental scan of a cumulative transcript.
 
@@ -1510,7 +1538,7 @@ def scan_frame(
         if cut > start:
             end = cut
             units = extractor(messages[first:end], first)
-    result = scan(units, detectors, budget)
+    result = scan(units, detectors, budget, sealer)
     complete = not result.detectors_skipped
     if end < len(messages):
         result.detectors_skipped.append(UNSCANNED_CAPPED)

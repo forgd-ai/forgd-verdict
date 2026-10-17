@@ -500,7 +500,7 @@ class ComplianceScanner:
         start = time.perf_counter()
         units = compliance_units(messages)
         budget = Budget(self.policy.budget_ms)  # compliance.scan.budget_ms
-        result = scan(units, self.detectors, budget)
+        result = scan(units, self.detectors, budget, self.policy.sealer(self.org_id or None))
         result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
         extra, dropped = self._behaviour_findings(messages, result.findings)
         findings = list(result.findings) + extra
@@ -718,7 +718,7 @@ class ComplianceScanner:
                     )
 
         budget = Budget(self.policy.budget_ms)  # compliance.scan.budget_ms
-        result = scan(units, self.detectors, budget)
+        result = scan(units, self.detectors, budget, self.policy.sealer(self.org_id or None))
         result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
         dropped = list(result.detectors_skipped or [])
         if artifacts_failed:

@@ -97,7 +97,7 @@ async def _ship(app, record):
 def test_the_field_lists_are_the_schema():
     assert "session_id" in RECORD_FIELDS and "tiers_dropped" in RECORD_FIELDS
     assert set(FINDING_FIELDS) == {"detector", "severity", "locator", "excerpt_hash",
-                                   "tool_name"}
+                                   "tool_name", "sealed"}
 
 
 @pytest.mark.parametrize("field", RECORD_FIELDS)

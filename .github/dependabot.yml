@@ -78,6 +78,9 @@ updates:
       - /deploy/terraform/modules/cluster-eks
       - /deploy/terraform/modules/cluster-gke
       - /deploy/terraform/modules/monitor-azure
+      - /deploy/terraform/modules/seal-aws
+      - /deploy/terraform/modules/seal-azure
+      - /deploy/terraform/modules/seal-gcp
       - /deploy/terraform/modules/store-azure
       - /deploy/terraform/modules/store-gcs
       - /deploy/terraform/modules/store-s3

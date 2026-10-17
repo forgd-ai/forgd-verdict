@@ -433,7 +433,11 @@ def _names(record: Any, untrusted: bool) -> tuple[str, ...]:
 
 
 def _string_fields(row: FindingRow) -> list[str]:
-    return [f.name for f in fields(row) if isinstance(getattr(row, f.name), str)]
+    """The string fields of `row` the guard cleans. Not `sealed`: it is
+    ciphertext, held to the sealed-value shape and a known key's fingerprint
+    by the intake, and every value of it reads as random to a detector."""
+    return [f.name for f in fields(row)
+            if f.name != "sealed" and isinstance(getattr(row, f.name), str)]
 
 
 def _rebuilt(row: FindingRow, cleaned: Mapping[str, Any], prefix: str) -> FindingRow:

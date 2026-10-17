@@ -511,3 +511,35 @@ leaked key with it could permanently delete chats, files and projects
 across every organization it covers
 ([which organizations a key reads](PLATFORM.md#which-organizations-a-compliance-access-key-reads)). Scopes cannot be changed after
 the key is created.
+
+## Sealed values
+
+With `privacy.sealing` on, the store holds each matched value encrypted to
+an RSA key in a cloud KMS ([PRIVACY.md § `privacy.sealing`](PRIVACY.md#privacysealing)).
+What that rests on:
+
+- **Whoever may decrypt with the key reads every value sealed to it.**
+  That permission is the access control for the values, and it lives in
+  the KMS, not in forgd-verdict. Grant it to a group of people, never to a
+  service identity: every service seals with the public key alone. The
+  `seal-*` modules refuse a service identity listed among the decrypters,
+  and on AWS deny the listed service roles outright; they cannot see a
+  service that belongs to the decrypters' group or can assume their role,
+  a grant made outside the module, or anyone who can change the key's
+  access policy, key policy or IAM and grant themselves decryption.
+- **The dashboard can show a sealed value and cannot open it.** If its
+  identity were granted decryption, anyone who reached the dashboard, and
+  any bug in it, could read every value.
+- **The intake cannot check a laptop's sealed value.** It keeps one only
+  when the intake's policy has sealing on, the value has the sealed shape,
+  at most 6,208 characters, and it names one of the intake's current keys
+  by fingerprint. It cannot decrypt it, so a modified hook can store opaque
+  data of that size in each finding's `sealed`, or a value sealed to that
+  key that is not what it matched. What `unseal` prints for a code-hook
+  finding is what the laptop sealed.
+- **A sealed value is bound to its detector and nothing else.** Someone who
+  can write to the store can copy a sealed value onto another finding of
+  the same detector, as they could already copy any other field.
+- **Losing the key loses the values.** Destroying the key or its version,
+  or losing everyone who may decrypt with it, leaves every value sealed to
+  it unreadable. The findings and their digests are unaffected.
