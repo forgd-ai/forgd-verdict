@@ -17,7 +17,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 4.0"
+      version = "~> 5.0"
     }
     # For the custom table. See the resource below for why azurerm cannot
     # do it. Same provider app-aca already uses for the one thing azurerm

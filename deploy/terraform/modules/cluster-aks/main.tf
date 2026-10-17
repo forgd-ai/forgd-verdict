@@ -15,7 +15,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 4.0"
+      version = "~> 5.0"
     }
   }
 }
@@ -98,6 +98,12 @@ resource "azurerm_kubernetes_cluster" "this" {
   identity {
     type         = var.vnet_subnet_id == null ? "SystemAssigned" : "UserAssigned"
     identity_ids = var.vnet_subnet_id == null ? null : [azurerm_user_assigned_identity.control_plane[0].id]
+  }
+
+  # Manual: the default node pool below and no node auto-provisioning,
+  # which is what 4.x clusters ran with. azurerm 5 requires the block.
+  node_provisioning_profile {
+    mode = "Manual"
   }
 
   default_node_pool {
@@ -224,35 +230,32 @@ resource "azurerm_role_assignment" "kubelet_pulls_images" {
 # So the names are inputs shared with the chart rather than defaults
 # repeated in two places.
 resource "azurerm_federated_identity_credential" "writer" {
-  name                = "${var.cluster_name}-writer"
-  resource_group_name = var.resource_group_name
-  parent_id           = var.writer_identity_id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = azurerm_kubernetes_cluster.this.oidc_issuer_url
-  subject             = "system:serviceaccount:${var.namespace}:${var.writer_service_account}"
+  name                      = "${var.cluster_name}-writer"
+  user_assigned_identity_id = var.writer_identity_id
+  audience                  = ["api://AzureADTokenExchange"]
+  issuer                    = azurerm_kubernetes_cluster.this.oidc_issuer_url
+  subject                   = "system:serviceaccount:${var.namespace}:${var.writer_service_account}"
 }
 
 # The dashboard's, and it is a SEPARATE credential on a separate identity.
 # Federating the dashboard's service account to the writer identity would
 # undo the read-only split without changing anything in the chart.
 resource "azurerm_federated_identity_credential" "reader" {
-  name                = "${var.cluster_name}-reader"
-  resource_group_name = var.resource_group_name
-  parent_id           = var.reader_identity_id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = azurerm_kubernetes_cluster.this.oidc_issuer_url
-  subject             = "system:serviceaccount:${var.namespace}:${var.reader_service_account}"
+  name                      = "${var.cluster_name}-reader"
+  user_assigned_identity_id = var.reader_identity_id
+  audience                  = ["api://AzureADTokenExchange"]
+  issuer                    = azurerm_kubernetes_cluster.this.oidc_issuer_url
+  subject                   = "system:serviceaccount:${var.namespace}:${var.reader_service_account}"
 }
 
 # The findings connector's, on the READER identity like the dashboard's.
 resource "azurerm_federated_identity_credential" "connector" {
-  count               = var.connector_enabled ? 1 : 0
-  name                = "${var.cluster_name}-connector"
-  resource_group_name = var.resource_group_name
-  parent_id           = var.reader_identity_id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = azurerm_kubernetes_cluster.this.oidc_issuer_url
-  subject             = "system:serviceaccount:${var.namespace}:${var.connector_service_account}"
+  count                     = var.connector_enabled ? 1 : 0
+  name                      = "${var.cluster_name}-connector"
+  user_assigned_identity_id = var.reader_identity_id
+  audience                  = ["api://AzureADTokenExchange"]
+  issuer                    = azurerm_kubernetes_cluster.this.oidc_issuer_url
+  subject                   = "system:serviceaccount:${var.namespace}:${var.connector_service_account}"
 
   lifecycle {
     precondition {
@@ -265,13 +268,12 @@ resource "azurerm_federated_identity_credential" "connector" {
 # The dashboard's service account with admins enabled, on store-azure's
 # control identity.
 resource "azurerm_federated_identity_credential" "control" {
-  count               = var.control_enabled ? 1 : 0
-  name                = "${var.cluster_name}-control"
-  resource_group_name = var.resource_group_name
-  parent_id           = var.control_identity_id
-  audience            = ["api://AzureADTokenExchange"]
-  issuer              = azurerm_kubernetes_cluster.this.oidc_issuer_url
-  subject             = "system:serviceaccount:${var.namespace}:${var.control_service_account}"
+  count                     = var.control_enabled ? 1 : 0
+  name                      = "${var.cluster_name}-control"
+  user_assigned_identity_id = var.control_identity_id
+  audience                  = ["api://AzureADTokenExchange"]
+  issuer                    = azurerm_kubernetes_cluster.this.oidc_issuer_url
+  subject                   = "system:serviceaccount:${var.namespace}:${var.control_service_account}"
 
   lifecycle {
     precondition {

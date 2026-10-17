@@ -91,7 +91,7 @@ updates:
       # above. These stop each provider at the major its modules declare;
       # moving a module to the next major moves its entry here.
       - dependency-name: hashicorp/azurerm
-        versions: [">= 5.0"]
+        versions: [">= 6.0"]
       - dependency-name: hashicorp/aws
         versions: [">= 7.0"]
       - dependency-name: hashicorp/google

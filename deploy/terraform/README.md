@@ -1118,6 +1118,49 @@ binary is not evidence.
 terraform version   # expect 1.9.x
 ```
 
+## Moving to azurerm 5
+
+`app-aca`, `cluster-aks`, `monitor-azure`, `store-azure` and
+`examples/aks` require `hashicorp/azurerm` `~> 5.0`. A root that calls them
+moves its own `required_providers` entry to `~> 5.0` in the same change,
+then runs `terraform init -upgrade`. What the move asks of a deployment:
+
+- **Resource provider registration.** azurerm 5 registers no resource
+  providers unless told to; 4.x registered about sixty. Each module needs:
+
+  | Module | Resource providers |
+  |---|---|
+  | `store-azure` | `Microsoft.Storage`, `Microsoft.ManagedIdentity` |
+  | `monitor-azure` | `Microsoft.OperationalInsights`, `Microsoft.Insights` |
+  | `cluster-aks` | `Microsoft.ContainerService`, `Microsoft.ManagedIdentity` |
+  | `app-aca` | `Microsoft.App` |
+
+  `examples/aks` lists what its three modules need in
+  `resource_providers_to_register`. A namespace not yet registered in the
+  subscription is registered by the identity that applies, which then needs
+  its `register/action`; one already registered needs nothing.
+- **No inputs or state moves.** No module input or output changed, and no
+  resource address moved.
+- **Renamed arguments, handled inside the modules.** The federated
+  credentials take `user_assigned_identity_id`, and their resource group
+  comes from the identity. `cluster-aks` declares
+  `node_provisioning_profile { mode = "Manual" }`, which 5.x requires and
+  which is what a 4.x cluster ran with: the default node pool and no node
+  auto-provisioning.
+- **Validation moves to apply.** azurerm 5 no longer checks `location`
+  and resource provider values against Azure's lists at plan time, so a
+  mistyped region fails at apply instead.
+  `features { enhanced_validation { locations = true, resource_providers = true } }`
+  in the provider block restores the 4.x checks, and
+  `ARM_PROVIDER_ENHANCED_VALIDATION` is no longer read.
+- **Plan before applying.** Run a plan against the deployment's state and
+  confirm it replaces nothing. The modules were moved against their
+  rendered plans, not against a running deployment. Look in particular at
+  the AKS cluster (the new `node_provisioning_profile`), the federated
+  credentials (their identity argument was renamed), and, with `app-aca`,
+  the Container Apps environment's `logs_destination`, which 5.x no longer
+  reads back from Azure and defaults to empty.
+
 ## Running it from CI
 
 Run Terraform from a workflow of its own, separate from the one that rolls

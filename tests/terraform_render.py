@@ -217,9 +217,8 @@ def _azure(block: str, kind: str, name: str) -> dict:
     if kind == "azurerm_storage_account":
         return {"id": f"{RG}/providers/Microsoft.Storage/storageAccounts/forgdfindings"}
     if kind == "azurerm_storage_container":
-        return {"id": "https://forgdfindings.blob.core.windows.net/findings",
-                "resource_manager_id": f"{RG}/providers/Microsoft.Storage/storageAccounts/forgdfindings"
-                                       "/blobServices/default/containers/findings"}
+        return {"id": f"{RG}/providers/Microsoft.Storage/storageAccounts/forgdfindings"
+                      "/blobServices/default/containers/findings"}
     if kind == "azurerm_user_assigned_identity":
         digit = {"app": "1", "reader": "2", "control": "3", "control_plane": "5"}[name]
         return {"id": f"{RG}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{name}",
