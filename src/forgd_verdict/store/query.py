@@ -40,6 +40,8 @@ from .base import (
     VerdictRecord,
     visible,
 )
+from .pipeline import Pipeline, PipelineAccumulator
+from .pipeline import _parse as _parse_iso
 from .tally import weight
 
 # `source.application` (adapter 1) and `product_surface` (adapter 3) name
@@ -388,6 +390,10 @@ class Summary:
     surfaces: list[SurfaceRow] = field(default_factory=list)
     detectors: list[DetectorRow] = field(default_factory=list)
     reconciliation: Reconciliation = field(default_factory=Reconciliation)
+    # The monitors of delivery itself (store/pipeline.py), from this pass
+    # over the same records; cursor health is added by the caller, which
+    # holds the store.
+    pipeline: Pipeline | None = None
     daily: list[tuple[str, int, int]] = field(default_factory=list)  # day, req, deny
     # INLINE latency only -- the inference hook, where somebody is waiting
     # and the 5,000 ms end-to-end budget applies. A post-hoc scan has no
@@ -617,6 +623,7 @@ def build_summary(
     all_latency: list[float] = []
     post_hoc_latency: list[float] = []
     slowest_rec: VerdictRecord | None = None
+    pipe = PipelineAccumulator()
     recon = out.reconciliation
     seen_values: set[str] = set()
     # The ids of the inference-hook verdicts, for matching Anthropic's denials.
@@ -645,6 +652,7 @@ def build_summary(
             out.synthetic_probes += 1
             continue
         if v.source == SOURCE_INFERENCE_HOOK and v.event == EVENT_TOOL_CALL:
+            pipe.observe(v, 1)
             out.tool_call_checks += 1
             if v.effective_action == "deny":
                 out.tool_call_would_deny += 1
@@ -659,6 +667,7 @@ def build_summary(
             continue
         # A tally row stands for `n` clean Code hook allows (store/tally.py).
         n = weight(v)
+        pipe.observe(v, n)
         out.total_requests += n
         out.total_findings += v.findings_count
         effective = v.effective_action
@@ -794,6 +803,15 @@ def build_summary(
     out.detectors = sorted(detectors.values(), key=lambda r: (-r.unique, -r.count))
     out.daily = sorted((d, c[0], c[1]) for d, c in per_day.items())
     out.latency = _percentiles(all_latency)
+    window = None
+    if since:
+        start = _parse_iso(since)
+        if start is not None:
+            window = max(0.0, (datetime.now(UTC) - start).total_seconds() / 60)
+    joined = recon.joined_by_request_id + recon.joined_by_reference
+    out.pipeline = pipe.result(denials_joined=joined,
+                               denial_activities=recon.denial_activities,
+                               window_minutes=window)
     out.post_hoc_latency = _percentiles(post_hoc_latency)
     if slowest_rec is not None:
         out.slowest = {

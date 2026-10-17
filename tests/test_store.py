@@ -180,6 +180,30 @@ def test_denials_join_by_request_id_then_by_reference_id():
     assert recon.denials_without_reference == 2
 
 
+def test_the_pipeline_sees_tool_call_records():
+    """A tool call record is not a request, and still a delivery and a
+    detector's firing. Mutation: leave it out of the pipeline."""
+    tool = rec(findings=[FindingRow("regex:ssn", "block", "m", "seen")])
+    tool.event = "tool_call"
+    summary = build_summary([tool])
+    assert summary.total_requests == 0
+    [(_, sources)] = summary.pipeline.daily
+    assert sources == {SOURCE_INFERENCE_HOOK: 1}
+
+
+def test_the_pipeline_join_rate_counts_both_kinds_of_join():
+    """Mutation: count only the reference-id joins."""
+    live = [rec(action="deny", request_id="req_1", reference_id="fv_x_01"),
+            rec(action="deny", request_id="req_2", reference_id="fv_x_02")]
+    summary = build_summary(live, [
+        DenialRecord("a1", "2026-09-17T10:00:00Z", request_id="req_1"),
+        DenialRecord("a2", "2026-09-17T10:00:00Z", reference_id="fv_x_02"),
+        DenialRecord("a3", "2026-09-17T10:00:00Z"),
+    ])
+    denials = summary.pipeline.joins[0]
+    assert (denials.matched, denials.total) == (2, 3)
+
+
 def test_only_inference_hook_verdicts_are_joined_to():
     """Mutation: collect the ids of every verdict."""
     recon = build_summary([rec(source=SOURCE_CODE_HOOK, request_id="req_1")], [

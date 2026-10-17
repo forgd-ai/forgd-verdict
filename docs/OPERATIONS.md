@@ -147,6 +147,53 @@ check that the revision answering is the one just rolled.
 
 See [OVERRIDES.md § Readiness](OVERRIDES.md#readiness).
 
+## Pipeline monitors
+
+A reader that stops delivering reports no error, and the dashboard then
+shows fewer findings, which looks the same as there being less to find. The
+overview's **Pipeline · Delivery** section watches delivery itself, apart
+from what was found. Each monitor reads counts, timestamps and ids only,
+and shows **unknown**, never zero, when there is nothing to judge. The
+control-point panel above it covers a reader that stops altogether.
+
+- **Delivery lag.** For the Compliance API scan and the Managed Agents scan,
+  the time from a session's last activity (`session_updated_at`) to its
+  record being stored, as p50, p95 and maximum. When the p95 is longer than
+  the selected window, the section says comparisons with the live path in
+  that window are incomplete: sessions are still arriving. The inference
+  hook, the Code hook, agent checks and the collector record when they
+  decided or received, so they have no lag to show.
+- **Join rate.** Each as matched of total, and the share:
+  - Activity Feed denials matched to an inference-hook verdict. A fall
+    with steady denials means verdict records are not reaching the store;
+  - OTel records attributed to a configured org. Unattributed records
+    (`otel-unknown`) mean an org's token or id is not configured.
+
+  Compliance API sessions are not matched to inline verdicts: the two
+  carry session ids that are not documented to be the same value, so a
+  ratio would measure the id formats rather than delivery.
+- **Cursor health.** For each Compliance API org and Managed Agents
+  workspace, how long ago its last completed pass started, against the
+  period after which what it has not read is gone: the workspace's
+  `managed_agents.window_days`, and for the Compliance API
+  `compliance.retention_days`, which you set to your organization's
+  retention period. The API does not report it, so without that setting
+  the age is shown and the state is unknown. Past half the period it reads
+  **watch**; past the whole period, **broken**: activity since the last
+  pass may already be gone.
+- **Silent detectors.** A detector that fired on at least three of the
+  window's earlier days and not at all on its newest day, while a source it
+  fired on still delivered that day. A reader that stopped is the
+  control-point panel's to show, so a detector whose sources delivered
+  nothing is not listed. It needs more than three days of records in the
+  window.
+- **Records per source per day.** The last seven days of the window, with
+  **stopped** beside a source that delivered the day before and nothing on
+  a day the others delivered. This is the per-source coverage view; select
+  an org to see one org's. It counts records, not the share of activity
+  each source saw: no source sees all of an organization's activity, so
+  there is no total to divide by.
+
 ## Excluding test traffic
 
 Exclusion keeps named frames out of the dashboard's rates. The records
