@@ -248,7 +248,8 @@ show:
   session mode the CLI sends the first prompt to a `generate_session_title`
   request in parallel with `UserPromptSubmit`, 540 ms before the block landed
   in the reproduction. No documented setting turns it off. On an API key
-  no forgd-verdict adapter sees that request.
+  no forgd-verdict adapter sees that request. To check a newer release, see
+  [Reproducing the session-title request](#reproducing-the-session-title-request).
 - **`settingSources: []` disables project hooks.** A `.claude/settings.json`
   hook runs only when settings are loaded, and a container has no settings
   file. On a server the callbacks above are the whole of adapter 2.
@@ -262,6 +263,26 @@ decisions, where a `PostToolUse` deny is shown as output withheld and not
 as blocked before running, because the tool had run. The session id is kept when it is a lowercase UUID,
 as Claude Code's are, so it joins the agent's OTel records. Anything else,
 including a custom `sessionId` in capitals, is stored as a digest.
+
+### Reproducing the session-title request
+
+To check whether a Claude Code release still sends the title request ahead
+of a block:
+
+1. In an empty directory, write `.claude/settings.json` with a
+   `UserPromptSubmit` hook whose command prints `{"decision": "block"}`.
+2. Run one prompt through the Agent SDK in session mode, with
+   `settingSources: ["project"]` and `--debug-file <path>` in the CLI's
+   extra arguments.
+3. Count the `/v1/messages` requests in the debug file and note each one's
+   `source`. Then remove the hook and run it again.
+
+With 2.1.280 the blocked run logged one request,
+`source=generate_session_title`, and the run without the hook logged
+`generate_session_title` and two `sdk` requests. A release that logs none
+in the blocked run gates the title behind the hook; record its version in
+this section and in [PLATFORM.md](PLATFORM.md#adapter-2--claude-code-hook-cli).
+Use a prompt with nothing sensitive in it: the title request carries it.
 
 ## OTel: a row per agent
 

@@ -209,7 +209,8 @@ Each agent is an intake client scoped to `scan`, and its records are filed as
 [AGENT-BUILDERS.md](AGENT-BUILDERS.md) has the token setup, Python
 and TypeScript callbacks, failure and deny handling, and what was measured.
 
-**A block stops the model call, not session-title generation.** In
+**A block stops the model call, not session-title generation.** Measured
+with Claude Code 2.1.280 and the TypeScript Agent SDK 0.3.280: in
 Agent SDK session mode, Claude Code sends the first prompt to a
 `generate_session_title` request in parallel with the `UserPromptSubmit`
 hook. In the reproduction it left 540 ms before the block landed, so the
@@ -220,6 +221,8 @@ hooks, adapter 1 sees that request, which contradicts the overview's
 statement that title generation is not sent to the endpoint. On an org
 without them, nothing does. Treat adapter 2 as stopping the prompt from
 being answered, not as guaranteeing it never leaves the machine.
+[AGENT-BUILDERS.md](AGENT-BUILDERS.md#reproducing-the-session-title-request)
+has the steps to check a newer release.
 
 **Unmanaged installs are advisory only.** A developer who can edit
 `.claude/settings.json` can remove the hook. For enforcement, deploy the
