@@ -33,7 +33,10 @@ Claude Code kills at its own timeout lets the prompt through unscanned,
 which is why `hook.scan_timeout_ms` is capped at 5000, half the 10 s hook
 timeout in every shipped config, and why `hook.watchdog_ms` (default 8000,
 refused at 10000 or more) ends any hook run still going by then under
-`hook.on_error`. On Windows the watchdog cannot interrupt C code that holds
+`hook.on_error`. From Claude Code 2.1.295 a hook entry with
+`"onFailure": "block"` makes Claude Code block the prompt when the hook
+fails, times out or cannot start; the shipped managed-settings fragments
+do not set it. On Windows the watchdog cannot interrupt C code that holds
 the GIL; see [the hook's threat model](#the-claude-code-hooks-threat-model).
 
 **The hook does not see what a slash command or MCP prompt expands to.**

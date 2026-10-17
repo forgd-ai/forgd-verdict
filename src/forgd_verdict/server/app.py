@@ -58,6 +58,9 @@ from .preauth import Hold, PreAuthBudget
 from .signature import SignatureResult, precheck, usable_secrets, verify
 
 ALLOW_BODY = b'{"action": "allow"}'
+# The frame `type` Anthropic sends for the tool calls in a model response,
+# with Validate tool calls on (docs/PROTOCOL.md).
+FRAME_TOOL_CALL = "tool_call"
 
 
 class VerdictServer:
@@ -329,10 +332,15 @@ class VerdictServer:
         source_app = _source_application(frame)
         frame_type = frame.get("type")
 
-        # 6. An unrecognized event type is scanned whole and decided like a
-        #    prompt.
-        unknown = frame_type != "prompt"
-        if unknown:
+        # 6. A tool call frame, and an unrecognized event type, is scanned
+        #    whole and decided like a prompt. A tool call frame holds only the
+        #    assistant message with the calls, so the session cache and the
+        #    transcript checks, which read a transcript, do not apply.
+        whole = frame_type != "prompt"
+        unknown = whole and frame_type != FRAME_TOOL_CALL
+        if frame_type == FRAME_TOOL_CALL:
+            self.metrics.bump("tool_call_frames")
+        elif unknown:
             self.metrics.bump("unknown_frame_type")
 
         # 7. Scan + decide, off the event loop so a gitleaks subprocess or a
@@ -341,7 +349,7 @@ class VerdictServer:
         mode = self.mode
         try:
             result = await asyncio.to_thread(
-                self._scan_unknown if unknown else self._scan, frame, budget)
+                self._scan_whole if whole else self._scan, frame, budget)
             result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
             verdict = decide(result.findings, self.policy,
                              dropped=result.detectors_skipped)
@@ -507,9 +515,10 @@ class VerdictServer:
     def _key_part(value: Any) -> str:
         return value if isinstance(value, str) else ""
 
-    def _scan_unknown(self, frame: dict, budget: Budget):
-        """A frame of an unrecognized type, scanned without the session
-        cache or the behavioural checks, which assume a transcript."""
+    def _scan_whole(self, frame: dict, budget: Budget):
+        """A tool call frame or a frame of an unrecognized type, scanned
+        whole without the session cache or the behavioural checks, which
+        assume a transcript."""
         result = scan(unknown_frame_units(frame), self.detectors, budget)
         messages = frame.get("messages")
         result.messages_total = result.messages_scanned = (

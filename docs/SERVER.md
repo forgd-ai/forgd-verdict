@@ -300,6 +300,11 @@ and gitleaks contracts and the `config-test` probe):
 
 * HTTP 200 + JSON for both allow and deny. A non-200 is a webhook
   failure, not a deny, and sustained failures trip the circuit breaker.
+* `type: "tool_call"` → the tool calls in one model response, sent with
+  **Validate tool calls** on (the default). `messages` holds only the
+  assistant message with one `tool_use` block per call, and one verdict
+  covers every call in it. It is scanned whole, as below, without the
+  session cache or the transcript checks, and counted as `tool_call_frames`.
 * Unknown top-level `type`, or none → answered with 200, never refused for
   being unknown.
   The frame is scanned whole: `messages` as a transcript when it is a
