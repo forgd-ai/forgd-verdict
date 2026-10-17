@@ -161,8 +161,9 @@ def _reaching_the_aks_api() -> str:
 SUBNET = ("/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-net/providers/"
           "Microsoft.Network/virtualNetworks/vnet-corp/subnets/aks")
 CONTROL_PLANE_PRINCIPAL = "55555555-0000-0000-0000-000000000000"
-# main before vnet_subnet_id.
-BEFORE_SUBNET = "e288b35"
+# examples/aks and modules/cluster-aks before vnet_subnet_id, on azurerm 5,
+# laid out like deploy/terraform.
+BEFORE_SUBNET = Path(__file__).resolve().parent / "pinned" / "aks-baseline"
 
 
 def _stack(tmp_path: Path, **variables) -> dict:
@@ -179,27 +180,11 @@ def test_without_a_subnet_the_cluster_keeps_its_system_assigned_identity(tmp_pat
     assert rendered["azurerm_role_assignment.control_plane_subnet"] == []
 
 
-def _stack_at(tmp: Path, commit: str) -> Path:
-    """examples/aks and modules/cluster-aks as they were at `commit`, laid out
-    like deploy/terraform."""
-    if subprocess.run(["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=tr.ROOT).returncode:
-        pytest.skip(f"{commit} is not in this repository's history")
-    import tarfile
-    archive = subprocess.run(["git", "archive", commit, "deploy/terraform/examples/aks",
-                              "deploy/terraform/modules/cluster-aks"],
-                             cwd=tr.ROOT, capture_output=True, check=True).stdout
-    tmp.mkdir(parents=True)
-    (tmp / "src.tar").write_bytes(archive)
-    with tarfile.open(tmp / "src.tar") as t:
-        t.extractall(tmp, filter="data")
-    return tmp / "deploy" / "terraform"
-
-
 @requires_terraform
 def test_without_a_subnet_the_plan_is_what_it_was_before_the_option(tmp_path):
     """So an existing cluster is not replaced. Mutation: switch the identity
     type, or set any network_profile range, with vnet_subnet_id unset."""
-    source = _stack_at(tmp_path / "src", BEFORE_SUBNET)
+    source = BEFORE_SUBNET
 
     def cluster(name, **kw):
         return tr.render_aks_stack_once(tmp_path / name, STACK_REQUIRED, **kw)[

@@ -71,7 +71,7 @@ def _aks_evaluate(tmp_path: Path, **variables) -> dict[str, dict[str, str]]:
     that would be created, from main.tf's own attribute expressions."""
     parts = []
     for name, body in _aks_credentials().items():
-        entry = (f"{{ {name} = {{ parent = {_attr(body, 'parent_id')}, "
+        entry = (f"{{ {name} = {{ parent = {_attr(body, 'user_assigned_identity_id')}, "
                  f"subject = {_attr(body, 'subject')} }} }}")
         count = _attr(body, "count")
         parts.append(entry if count is None else f"({count}) == 1 ? {entry} : {{}}")

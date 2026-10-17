@@ -11,7 +11,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 4.0"
+      version = "~> 5.0"
     }
   }
   # EMPTY on purpose. Committed values would point every fork at one
@@ -37,6 +37,16 @@ provider "azurerm" {
   }
   storage_use_azuread = !var.shared_access_key_enabled
   subscription_id     = var.subscription_id
+  # azurerm 5 registers no resource providers by default. These are the ones
+  # this root's resources need; the identity that applies needs
+  # Microsoft.<namespace>/register/action for any not yet registered.
+  resource_providers_to_register = [
+    "Microsoft.ContainerService",
+    "Microsoft.Insights",
+    "Microsoft.ManagedIdentity",
+    "Microsoft.OperationalInsights",
+    "Microsoft.Storage",
+  ]
 }
 
 # The region comes from the resource group, not from a variable.

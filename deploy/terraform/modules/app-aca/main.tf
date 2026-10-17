@@ -22,7 +22,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 4.0"
+      version = "~> 5.0"
     }
     # azurerm has no resource for Container Apps auth -- checked the 4.x
     # schema, there is none -- so the dashboard's Entra front end is the one

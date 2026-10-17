@@ -1460,7 +1460,7 @@ def test_the_aks_module_federates_the_reader_to_the_reader_identity():
     assert "var.writer_identity_id" not in creds["connector"]
     # The control identity's credential names the control identity; the
     # others appear only in the precondition that refuses them.
-    assert "parent_id           = var.control_identity_id" in creds["control"]
+    assert "user_assigned_identity_id = var.control_identity_id" in creds["control"]
     assert "var.control_identity_id" not in creds["reader"] + creds["connector"] + creds["writer"]
 
 
