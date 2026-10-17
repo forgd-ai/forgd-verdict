@@ -181,6 +181,15 @@ def test_without_a_subnet_the_cluster_keeps_its_system_assigned_identity(tmp_pat
 
 
 @requires_terraform
+def test_the_cluster_states_manual_provisioning_and_its_default_node_pools(tmp_path):
+    """Both written out, so a change in azurerm's defaults cannot change an
+    existing cluster."""
+    cluster = _stack(tmp_path)["azurerm_kubernetes_cluster.this"]
+    assert [(p["mode"], p["default_node_pools"])
+            for p in cluster["node_provisioning_profile"]] == [("Manual", "Auto")]
+
+
+@requires_terraform
 def test_without_a_subnet_the_plan_is_what_it_was_before_the_option(tmp_path):
     """So an existing cluster is not replaced. Mutation: switch the identity
     type, or set any network_profile range, with vnet_subnet_id unset."""

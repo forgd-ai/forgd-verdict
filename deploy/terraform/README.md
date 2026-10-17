@@ -1201,9 +1201,12 @@ then runs `terraform init -upgrade`. What the move asks of a deployment:
 - **Renamed arguments, handled inside the modules.** The federated
   credentials take `user_assigned_identity_id`, and their resource group
   comes from the identity. `cluster-aks` declares
-  `node_provisioning_profile { mode = "Manual" }`, which 5.x requires and
+  `node_provisioning_profile` with `mode = "Manual"`, which 5.x requires and
   which is what a 4.x cluster ran with: the default node pool and no node
-  auto-provisioning.
+  auto-provisioning. It also sets `default_node_pools = "Auto"`, azurerm 5's
+  default, which AKS reads only in `Auto` mode. Against a cluster created
+  under 4.x, the first plan updates the cluster in place to add it; on
+  forgd's lab that was the only change it planned.
 - **Validation moves to apply.** azurerm 5 no longer checks `location`
   and resource provider values against Azure's lists at plan time, so a
   mistyped region fails at apply instead.
