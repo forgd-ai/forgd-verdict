@@ -642,3 +642,24 @@ async def test_a_benign_tool_call_frame_allows(client):
         "ls -la reports/", {"type": "third_party", "toolset_name": "reports",
                             "origin": "https://mcp.example.com", "verified_origin": True}))
     assert status == 200 and verdict == {"action": "allow", "findings_count": 0}
+
+
+@pytest.mark.parametrize("frame_type, event", [
+    ("prompt", None), ("tool_call", "tool_call"), ("some_future_event", "other")])
+async def test_the_stored_record_names_a_frame_that_was_not_a_prompt(policy, frame_type,
+                                                                     event):
+    """Mutation: leave `event` off the row, or store an unknown type's raw
+    value."""
+    from forgd_verdict.store.base import verdict_from_log_row
+
+    server = VerdictServer(policy)
+    rows = []
+    server.sink.submit = lambda row, findings: rows.append(row)
+    try:
+        raw = json.dumps(frame(type=frame_type, messages=[text_msg("hello there")])).encode()
+        status, _ = await ASGIClient(server).post("/hook", raw, sign(raw))
+    finally:
+        server.close()
+    assert status == 200
+    assert rows[0].get("event") == event
+    assert verdict_from_log_row(rows[0]).event == event

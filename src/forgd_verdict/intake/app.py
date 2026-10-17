@@ -1181,7 +1181,7 @@ _SHIPPED_IDS = {
 # `hook/cli.py` `_spool` leaves them unset.
 _NOT_SHIPPED = ("reported_as", "session_started_at", "session_updated_at", "deleted_at",
                 "shadow_action", "cache_hit", "budget_exceeded", "scan_ms", "total_ms",
-                "body_bytes", "messages_total", "messages_scanned")
+                "body_bytes", "messages_total", "messages_scanned", "event")
 
 _ACTIONS = (ACTION_ALLOW, ACTION_DENY)
 # `hook/device.py` `salt_namespace`.

@@ -319,7 +319,7 @@ async def test_a_multi_org_fleet_tally_joins_its_session_to_one_org(tmp_path):
 def test_tally_rows_are_written_compactly():
     row = tally_mod.rows(("2026-10-05", PROD, (), "laptops", "d000000000001", _sid(1),
                           "claude-code-local"), 5, "2026-10-05T10:00:00Z")
-    assert len(row.to_json()) < 720
+    assert len(row.to_json()) < 740
 
 
 @pytest.mark.parametrize("value", [0, -5, 0.5, 10**6])

@@ -1495,3 +1495,42 @@ def test_one_value_on_two_laptops_is_two_per_laptop_values_for_its_family():
     assert {d.detector: d.device_salted for d in s.detectors} == {
         "regex:aws-access-key": 2, "gitleaks:aws-access-token": 2}
     assert families(s) == [("aws", 0)]
+
+
+# -- tool call frames ---------------------------------------------------------
+
+
+def test_a_tool_call_verdict_is_not_a_request_but_its_findings_count():
+    """A model response that calls tools is a prompt frame and a tool call
+    frame. Mutation: count the tool call verdict as a request, a deny in
+    the deny rate, or a latency sample; or drop its findings."""
+    from forgd_verdict.store.base import EVENT_TOOL_CALL
+
+    prompt = rec(total_ms=40.0)
+    tool = rec(action="deny", total_ms=900.0, event=EVENT_TOOL_CALL,
+               findings=[FindingRow("regex:aws-access-key", "block", "m", "toolhash")])
+    s = build_summary([prompt, tool])
+    assert (s.total_requests, s.live_requests) == (1, 1)
+    assert (s.tool_call_checks, s.tool_call_would_deny, s.tool_call_denied) == (1, 1, 1)
+    assert s.would_deny == 0 and s.deny_rate == 0
+    assert s.latency["max"] == 40.0
+    assert s.total_findings == 1 and s.distinct_values == 1
+    assert "toolhash" in s.reconciliation.live_value_hashes
+    assert [r.requests for r in s.surfaces] == [1]
+
+
+def test_only_the_inference_hook_s_tool_call_records_are_set_apart():
+    """A token writer's record cannot leave the request totals by naming the
+    event. Mutation: drop the source check."""
+    from forgd_verdict.store.base import EVENT_TOOL_CALL
+
+    s = build_summary([rec(source=SOURCE_CODE_HOOK, event=EVENT_TOOL_CALL)])
+    assert s.tool_call_checks == 0 and s.total_requests == 1
+
+
+def test_a_record_written_before_the_event_field_reads_as_a_prompt():
+    old = rec().to_json()
+    assert '"event"' in old
+    raw = json.loads(old)
+    del raw["event"]
+    assert VerdictRecord.from_json(json.dumps(raw)).event is None
