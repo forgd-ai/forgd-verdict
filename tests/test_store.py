@@ -159,14 +159,49 @@ def test_reconciliation_counts_what_the_live_path_missed():
     assert recon.missed_count == 1, "one value found post-hoc and never seen live"
 
 
-def test_denials_without_a_reference_are_reported_not_guessed():
-    recon = build_summary([], [
-        DenialRecord("a1", "2026-09-17T10:00:00Z", reference_id="fv_x_01"),
-        DenialRecord("a2", "2026-09-17T10:00:00Z", reference_id=None),
+def test_denials_join_by_request_id_then_by_reference_id():
+    """A denial matches a live verdict by Anthropic's request id; one with
+    no request id falls back to the reference id the verdict returned; one
+    matching neither is unmatched, however it is labelled. Mutation: count
+    a denial that carries a reference id as joined without matching it."""
+    live = [rec(action="deny", request_id="req_1", reference_id="fv_x_01"),
+            rec(action="deny", request_id="req_2", reference_id="fv_x_02")]
+    recon = build_summary(live, [
+        DenialRecord("a1", "2026-09-17T10:00:00Z", request_id="req_1"),
+        DenialRecord("a2", "2026-09-17T10:00:00Z", request_id="req_2", reference_id="fv_x_02"),
+        DenialRecord("a3", "2026-09-17T10:00:00Z", reference_id="fv_x_01"),
+        DenialRecord("a4", "2026-09-17T10:00:00Z", request_id="req_9", reference_id="fv_x_09"),
+        DenialRecord("a5", "2026-09-17T10:00:00Z"),
     ]).reconciliation
-    assert recon.denial_activities == 2
+    assert recon.denial_activities == 5
+    assert recon.joined_by_request_id == 2
     assert recon.joined_by_reference == 1
-    assert recon.denials_without_reference == 1
+    assert recon.denials_unmatched == 2
+    assert recon.denials_without_reference == 2
+
+
+def test_only_inference_hook_verdicts_are_joined_to():
+    """Mutation: collect the ids of every verdict."""
+    recon = build_summary([rec(source=SOURCE_CODE_HOOK, request_id="req_1")], [
+        DenialRecord("a1", "2026-09-17T10:00:00Z", request_id="req_1"),
+    ]).reconciliation
+    assert recon.denials_unmatched == 1 and recon.joined_by_request_id == 0
+
+
+def test_a_tool_call_denial_is_counted_and_an_absent_event_is_a_prompt():
+    recon = build_summary([], [
+        DenialRecord("a1", "2026-09-17T10:00:00Z", event="tool_call"),
+        DenialRecord("a2", "2026-09-17T10:00:00Z", event="prompt"),
+        DenialRecord("a3", "2026-09-17T10:00:00Z"),
+    ]).reconciliation
+    assert recon.denials_tool_call == 1
+
+
+def test_a_denial_stored_before_request_id_and_event_reads_back():
+    old = json.dumps({"activity_id": "a1", "created_at": "2026-09-17T10:00:00Z",
+                      "reference_id": "fv_x_01", "schema_version": 1})
+    d = DenialRecord.from_json(old)
+    assert (d.request_id, d.event, d.reference_id) == (None, None, "fv_x_01")
 
 
 def test_empty_store_summarizes_without_error():

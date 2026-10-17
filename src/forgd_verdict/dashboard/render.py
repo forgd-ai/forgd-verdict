@@ -866,10 +866,10 @@ def _recon_note(recon) -> str:
     """
     if not recon.scanned_sessions:
         return '<p class="status status-warn">Audit scan has not run</p>'
-    if recon.denials_without_reference:
+    if recon.denials_unmatched:
         return (
-            f'<p class="status status-warn">{recon.denials_without_reference} '
-            "denial record(s) could not be joined &mdash; no reference id</p>"
+            f'<p class="status status-warn">{recon.denials_unmatched} '
+            "denial record(s) match no verdict here, by request id or reference id</p>"
         )
     if recon.denial_activities:
         return (
@@ -1054,8 +1054,11 @@ def _reconciliation_aside(recon) -> str:
                    if recon.code_hook_withheld else ""))
         + _stat("Values missed live", f"{recon.missed_count:,}",
                 "not seen inline")
-        + _stat("Denials joined", f"{recon.joined_by_reference:,}",
-                f"of {recon.denial_activities:,} activity records")
+        + _stat("Denials joined",
+                f"{recon.joined_by_request_id + recon.joined_by_reference:,}",
+                f"of {recon.denial_activities:,} activity records"
+                + (f" · {recon.denials_tool_call:,} of tool calls"
+                   if recon.denials_tool_call else ""))
         + _recon_note(recon)
         + "</div></section>"
     )

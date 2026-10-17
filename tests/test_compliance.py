@@ -1280,3 +1280,20 @@ def test_spotcheck_reads_a_deleted_chat_while_its_messages_are_served(tmp_path, 
     stub = DeletedChatStub(status, chats=[DELETED], full={CHAT["id"]: chat_with("hello")})
     sample = sample_chats(chat_scanner(tmp_path, stub), "regex:aws-access-key")
     assert sample.sources_scanned == scanned
+
+
+@pytest.mark.parametrize("activity, request_id, event", [
+    ({"request_id": "req_abc", "event": "tool_call"}, "req_abc", "tool_call"),
+    ({"request_id": "req_abc"}, "req_abc", "prompt"),
+    ({"request_id": 7, "event": ["x"]}, None, "prompt"),
+], ids=["both", "event-absent", "malformed"])
+def test_a_stored_denial_carries_the_request_id_and_the_event(scanner, activity, request_id,
+                                                              event):
+    """Mutation: leave either out of activity_to_denial, or default event
+    to anything but prompt."""
+    from forgd_verdict.compliance.ingest import activity_to_denial
+
+    scan, _stub = scanner
+    denial = activity_to_denial({**DENIAL, **activity}, scan)
+    assert (denial.request_id, denial.event) == (request_id, event)
+    assert denial.reference_id == DENIAL["reference_id"]

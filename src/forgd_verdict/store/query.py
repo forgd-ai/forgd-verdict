@@ -314,9 +314,16 @@ class Reconciliation:
     # A PostToolUse deny: the tool had already run, so it withheld the
     # output from the model rather than stopping anything.
     code_hook_withheld: int = 0
+    # Anthropic's denial records, each matched to an inference-hook verdict
+    # by Anthropic's request id, else by the reference id the verdict
+    # returned. A match by neither is unmatched.
     denial_activities: int = 0
+    joined_by_request_id: int = 0
     joined_by_reference: int = 0
+    denials_unmatched: int = 0
     denials_without_reference: int = 0
+    # Denials of a tool call frame: tool calls stopped, not a prompt.
+    denials_tool_call: int = 0
     # Findings from tiers the inline path does not run at all. Reported
     # separately so the coverage the post-hoc scan adds stays visible without
     # being miscounted as an inline failure.
@@ -604,6 +611,9 @@ def build_summary(
     slowest_rec: VerdictRecord | None = None
     recon = out.reconciliation
     seen_values: set[str] = set()
+    # The ids of the inference-hook verdicts, for matching Anthropic's denials.
+    live_request_ids: set[str] = set()
+    live_reference_ids: set[str] = set()
     device_values: set[tuple[str, str]] = set()
 
     for v in verdicts:
@@ -705,6 +715,10 @@ def build_summary(
         if v.source == SOURCE_INFERENCE_HOOK:
             out.live_requests += 1
             recon.live_requests += 1
+            if v.request_id:
+                live_request_ids.add(v.request_id)
+            if v.reference_id:
+                live_reference_ids.add(v.reference_id)
             if effective == "deny":
                 recon.live_would_deny += 1
             recon.live_value_hashes.update(f.excerpt_hash for f in v.findings)
@@ -738,10 +752,16 @@ def build_summary(
         if since and d.created_at < since:
             continue
         recon.denial_activities += 1
-        if d.reference_id:
+        if d.event == "tool_call":
+            recon.denials_tool_call += 1
+        if not d.reference_id:
+            recon.denials_without_reference += 1
+        if d.request_id and d.request_id in live_request_ids:
+            recon.joined_by_request_id += 1
+        elif d.reference_id and d.reference_id in live_reference_ids:
             recon.joined_by_reference += 1
         else:
-            recon.denials_without_reference += 1
+            recon.denials_unmatched += 1
 
     out.distinct_values = len(seen_values)
     out.device_salted_values = len(device_values)

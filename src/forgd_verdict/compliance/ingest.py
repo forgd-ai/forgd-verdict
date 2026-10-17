@@ -97,6 +97,14 @@ def chat_to_record(
     )
 
 
+# The denial activity's `event` when it names none.
+EVENT_PROMPT = "prompt"
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def activity_to_denial(
     activity: dict[str, Any],
     scanner: ComplianceScanner,
@@ -108,6 +116,8 @@ def activity_to_denial(
         activity_id=str(activity.get("id") or ""),
         created_at=str(activity.get("created_at") or ""),
         reference_id=scanner.extract_reference_id(activity),
+        request_id=_text(activity.get("request_id")),
+        event=_text(activity.get("event")) or EVENT_PROMPT,
         tenant_hash=pseudonym(org_id, salt, "org"),
         actor_hash=pseudonym(
             actor.get("user_id") or actor.get("email_address"), salt, "user"

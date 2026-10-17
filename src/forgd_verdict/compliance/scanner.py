@@ -739,6 +739,9 @@ class ComplianceScanner:
 
         return {
             "denial_activities": len(activities),
+            "with_request_id": sum(1 for a in activities
+                                   if isinstance(a.get("request_id"), str) and a["request_id"]),
+            "tool_call": sum(1 for a in activities if a.get("event") == "tool_call"),
             "with_reference_id": len(by_reference),
             "without_reference_id": unjoinable,
             "reference_ids": sorted(by_reference),

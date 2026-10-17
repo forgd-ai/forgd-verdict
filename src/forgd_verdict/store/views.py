@@ -123,8 +123,11 @@ def summary_payload(s: Summary, window: str) -> dict[str, Any]:
             "code_hook_denied": s.reconciliation.code_hook_denied,
             "values_missed_live": s.reconciliation.missed_count,
             "denial_activities": s.reconciliation.denial_activities,
+            "joined_by_request_id": s.reconciliation.joined_by_request_id,
             "joined_by_reference": s.reconciliation.joined_by_reference,
+            "denials_unmatched": s.reconciliation.denials_unmatched,
             "denials_without_reference": s.reconciliation.denials_without_reference,
+            "denials_tool_call": s.reconciliation.denials_tool_call,
         },
     }
 

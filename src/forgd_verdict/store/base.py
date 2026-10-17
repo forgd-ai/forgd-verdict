@@ -466,6 +466,11 @@ class DenialRecord:
     created_at: str
     reference_id: str | None = None
     actor_hash: str | None = None
+    # Anthropic's id for the denied request, the frame's own `request_id`,
+    # and the frame type that was denied, `prompt` or `tool_call`. None on
+    # a denial stored before they were read; a None `event` is a prompt.
+    request_id: str | None = None
+    event: str | None = None
     # Added with the org partition so denials land beside the verdicts they
     # join to. Populated when adapter 3 knows which org it scanned;
     # otherwise a denial partitions as unattributed.
