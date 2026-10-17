@@ -244,11 +244,12 @@ show:
   `subtype: "success", is_error: false`, and the block appeared only in the
   result text. A caller that checks `is_error` counts a DLP block as a
   success.
-- **A block stops the model call, not session-title generation.** In
-  session mode the CLI sends the first prompt to a `generate_session_title`
-  request in parallel with `UserPromptSubmit`, 540 ms before the block landed
-  in the reproduction. No documented setting turns it off. On an API key
-  no forgd-verdict adapter sees that request. To check a newer release, see
+- **Before Claude Code 2.1.302, a block did not stop session-title
+  generation.** With 2.1.280, in session mode, the CLI sent the first prompt
+  to a `generate_session_title` request in parallel with `UserPromptSubmit`,
+  540 ms before the block landed in the reproduction. With 2.1.302 the title
+  request waits for the hook and a block stops it. On an API key no
+  forgd-verdict adapter sees that request. To check a release, see
   [Reproducing the session-title request](#reproducing-the-session-title-request).
 - **`settingSources: []` disables project hooks.** A `.claude/settings.json`
   hook runs only when settings are loaded, and a container has no settings
@@ -279,9 +280,12 @@ of a block:
 
 With 2.1.280 the blocked run logged one request,
 `source=generate_session_title`, and the run without the hook logged
-`generate_session_title` and two `sdk` requests. A release that logs none
-in the blocked run gates the title behind the hook; record its version in
-this section and in [PLATFORM.md](PLATFORM.md#adapter-2--claude-code-hook-cli).
+`generate_session_title` and two `sdk` requests. With 2.1.302 (SDK 0.3.302)
+the blocked run logged none, also with a hook that waits two seconds before
+it blocks, and the run without the hook logged `generate_session_title` and
+`sdk` together. A release that logs a request in the blocked run sends the
+title ahead of the hook again; record its version in this section and in
+[PLATFORM.md](PLATFORM.md#adapter-2--claude-code-hook-cli).
 Use a prompt with nothing sensitive in it: the title request carries it.
 
 ## OTel: a row per agent
