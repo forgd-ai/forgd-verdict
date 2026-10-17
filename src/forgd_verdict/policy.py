@@ -1448,7 +1448,8 @@ def _redact_org_ids(effective: dict[str, Any]) -> None:
             if isinstance(entry.get("workspaces"), list):
                 entry["workspaces"] = [WORKSPACE_KEY_PLACEHOLDER for _ in entry["workspaces"]]
     intake = section("intake")
-    for entry in items(intake.get("fleet")) + items(intake.get("clients")):
+    for entry in (items(intake.get("fleet")) + items(intake.get("clients"))
+                  + items(intake.get("devices"))):
         if "org" in entry:
             entry["org"] = _redact_org_id(entry["org"])
         if isinstance(entry.get("orgs"), list):

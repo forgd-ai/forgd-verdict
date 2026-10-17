@@ -65,7 +65,8 @@ def _warn_direct_store(spec: str) -> None:
 
 
 def ship_to_endpoint(url: str, token: str | None, timeout_s: float = 20.0,
-                     ca_file: str | None = None, device: str | None = None) -> callable:
+                     ca_file: str | None = None, device: str | None = None,
+                     signer=None) -> callable:
     def _ship(records: Sequence[VerdictRecord]) -> bool:
         refused = refusal(url)
         if refused:
@@ -77,7 +78,10 @@ def ship_to_endpoint(url: str, token: str | None, timeout_s: float = 20.0,
             "content-type": "application/x-ndjson",
             "user-agent": USER_AGENT,
         }
-        if token:
+        if signer is not None:
+            # The certificate names the device; DEVICE_HEADER is not read.
+            headers["authorization"] = signer(body, "intake")
+        elif token:
             headers["authorization"] = f"Bearer {token}"
         if device:
             headers[DEVICE_HEADER] = device
@@ -137,14 +141,17 @@ def run_ship(
     spool = Spool(spool_root or trusted_spool_root(policy))
 
     if endpoint:
-        if not token:
+        from .devicesign import device_signer
+
+        signer = device_signer(hook_cfg)
+        if not token and signer is None:
             print("forgd-verdict: hook.ship_endpoint is set but hook.ship_token resolves to "
                   "nothing; the intake refuses an unauthenticated batch and the records "
                   "stay spooled", file=sys.stderr)
         root = Path(spool_root).parent if spool_root else None
         ship = ship_to_endpoint(endpoint, token, ca_file=hook_cfg.get("ca_file") or None,
-                                device=hook_device_id(policy, root))
-        target = {"endpoint": endpoint, "authenticated": bool(token)}
+                                device=hook_device_id(policy, root), signer=signer)
+        target = {"endpoint": endpoint, "authenticated": bool(token) or signer is not None}
     elif (store_spec and (not from_argv or _windows_hook())
           and _remote_store(str(store_spec), policy) and not overrides(policy)):
         # Remote store SDKs take credentials, endpoints, CA bundles and

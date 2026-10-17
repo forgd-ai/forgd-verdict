@@ -411,6 +411,84 @@ paths in both cases. Claude Code runs the hook with the session's environment,
 including the `env` block of the project's `.claude/settings.json`, so
 `PATH` is whatever the project sets.
 
+## Device certificates instead of the fleet token
+
+An organization that already issues device certificates through MDM can
+have each laptop prove which device it is, rather than share the fleet
+token. The hook signs each request to the intake with the device's key,
+and the intake checks the certificate against the organization's CA.
+
+On the intake, list the CA under `intake.devices`:
+
+```yaml
+intake:
+  devices:
+    - name: corp-macs
+      routes: [intake, scan]
+      org: $FORGD_ORG_ID_PRIMARY
+      ca_file: /etc/forgd/device-ca.pem      # the CA certificates devices chain to
+      eku: 1.3.6.1.5.5.7.3.2                 # clientAuth, the default
+      device_id_from: san_uri                # or san_dns, subject_cn
+      device_id_prefix: "urn:forgd:device:"
+      max_skew_s: 300
+```
+
+Each certificate must chain to a CA in `ca_file`, carry the `eku`, be
+within its validity dates, and name exactly one device id, `d` and twelve
+hex digits, in the field `device_id_from` names once `device_id_prefix` is
+removed. Records file under the entry's org, with the device id from the
+certificate; the `X-Forgd-Device` header is not read.
+
+On each laptop, point the hook at the certificate and its key, both PEM:
+
+```yaml
+hook:
+  ship_endpoint: https://intake.example.com/intake
+  device_certificate:
+    cert_file: /Library/Application Support/forgd/device.pem   # leaf, then intermediates
+    key_file:  /Library/Application Support/forgd/device.key
+```
+
+The paths are read as written and must be absolute: the hook runs in the
+project's directory, so a relative path would name a file the repository
+supplies. A `$VAR` placeholder is refused, because a project's environment
+can set it. With a device certificate the hook does not send
+`hook.ship_token` or `hook.scan_token`. Each `intake.devices` entry needs
+its own issuing CA: two entries that list the same CA certificate refuse
+to start, and a certificate that proves two entries is refused.
+
+**The key must be a file the hook can read, and the hook runs as the
+developer.** So the developer can read the key too. That gives each batch
+a device the developer cannot pick, which a shared fleet token does not,
+and no more secrecy than a per-device token: whoever copies the file can
+sign as that device until its certificate expires. A key held by the
+Secure Enclave or a TPM, which cannot be exported, is not used. Issue the
+certificate and key to a root-owned directory, with the key readable by
+the developer's account alone (mode 0400 owned by that user on macOS, an
+ACL granting only that user read on Windows), so other local accounts
+cannot copy it. Add the key's path to the managed `permissions.deny`
+`Read(...)` rules in [Keeping sensitive files out of Claude's
+reads](#keeping-sensitive-files-out-of-claudes-reads), so Claude does not
+read it into a conversation.
+
+**Revocation** is a short lifetime, days rather than a year, renewed by
+MDM, and `forgd-verdict overrides deny-device <id>` for a device to cut off
+at once. The intake fetches no CRL or OCSP response.
+
+The certificate and key must reach the laptop as files. A certificate
+profile that puts the key in the keychain or the Windows certificate store
+usually marks it non-exportable, and then no script can write the PEM key
+the hook needs; the hook then falls back to its token, if it has one, and
+says so on stderr. Issue the key in a form you can deliver as a file:
+
+- **Jamf Pro.** Generate the key and a request on the device with a policy
+  script, have Jamf's built-in CA or AD CS sign it with the device id in a
+  SAN URI `urn:forgd:device:d<12 hex>`, and write both PEM files.
+- **Intune.** Use a PKCS certificate profile whose template allows key
+  export, against Cloud PKI or AD CS, with the SAN URI set from a device
+  attribute, and a remediation script that exports it to the two PEM files.
+  Without an exportable template, issue it with a script instead.
+
 ## Checking who can write it
 
 Run as an administrator on a target machine. On macOS and Linux:

@@ -55,6 +55,8 @@ from ..store.base import (
 )
 from ..store.tally import Tally, is_clean_allow, tallied, weight
 from . import PATH_INTAKE, PATH_SCAN
+from .devicecert import SCHEME as DEVICE_SCHEME
+from .devicecert import body_digest
 from .verify import ON_ERROR_HEADER, ROUTES, Caller, _equal, verifiers, verify
 
 __all__ = ["ROUTES", "Intake", "create_app"]
@@ -570,6 +572,8 @@ class Intake:
             self.bump("scan_too_large")
             await self._json(send, 413, {"error": "payload_too_large"})
             return
+        if not await self._body_signed(conf, body, send):
+            return
         lane = self._lane(len(body))
 
         try:
@@ -833,6 +837,8 @@ class Intake:
         client = conf.name
 
         body, oversized = await _read_body(receive, self.max_body)
+        if not oversized and not await self._body_signed(conf, body, send):
+            return
         if oversized:
             self.bump("too_large")
             await self._json(send, 413, {"error": "payload_too_large"})
@@ -988,8 +994,15 @@ class Intake:
         operator reading a 401 would go looking for a wrong token rather
         than a missing scope.
         """
-        client = verify(self.verifiers, headers)
-        if client is None:
+        if headers.get("authorization", "").startswith(DEVICE_SCHEME + " "):
+            # A certificate chain's verification is CPU work an unauthenticated
+            # caller chooses, so it runs off the event loop.
+            client = await asyncio.to_thread(verify, self.verifiers, headers)
+        else:
+            client = verify(self.verifiers, headers)
+        if client is None or (client.route is not None and client.route != route):
+            # A device-signed request names its route, so one signed for
+            # /scan cannot be replayed to /intake.
             self.bump("unauthorized")
             await self._json(send, 401, {"error": "unauthorized"})
             return None
@@ -1010,6 +1023,18 @@ class Intake:
             return None
         self._note_device(client)
         return client
+
+    async def _body_signed(self, client: Caller, body: bytes, send: Callable) -> bool:
+        """Whether a device-signed request's body is the one it signed; a
+        bearer-token request always is. Answers 401 when it is not."""
+        if client.body_sha256 is None:
+            return True
+        if _equal(body_digest(body), client.body_sha256):
+            return True
+        self.bump("unauthorized")
+        self.bump("device_body_mismatch")
+        await self._json(send, 401, {"error": "unauthorized"})
+        return False
 
     def _stats_authorized(self, headers: dict[str, str]) -> int:
         """200 to serve, 404 when disabled, 401 on a bad token."""
