@@ -85,7 +85,7 @@ locals {
 }
 
 module "store" {
-  source = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/store-azure?ref=v1.1.0"
+  source = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/store-azure?ref=v1.1.1"
 
   resource_group_name  = var.resource_group_name
   location             = local.location
@@ -105,7 +105,7 @@ module "store" {
 # Nothing else references it, so turning it off destroys only these three
 # resources and leaves the findings store alone.
 module "monitor" {
-  source = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/monitor-azure?ref=v1.1.0"
+  source = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/monitor-azure?ref=v1.1.1"
   count  = var.enable_azure_monitor ? 1 : 0
 
   resource_group_name = var.resource_group_name
@@ -117,7 +117,7 @@ module "monitor" {
 }
 
 module "cluster" {
-  source = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/cluster-aks?ref=v1.1.0"
+  source = "git::https://github.com/forgd-ai/forgd-verdict.git//deploy/terraform/modules/cluster-aks?ref=v1.1.1"
 
   resource_group_name = var.resource_group_name
   location            = local.location
