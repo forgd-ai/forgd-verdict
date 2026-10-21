@@ -30,7 +30,7 @@ ARG GITLEAKS_VERSION=8.30.1
 # 0.52 needs 1.25 or later (see sidecar go.mod).
 # Both base images are pinned to the digest of their multi-arch index;
 # Dependabot's docker ecosystem moves the digest when the tag does.
-FROM golang:1.26-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS gitleaksd
+FROM golang:1.26-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS gitleaksd
 WORKDIR /build
 COPY sidecar/gitleaksd/go.mod sidecar/gitleaksd/go.sum ./
 RUN go mod download
@@ -47,7 +47,7 @@ RUN sh /tmp/collect_go_licenses.sh /out/gitleaksd /out/licenses
 # govulncheck flags in the release binary; its go.sum pins the source by
 # checksum. The build tag and the version ldflag are the upstream release
 # build's (.goreleaser.yml).
-FROM golang:1.26-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS gitleaks
+FROM golang:1.26-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS gitleaks
 ARG GITLEAKS_VERSION
 WORKDIR /build
 COPY deploy/gitleaks-cli/go.mod deploy/gitleaks-cli/go.sum ./
