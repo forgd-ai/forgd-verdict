@@ -83,7 +83,7 @@ jobs:
         run: |
           set -eux
           tgz=/tmp/helm.tar.gz
-          curl -fsSL -o "$tgz" \
+          curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$tgz" \
             "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
           echo "${HELM_SHA256}  $tgz" | sha256sum --check --strict
           tar -xzf "$tgz" -C /tmp linux-amd64/helm

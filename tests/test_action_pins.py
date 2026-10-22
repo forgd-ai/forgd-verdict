@@ -187,3 +187,23 @@ def test_install_gitleaks_verifies_the_checksum_on_a_cache_hit_too():
     assert "tar -xzf" in check["run"]
     [download] = [s for s in steps if "curl " in s.get("run", "")]
     assert "--retry-all-errors" in download["run"]
+
+
+CURL = re.compile(r"\bcurl\b(?:\\\n|[^\n])*")
+DOWNLOAD = re.compile(r"\s-o\s+(?!/dev/null)\S+")
+
+
+def test_every_curl_download_in_a_workflow_retries():
+    """A curl that saves a file from an https URL retries on any error, so a
+    TLS or connection failure on one attempt does not fail the job."""
+    found, missing = 0, []
+    for path in FILES:
+        for match in CURL.finditer(path.read_text(encoding="utf-8")):
+            command = match.group(0)
+            if "https://" not in command or not DOWNLOAD.search(command):
+                continue
+            found += 1
+            if "--retry-all-errors" not in command:
+                missing.append(f"{path.relative_to(REPO)}: {command.splitlines()[0].strip()}")
+    assert found >= 4
+    assert missing == []
