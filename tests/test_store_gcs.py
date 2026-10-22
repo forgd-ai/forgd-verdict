@@ -67,13 +67,13 @@ def test_the_client_uses_application_default_credentials(gcs):
     assert gcs.clients[-1].kwargs == {"project": None}
 
 
-def test_importing_the_store_package_does_not_import_the_gcs_sdk():
+def test_importing_the_store_package_does_not_import_the_gcs_sdk(tmp_path):
     code = (
-        "import sys, forgd_verdict.store as s; s.open_store('/tmp/x'); "
+        "import sys, forgd_verdict.store as s; s.open_store(sys.argv[1]); "
         "assert 'forgd_verdict.store.gcs' not in sys.modules; "
         "assert 'google.cloud.storage' not in sys.modules"
     )
-    subprocess.run([sys.executable, "-c", code], check=True)
+    subprocess.run([sys.executable, "-c", code, str(tmp_path / "store")], check=True)
 
 
 def test_a_missing_extra_names_it(monkeypatch):
