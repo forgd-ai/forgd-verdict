@@ -249,7 +249,7 @@ def test_no_expression_is_interpolated_into_a_shell(path):
 @pytest.mark.parametrize("path", [CI, DEPLOY], ids=lambda p: p.name)
 def test_downloads_are_checksummed(path):
     text = path.read_text(encoding="utf-8")
-    assert text.count("curl -fsSL -o") == text.count("sha256sum --check --strict")
+    assert len(re.findall(r"curl -fsSL[^\n]* -o ", text)) == text.count("sha256sum --check --strict")
 
 
 def test_every_deploy_variable_is_described_in_its_header():
