@@ -33,7 +33,9 @@ ARG GITLEAKS_VERSION=8.30.1
 FROM golang:1.26-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS gitleaksd
 WORKDIR /build
 COPY sidecar/gitleaksd/go.mod sidecar/gitleaksd/go.sum ./
-RUN go mod download
+# go mod download has no retry of its own; a stream error from the module
+# proxy on one attempt failed the build.
+RUN for i in 1 2 3 4 5; do go mod download && exit 0; sleep $((i * 5)); done; exit 1
 COPY sidecar/gitleaksd/main.go ./
 # Static, so it runs in the slim image without a libc match.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gitleaksd .
@@ -51,7 +53,7 @@ FROM golang:1.26-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cd
 ARG GITLEAKS_VERSION
 WORKDIR /build
 COPY deploy/gitleaks-cli/go.mod deploy/gitleaks-cli/go.sum ./
-RUN go mod download
+RUN for i in 1 2 3 4 5; do go mod download && exit 0; sleep $((i * 5)); done; exit 1
 # -w without -s: the symbol table is kept so `govulncheck -mode=binary`
 # resolves symbols.
 RUN CGO_ENABLED=0 go build -trimpath -tags gore2regex \

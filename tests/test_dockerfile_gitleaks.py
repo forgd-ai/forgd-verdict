@@ -41,3 +41,10 @@ def test_the_link_is_made_as_root():
     body = _base()
     link = body.index("ln -s /usr/local/bin/gitleaks")
     assert "USER " not in body[:link]
+
+
+def test_every_go_mod_download_retries():
+    downloads = re.findall(r"(?m)^RUN .*\bgo mod download\b.*$", DOCKERFILE)
+    assert len(downloads) == 2
+    for line in downloads:
+        assert line.startswith("RUN for i in 1 2 3 4 5; do go mod download && exit 0;"), line
