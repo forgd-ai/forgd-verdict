@@ -9,7 +9,47 @@ source. Egress is left alone.
 */}}
 {{- $np := .Values.networkPolicy }}
 {{- $ic := $np.ingressController }}
-{{- if not (or $ic.namespaceSelector $ic.podSelector $np.extraFrom) }}
+{{- $agcMode := include "forgd-verdict.agc" . }}
+{{- $dp := $np.agc.dashboardProxy }}
+{{- if $agcMode }}
+{{/*
+AGC MODE. AGC sends traffic and probes from its delegated subnet straight
+to pod IPs: the subnet is admitted to every role but the dashboard, and the
+dashboard admits only oauth2-proxy's pods (and dashboardExtraFrom), so a
+request that does not pass the proxy cannot reach it.
+*/}}
+{{- if or $ic.namespaceSelector $ic.podSelector }}
+{{- fail "networkPolicy.ingressController does not apply in ingress.mode agc: AGC reaches pods from its subnet, with no controller in the data path. Set networkPolicy.agc.subnetCidr, and networkPolicy.agc.dashboardProxy for oauth2-proxy." }}
+{{- end }}
+{{- if not $np.agc.subnetCidr }}
+{{- fail "networkPolicy.enabled in ingress.mode agc needs networkPolicy.agc.subnetCidr, network-azure's agc_subnet_cidr. Without it every routed role refuses AGC's traffic and its health probes." }}
+{{- end }}
+{{- if and .Values.dashboard.enabled .Values.ingress.dashboard.enabled (not $dp.podSelector) }}
+{{- fail "networkPolicy.enabled in ingress.mode agc with the dashboard routed needs networkPolicy.agc.dashboardProxy.podSelector, oauth2-proxy's pods: the dashboard admits the proxy and nothing else, and with no selector it would refuse the proxy too." }}
+{{- end }}
+{{- with $dp.podSelector }}
+{{- if or .matchExpressions (not .matchLabels) }}
+{{- fail "networkPolicy.agc.dashboardProxy.podSelector takes matchLabels only, so the chart can check that it does not select this release's own pods." }}
+{{- end }}
+{{/*
+A selector matches a pod when every one of its labels is on the pod. One
+whose every label is one this chart sets on its own pods -- its standard
+labels, a role's component, the workload identity label, or any podLabels
+entry -- would admit them to the dashboard, past oauth2-proxy.
+*/}}
+{{- $own := dict "helm.sh/chart" (printf "%s-%s" $.Chart.Name $.Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-") "app.kubernetes.io/name" (include "forgd-verdict.name" $) "app.kubernetes.io/instance" $.Release.Name "app.kubernetes.io/version" $.Chart.AppVersion "app.kubernetes.io/managed-by" $.Release.Service "azure.workload.identity/use" "true" }}
+{{- range $k, $v := $.Values.podLabels }}{{ $_ := set $own $k $v }}{{ end }}
+{{- $ownCount := 0 }}
+{{- range $k, $v := .matchLabels }}
+{{- if or (and (hasKey $own $k) (eq (toString (get $own $k)) (toString $v))) (and (eq $k "app.kubernetes.io/component") (has (toString $v) (list "verdict" "collector" "dashboard" "intake" "connector" "ingest"))) }}
+{{- $ownCount = add1 $ownCount }}
+{{- end }}
+{{- end }}
+{{- if eq (int $ownCount) (len .matchLabels) }}
+{{- fail "networkPolicy.agc.dashboardProxy.podSelector selects this release's own pods: every label in it is one the chart sets on them, so they would reach the dashboard past oauth2-proxy. Select oauth2-proxy's pods by a label of their own, such as app.kubernetes.io/name: oauth2-proxy." }}
+{{- end }}
+{{- end }}
+{{- else if not (or $ic.namespaceSelector $ic.podSelector $np.extraFrom) }}
 {{- fail "networkPolicy.enabled needs networkPolicy.ingressController.namespaceSelector and podSelector, the ingress controller's namespace and pods, or networkPolicy.extraFrom for a load balancer that reaches the pods directly (and networkPolicy.dashboardExtraFrom for the dashboard). With neither, every role would refuse all traffic." }}
 {{- end }}
 {{- if and (or $ic.namespaceSelector $ic.podSelector) (not (and $ic.namespaceSelector $ic.podSelector)) }}
@@ -37,14 +77,24 @@ spec:
   policyTypes:
     - Ingress
   {{- $extra := ternary $np.dashboardExtraFrom $np.extraFrom (eq $role "dashboard") }}
-  {{- if or $ic.namespaceSelector $extra }}
+  {{- $sel := $ic }}
+  {{- if $agcMode }}
+  {{- $proxy := dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $.Release.Namespace)) "podSelector" $dp.podSelector }}
+  {{- $sel = ternary $proxy (dict) (and (eq $role "dashboard") (not (empty $dp.podSelector))) }}
+  {{- end }}
+  {{- $agcSubnet := and $agcMode (ne $role "dashboard") }}
+  {{- if or $sel.namespaceSelector $agcSubnet $extra }}
   ingress:
     - from:
-        {{- if $ic.namespaceSelector }}
+        {{- if $sel.namespaceSelector }}
         - namespaceSelector:
-            {{- toYaml $ic.namespaceSelector | nindent 12 }}
+            {{- toYaml $sel.namespaceSelector | nindent 12 }}
           podSelector:
-            {{- toYaml $ic.podSelector | nindent 12 }}
+            {{- toYaml $sel.podSelector | nindent 12 }}
+        {{- end }}
+        {{- if $agcSubnet }}
+        - ipBlock:
+            cidr: {{ $np.agc.subnetCidr }}
         {{- end }}
         {{- with $extra }}
         {{- toYaml . | nindent 8 }}

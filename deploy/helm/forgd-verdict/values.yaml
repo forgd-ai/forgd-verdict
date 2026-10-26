@@ -606,6 +606,10 @@ ingest:
 
 ingress:
   enabled: true
+  # "nginx" (the default), "gke", or "agc" (Application Gateway for
+  # Containers; docs/design/agc.md). Empty is "gke" when className is gce,
+  # as before, and "nginx" otherwise.
+  mode: ""
   className: nginx
   # One hostname, path-routed. /hook reaches the verdict server, /v1/* the
   # collector, everything else the dashboard.
@@ -711,6 +715,37 @@ ingress:
         # A secret holding client_id and client_secret for a custom OAuth
         # client. Empty uses the Google-managed client.
         secretName: ""
+  # AGC only: ingress.mode agc. A Gateway and HTTPRoutes in place of the
+  # Ingress objects, each route under the WAF policy its paths need. The
+  # values come from cluster-aks's outputs with ingress = "agc". See
+  # templates/gateway.yaml and docs/design/agc.md.
+  agc:
+    # cluster-aks's alb_id and alb_frontend_name.
+    albId: ""
+    frontend: ""
+    # cluster-aks's waf_policy_ids. Every routed role needs its policy:
+    # protected for the dashboard, connector for the connector, hook for
+    # /hook, api for /v1, /intake, /scan and the diagnostic paths.
+    wafPolicies:
+      protected: ""
+      connector: ""
+      hook: ""
+      api: ""
+    # AGC's default request timeout is 60 s, and it runs while a body is
+    # still arriving. OTLP batches and hook frames from a slow link can take
+    # longer.
+    publicRequestTimeout: 300s
+    # oauth2-proxy's Service, in this release's namespace, in upstream mode
+    # in front of the dashboard (deploy/helm/README.md). AGC has no auth
+    # subrequest, so the dashboard route goes to the proxy and the proxy
+    # forwards signed-in requests to the dashboard. Required while the
+    # dashboard is routed.
+    dashboardBackend:
+      name: ""
+      port: 80
+      # oauth2-proxy's health endpoint, which AGC probes in place of the
+      # dashboard's own.
+      healthPath: /ping
 
 # --- network policy ------------------------------------------------------
 # One NetworkPolicy per role with a Service (verdict, collector, dashboard,
@@ -765,6 +800,26 @@ networkPolicy:
   # that targets pod IPs and strips it itself, with an ipBlock that holds
   # nothing else.
   dashboardExtraFromTrustedAcknowledged: false
+  # ingress.mode agc. AGC sends traffic and health probes from its
+  # delegated subnet straight to pod IPs, so there is no ingress controller
+  # to select, and networkPolicy.ingressController is refused.
+  agc:
+    # network-azure's agc_subnet_cidr. Admitted to the verdict server, the
+    # collector, the intake and the connector.
+    subnetCidr: ""
+    # oauth2-proxy's pods, in this release's namespace (an HTTPRoute's
+    # backend is in the route's namespace): the only peer the dashboard
+    # admits. matchLabels only, so the chart can check it: a selector whose
+    # every label is one this chart puts on its own pods is refused.
+    #   podSelector:
+    #     matchLabels: {app.kubernetes.io/name: oauth2-proxy}
+    dashboardProxy:
+      podSelector: {}
+  # ingress.mode agc with the dashboard routed needs enabled: true, with no
+  # exception: the policy is what keeps every pod but oauth2-proxy away from
+  # the dashboard. With the dashboard not routed, this lets agc mode render
+  # without a policy, for a cluster that limits pod traffic another way.
+  agcWithoutPolicyAcknowledged: false
 
 # A PodDisruptionBudget would be wrong here. Every role runs one replica by
 # design, so a budget of minAvailable: 1 blocks node drains permanently and

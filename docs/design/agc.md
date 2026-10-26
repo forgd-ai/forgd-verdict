@@ -212,7 +212,7 @@ refused.
 | `diagnostics` | `host`, `extraHosts` | `/healthz`, `/metrics` (verdict), `/health`, `/stats` (collector), if `ingress.diagnostics.enabled` | verdict, collector | `api` |
 | `dashboard` | `dashboard.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/` (prefix) | `ingress.agc.dashboardBackend` (oauth2-proxy) | `protected` |
 | `connector` | `connector.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/mcp` and `/.well-known/oauth-protected-resource/mcp`, both exact, on either kind of host | connector | `connector` |
-| `redirect` | every host | port 80, everything except `/.well-known/acme-challenge/` | 301 to HTTPS | none (no backend) |
+| `redirect` | every host | port 80, `/`; cert-manager's own solver route for `/.well-known/acme-challenge/<token>` is longer and wins | 301 to HTTPS | none (no backend) |
 
 - every collision check the Ingress template makes today, on the same
   values: `extraHosts` repeating `host`, `dashboard.host` or `connector.host`
@@ -240,7 +240,7 @@ certificate Secret:
 
 | `ingress.tls` | Listener `certificateRefs` | Issued by |
 |---|---|---|
-| `enabled`, `clusterIssuer` set | `<release>-tls-<n>` per host, one SAN each | cert-manager, from the Gateway's `cert-manager.io/cluster-issuer` annotation, HTTP-01 through the `redirect` route's exempt path |
+| `enabled`, `clusterIssuer` set | `<release>-tls-<n>` per host, one SAN each | cert-manager, from the Gateway's `cert-manager.io/cluster-issuer` annotation, HTTP-01 through cert-manager's solver route on the port-80 listener |
 | `enabled`, `secretName` set | `secretName` on every listener; it must cover every host | the operator |
 | `enabled`, neither set | fails, as today | |
 | `enabled: false` | fails in `agc` mode | an HTTP-only listener would carry bearer tokens in clear |
@@ -250,25 +250,26 @@ certificate Secret:
   as an `ipBlock` to the pods behind the public, diagnostics and connector
   routes: verdict, collector, intake, connector. AGC sends data traffic and
   probes from that subnet.
-- The dashboard pods admit only `networkPolicy.agc.dashboardProxy`
-  (oauth2-proxy's `namespaceSelector` and `podSelector`). The AGC subnet is
-  admitted to oauth2-proxy by oauth2-proxy's own NetworkPolicy, which the
-  README's install command sets.
+- The dashboard pods admit only oauth2-proxy's pods: the chart pins the
+  namespace to the release's (an HTTPRoute's backend Service is in the
+  route's namespace) and takes `networkPolicy.agc.dashboardProxy.podSelector`.
+  The selector is `matchLabels` only, and one whose every label is one the
+  chart sets on its own pods is refused, since those pods would then reach
+  the dashboard past the proxy. If oauth2-proxy's pods run under a
+  NetworkPolicy of their own, it admits the AGC subnet.
 - `networkPolicy.ingressController` is refused in `agc` mode. There is no
   controller in the data path.
-- The `trusted_header` checks in `dashboard.yaml` accept
-  `networkPolicy.agc.dashboardProxy` as the proxy peer in `agc` mode, in
-  place of `ingressController`.
-- `networkPolicy.extraFrom` and `networkPolicy.dashboardExtraFrom` keep
-  their meaning: extra peers beside the AGC subnet for the routed roles,
-  and beside `dashboardProxy` for the dashboard, the latter still needing
-  `dashboardExtraFromTrustedAcknowledged` under `trusted_header`.
-- `networkPolicy.enabled` stays a boolean defaulting to false, so the chart
-  cannot tell an omitted value from an explicit one. In `agc` mode it fails
-  to render unless `networkPolicy.enabled` is true or
-  `networkPolicy.agcWithoutPolicyAcknowledged` is true. Without a policy,
-  anything in the AGC subnet or the cluster reaches the dashboard pods
-  directly, past oauth2-proxy.
+- The `trusted_header` checks in `dashboard.yaml` take the proxy selector as
+  the proxy peer in `agc` mode, in place of `ingressController`.
+- `networkPolicy.extraFrom` keeps its meaning: extra peers beside the AGC
+  subnet for the routed roles. `networkPolicy.dashboardExtraFrom` is refused
+  while the dashboard is routed: a peer there would reach it past the proxy.
+- `ingress.agc.dashboardBackend.name` may not be the dashboard's own
+  Service.
+- With the dashboard routed, `agc` mode requires `networkPolicy.enabled`,
+  with no acknowledgement to set it aside. With the dashboard not routed,
+  `networkPolicy.agcWithoutPolicyAcknowledged` lets it render without a
+  policy, for a cluster that limits pod traffic some other way.
 
 **NOTES.txt** prints the frontend FQDN to CNAME, the HTTPRoute and
 WebApplicationFirewallPolicy status commands, and the oauth2-proxy and ALB
@@ -331,7 +332,8 @@ chart. The lab does not move until every one passes:
 - each collision check failing as it does in `nginx` mode;
 - every route having a WAF policy, and each policy matching the table;
 - only the dashboard route's backend being oauth2-proxy;
-- the ACME exemption on the redirect route;
+- the redirect route binding to the port-80 listener only, and every other
+  route to HTTPS listeners only;
 - every refused value in `agc` mode;
 - the TLS table;
 - the NetworkPolicy peers.

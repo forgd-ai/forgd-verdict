@@ -559,8 +559,35 @@ not have to edit the chart.
 GKE mode: the GCE Ingress controller, selected by ingress.className: gce.
 Renders "true" or nothing.
 */}}
+{{/*
+The ingress mode: "nginx", "gke" or "agc". ingress.mode wins; empty keeps
+the older reading, "gke" when className is gce and "nginx" otherwise.
+*/}}
+{{- define "forgd-verdict.ingressMode" -}}
+{{- $mode := .Values.ingress.mode -}}
+{{- if and $mode (not (has $mode (list "nginx" "gke" "agc"))) -}}
+{{- fail (printf "ingress.mode is %q: it is nginx, gke or agc" $mode) -}}
+{{- end -}}
+{{- if and $mode (ne $mode "gke") (eq .Values.ingress.className "gce") -}}
+{{- fail (printf "ingress.mode is %s and ingress.className is gce, which selects GKE mode. Set one: ingress.mode gke, or className back to its default." $mode) -}}
+{{- end -}}
+{{- if $mode -}}
+{{- $mode -}}
+{{- else if eq .Values.ingress.className "gce" -}}
+gke
+{{- else -}}
+nginx
+{{- end -}}
+{{- end -}}
+
 {{- define "forgd-verdict.gke" -}}
-{{- if and .Values.ingress.enabled (eq .Values.ingress.className "gce") -}}
+{{- if and .Values.ingress.enabled (eq (include "forgd-verdict.ingressMode" .) "gke") -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "forgd-verdict.agc" -}}
+{{- if and .Values.ingress.enabled (eq (include "forgd-verdict.ingressMode" .) "agc") -}}
 true
 {{- end -}}
 {{- end -}}

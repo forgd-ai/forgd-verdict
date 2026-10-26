@@ -1,0 +1,407 @@
+{{- if include "forgd-verdict.agc" . }}
+{{- $host := .Values.ingress.host | required "ingress.host is required when ingress.enabled" }}
+{{- $dashHost := default $host .Values.ingress.dashboard.host }}
+{{- $full := include "forgd-verdict.fullname" . }}
+{{- $agc := .Values.ingress.agc }}
+{{/*
+AGC MODE: a Gateway on Application Gateway for Containers, and HTTPRoutes
+in place of the Ingress objects (docs/design/agc.md).
+
+  hook         /hook                              -> verdict     PathPrefix  waf: hook
+  public       /v1 /intake /scan                  -> collector,  PathPrefix  waf: api
+                                                     intake
+  diagnostics  /healthz /metrics /health /stats   -> verdict,    Exact       waf: api
+                                                     collector
+  dashboard    /                                  -> oauth2-proxy PathPrefix waf: protected
+  connector    /mcp, its protected resource       -> connector   Exact       waf: connector
+               metadata
+  redirect     port 80, /                         -> 301 to https
+
+The host collisions, the serveOpen refusal and the connector/dashboard host
+check are in templates/ingress.yaml, which runs them in every mode.
+
+Every route but the redirect binds to the HTTPS listeners of its own
+hostnames only, by sectionName, so nothing but the redirect answers on
+port 80. Longest path wins across routes on one hostname, so /hook and the
+Exact diagnostic paths are matched ahead of the dashboard's /.
+
+cert-manager's HTTP-01 solver adds its own HTTPRoute on the port-80
+listener, for /.well-known/acme-challenge/<token>. That path is longer than
+the redirect's /, so the solver's route answers the challenge.
+*/}}
+{{- if not .Values.ingress.tls.enabled }}
+{{- fail "ingress.mode agc with ingress.tls.enabled false: the only listener would be HTTP, carrying the signed hook frames, OTLP bearer tokens and the dashboard's session in clear." }}
+{{- end }}
+{{- if not (or .Values.ingress.tls.clusterIssuer .Values.ingress.tls.secretName) }}
+{{- fail "ingress.mode agc with neither ingress.tls.clusterIssuer nor ingress.tls.secretName: the HTTPS listeners would have no certificate." }}
+{{- end }}
+{{- if not (and $agc.albId $agc.frontend) }}
+{{- fail "ingress.mode agc needs ingress.agc.albId and ingress.agc.frontend: cluster-aks's alb_id and alb_frontend_name outputs." }}
+{{- end }}
+{{- if or .Values.ingress.hook.sourceRanges .Values.ingress.connector.sourceRanges }}
+{{- fail "ingress.hook.sourceRanges and ingress.connector.sourceRanges do not apply in ingress.mode agc: AGC has no per-route allowlist outside its WAF. Set cluster-aks's hook_source_ranges and connector_source_ranges, which go into the hook and connector WAF policies." }}
+{{- end }}
+{{- if ne .Values.ingress.className "nginx" }}
+{{- fail (printf "ingress.className is %q in ingress.mode agc, where there is no Ingress and no class. Leave it at its default." .Values.ingress.className) }}
+{{- end }}
+{{- if or .Values.ingress.annotations .Values.ingress.dashboard.annotations .Values.ingress.diagnostics.annotations .Values.ingress.connector.annotations }}
+{{- fail "ingress.annotations, ingress.dashboard.annotations, ingress.diagnostics.annotations and ingress.connector.annotations are Ingress annotations, and ingress.mode agc renders no Ingress. Remove them; an nginx annotation would be ignored, and an auth annotation would protect nothing." }}
+{{- end }}
+{{- $gke := .Values.ingress.gke }}
+{{- if or $gke.managedCertificate $gke.staticIpName (ne (int $gke.collectorTimeoutSec) 120) $gke.iap.oauthclientCredentials.secretName }}
+{{- fail "ingress.gke values do not apply in ingress.mode agc. Leave them at their defaults." }}
+{{- end }}
+{{- $np := .Values.networkPolicy }}
+{{- $routeDash := and .Values.dashboard.enabled .Values.ingress.dashboard.enabled }}
+{{- if and $routeDash (not $np.enabled) }}
+{{- fail "ingress.mode agc with the dashboard routed needs networkPolicy.enabled, with networkPolicy.agc.subnetCidr and networkPolicy.agc.dashboardProxy. The dashboard is reached through oauth2-proxy, and only a policy admitting the proxy alone keeps every other pod from reaching it directly." }}
+{{- end }}
+{{- if and (not $routeDash) (not (or $np.enabled $np.agcWithoutPolicyAcknowledged)) }}
+{{- fail "ingress.mode agc needs networkPolicy.enabled, with networkPolicy.agc.subnetCidr, or networkPolicy.agcWithoutPolicyAcknowledged: true if something else limits which pods reach the routed roles." }}
+{{- end }}
+{{- if and $routeDash $np.dashboardExtraFrom }}
+{{- fail "networkPolicy.dashboardExtraFrom does not apply in ingress.mode agc with the dashboard routed: the dashboard admits oauth2-proxy and nothing else. A peer listed there would reach it past the proxy." }}
+{{- end }}
+{{- $conn := .Values.connector.enabled }}
+{{- $connHost := include "forgd-verdict.connectorHost" . }}
+{{- $separateDash := and $routeDash (ne $dashHost $host) }}
+{{- $separateConn := and $conn (ne $connHost $host) }}
+{{- $public := or .Values.collector.enabled .Values.intake.enabled }}
+{{- $diag := and .Values.ingress.diagnostics.enabled (or .Values.verdict.enabled .Values.collector.enabled) }}
+{{- if and $routeDash (not $agc.dashboardBackend.name) }}
+{{- fail "ingress.mode agc with the dashboard routed needs ingress.agc.dashboardBackend.name, oauth2-proxy's Service. AGC has no auth subrequest, so without the proxy the route would reach the dashboard directly." }}
+{{- end }}
+{{- if and $routeDash (eq $agc.dashboardBackend.name (printf "%s-dashboard" $full)) }}
+{{- fail "ingress.agc.dashboardBackend.name is the dashboard's own Service. It names oauth2-proxy's Service, the proxy that signs users in and forwards to the dashboard; routing to the dashboard directly skips the sign-in." }}
+{{- end }}
+{{- $need := list }}
+{{- if .Values.verdict.enabled }}{{ $need = append $need "hook" }}{{ end }}
+{{- if or $public $diag }}{{ $need = append $need "api" }}{{ end }}
+{{- if $routeDash }}{{ $need = append $need "protected" }}{{ end }}
+{{- if $conn }}{{ $need = append $need "connector" }}{{ end }}
+{{- range $p := $need }}
+{{- if not (index $agc.wafPolicies $p) }}
+{{- fail (printf "ingress.agc.wafPolicies.%s is empty: every routed role is under a WAF policy, and this one is cluster-aks's waf_policy_ids.%s." $p $p) }}
+{{- end }}
+{{- end }}
+{{- $hosts := concat (list $host) (.Values.ingress.extraHosts | default list) }}
+{{- $all := $hosts }}
+{{- if $separateDash }}{{ $all = append $all $dashHost }}{{ end }}
+{{- if $separateConn }}{{ $all = append $all $connHost }}{{ end }}
+{{- $listener := dict }}
+{{- range $i, $h := $all }}{{ $_ := set $listener $h (printf "https-%d" $i) }}{{ end }}
+{{- $dashHosts := ternary (list $dashHost) $hosts $separateDash }}
+{{- $connHosts := ternary (list $connHost) $hosts $separateConn }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  annotations:
+    alb.networking.azure.io/alb-id: {{ $agc.albId | quote }}
+    {{- with .Values.ingress.tls.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ . | quote }}
+    {{- end }}
+spec:
+  gatewayClassName: azure-alb-external
+  addresses:
+    - type: alb.networking.azure.io/alb-frontend
+      value: {{ $agc.frontend | quote }}
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- range $i, $h := $all }}
+    # One HTTPS listener per hostname, each with its own certificate: with
+    # cert-manager, one Certificate per listener, holding that one name.
+    - name: {{ index $listener $h }}
+      hostname: {{ $h | quote }}
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ default (printf "%s-tls-%d" $full $i) $.Values.ingress.tls.secretName }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $full }}-redirect
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redirect
+spec:
+  parentRefs:
+    - name: {{ $full }}
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+{{- if .Values.verdict.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $full }}-hook
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hook
+spec:
+  parentRefs:
+    {{- range $hosts }}
+    - name: {{ $full }}
+      sectionName: {{ index $listener . }}
+    {{- end }}
+  hostnames:
+    {{- range $hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /hook
+      backendRefs:
+        - name: {{ $full }}-verdict
+          port: {{ .Values.verdict.port }}
+      timeouts:
+        request: {{ $agc.publicRequestTimeout }}
+{{- end }}
+{{- if $public }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $full }}-public
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: public
+spec:
+  parentRefs:
+    {{- range $hosts }}
+    - name: {{ $full }}
+      sectionName: {{ index $listener . }}
+    {{- end }}
+  hostnames:
+    {{- range $hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    {{- if .Values.collector.enabled }}
+    # /v1/logs and /v1/traces: the collector reads the signal from the path.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: {{ $full }}-collector
+          port: {{ .Values.collector.port }}
+      timeouts:
+        request: {{ $agc.publicRequestTimeout }}
+    {{- end }}
+    {{- if .Values.intake.enabled }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /intake
+        - path:
+            type: PathPrefix
+            value: /scan
+      backendRefs:
+        - name: {{ $full }}-intake
+          port: {{ .Values.intake.port }}
+      timeouts:
+        request: {{ $agc.publicRequestTimeout }}
+    {{- end }}
+{{- end }}
+{{- if $diag }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $full }}-diagnostics
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: diagnostics
+spec:
+  parentRefs:
+    {{- range $hosts }}
+    - name: {{ $full }}
+      sectionName: {{ index $listener . }}
+    {{- end }}
+  hostnames:
+    {{- range $hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    {{- if .Values.verdict.enabled }}
+    - matches:
+        - path:
+            type: Exact
+            value: /healthz
+        - path:
+            type: Exact
+            value: /metrics
+      backendRefs:
+        - name: {{ $full }}-verdict
+          port: {{ .Values.verdict.port }}
+    {{- end }}
+    {{- if .Values.collector.enabled }}
+    - matches:
+        - path:
+            type: Exact
+            value: /health
+        - path:
+            type: Exact
+            value: /stats
+      backendRefs:
+        - name: {{ $full }}-collector
+          port: {{ .Values.collector.port }}
+    {{- end }}
+{{- end }}
+{{- if $routeDash }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $full }}-dashboard
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  parentRefs:
+    {{- range $dashHosts }}
+    - name: {{ $full }}
+      sectionName: {{ index $listener . }}
+    {{- end }}
+  hostnames:
+    {{- range $dashHosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    # To oauth2-proxy, which signs the user in and forwards to the
+    # dashboard with the ID token in Authorization.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ $agc.dashboardBackend.name }}
+          port: {{ $agc.dashboardBackend.port }}
+{{- end }}
+{{- if $conn }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $full }}-connector
+  labels:
+    {{- include "forgd-verdict.labels" . | nindent 4 }}
+    app.kubernetes.io/component: connector
+spec:
+  parentRefs:
+    {{- range $connHosts }}
+    - name: {{ $full }}
+      sectionName: {{ index $listener . }}
+    {{- end }}
+  hostnames:
+    {{- range $connHosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    # /mcp and its protected resource metadata, Exact, so nothing else on
+    # the hostname reaches the connector.
+    - matches:
+        - path:
+            type: Exact
+            value: /mcp
+        - path:
+            type: Exact
+            value: /.well-known/oauth-protected-resource/mcp
+      backendRefs:
+        - name: {{ $full }}-connector
+          port: {{ .Values.connector.port }}
+{{- end }}
+{{- $routes := list }}
+{{- if .Values.verdict.enabled }}{{ $routes = append $routes (list "hook" "hook") }}{{ end }}
+{{- if $public }}{{ $routes = append $routes (list "public" "api") }}{{ end }}
+{{- if $diag }}{{ $routes = append $routes (list "diagnostics" "api") }}{{ end }}
+{{- if $routeDash }}{{ $routes = append $routes (list "dashboard" "protected") }}{{ end }}
+{{- if $conn }}{{ $routes = append $routes (list "connector" "connector") }}{{ end }}
+{{- range $r := $routes }}
+---
+apiVersion: alb.networking.azure.io/v1
+kind: WebApplicationFirewallPolicy
+metadata:
+  name: {{ $full }}-{{ index $r 0 }}
+  labels:
+    {{- include "forgd-verdict.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ index $r 0 }}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: {{ $full }}-{{ index $r 0 }}
+    namespace: {{ $.Release.Namespace }}
+  webApplicationFirewall:
+    id: {{ index $agc.wafPolicies (index $r 1) | quote }}
+{{- end }}
+{{/*
+AGC probes a HealthCheckPolicy's path on each backend Service. The chart's
+own roles answer forgd-verdict.readyPath; oauth2-proxy answers its own
+health path, and the dashboard's readiness stays its pod probe.
+*/}}
+{{- $probes := list }}
+{{- if .Values.verdict.enabled }}{{ $probes = append $probes (list (printf "%s-verdict" $full) (int .Values.verdict.port) (include "forgd-verdict.readyPath" .) (printf "%s-verdict" $full)) }}{{ end }}
+{{- if .Values.collector.enabled }}{{ $probes = append $probes (list (printf "%s-collector" $full) (int .Values.collector.port) (include "forgd-verdict.readyPath" .) (printf "%s-collector" $full)) }}{{ end }}
+{{- if .Values.intake.enabled }}{{ $probes = append $probes (list (printf "%s-intake" $full) (int .Values.intake.port) (include "forgd-verdict.readyPath" .) (printf "%s-intake" $full)) }}{{ end }}
+{{- if $conn }}{{ $probes = append $probes (list (printf "%s-connector" $full) (int .Values.connector.port) (include "forgd-verdict.readyPath" .) (printf "%s-connector" $full)) }}{{ end }}
+{{- if $routeDash }}{{ $probes = append $probes (list $agc.dashboardBackend.name (int $agc.dashboardBackend.port) $agc.dashboardBackend.healthPath (printf "%s-dashboard-proxy" $full)) }}{{ end }}
+{{- range $p := $probes }}
+---
+apiVersion: alb.networking.azure.io/v1
+kind: HealthCheckPolicy
+metadata:
+  # Named for this release: the proxy's Service may be shared, and a
+  # policy named after it would be claimed by two releases.
+  name: {{ index $p 3 }}
+  labels:
+    {{- include "forgd-verdict.labels" $ | nindent 4 }}
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: {{ index $p 0 }}
+    namespace: {{ $.Release.Namespace }}
+  default:
+    interval: 5s
+    timeout: 3s
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+    port: {{ index $p 1 }}
+    http:
+      path: {{ index $p 2 }}
+      match:
+        statusCodes:
+          - start: 200
+            end: 299
+    useTLS: false
+{{- end }}
+{{- end }}
