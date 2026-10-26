@@ -1,0 +1,223 @@
+name: dependency fix
+
+# Daily: audits deploy/constraints/*.txt as the dependency audit in ci.yml
+# does, and when an advisory names a pinned package with a fixed release,
+# moves only those pins (scripts/fix_advisories.py). Dependabot does not read
+# these files, so without this an advisory fails every pull request until
+# someone moves the pin by hand.
+#
+# The fix goes to the deps/advisory-fixes branch, and one open issue carries
+# the report and a link that opens the pull request. Actions may not create
+# pull requests in this repository, and a pull request a person opens runs
+# CI as any other does.
+#
+# Two jobs. `audit` runs pip-audit and uv, code fetched from PyPI, with a
+# read-only token that is not left in the checkout. `publish` runs no
+# fetched code: it takes the four rewritten files from `audit`, refuses
+# anything else, and holds the write permissions.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-fix
+  cancel-in-progress: false
+
+env:
+  BRANCH: deps/advisory-fixes
+  ISSUE_TITLE: "Dependency advisories: pins to move"
+
+jobs:
+  audit:
+    name: audit and move pins
+    # The report and the branch describe main; a manual run from another
+    # ref would publish a fix for that ref instead.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.fix.outputs.changed }}
+      unfixed: ${{ steps.fix.outputs.unfixed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The uv ci.yml's dependency audit pins, so the files are rewritten
+      # exactly as compile_constraints.sh writes them there.
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.9.27"
+
+      - name: Audit and move flagged pins
+        id: fix
+        run: python3 scripts/fix_advisories.py --report "$RUNNER_TEMP/report.md"
+
+      - name: The rewritten files still match pyproject.toml
+        if: steps.fix.outputs.changed == 'true'
+        run: scripts/compile_constraints.sh --check
+
+      - name: Collect the result
+        if: steps.fix.outputs.changed == 'true' || steps.fix.outputs.unfixed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/result"
+          cp deploy/constraints/build.txt deploy/constraints/base.txt \
+            deploy/constraints/hook.txt deploy/constraints/ingest.txt \
+            "$RUNNER_TEMP/report.md" "$RUNNER_TEMP/result/"
+
+      - name: Hand the result to publish
+        if: steps.fix.outputs.changed == 'true' || steps.fix.outputs.unfixed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dependency-fix
+          path: ${{ runner.temp }}/result/
+          retention-days: 3
+
+  publish:
+    name: push the fix and report it
+    needs: audit
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      CHANGED: ${{ needs.audit.outputs.changed }}
+      UNFIXED: ${{ needs.audit.outputs.unfixed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: env.CHANGED == 'true'
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        if: env.CHANGED == 'true' || env.UNFIXED == 'true'
+        with:
+          name: dependency-fix
+          path: ${{ runner.temp }}/result
+
+      # Only the four constraints files come across, and each line is a
+      # comment, a pin, a hash, a `# via` line, or ingest.txt's spaCy model
+      # URL, as uv writes them.
+      - name: Take the four files, and only them
+        if: env.CHANGED == 'true'
+        run: |
+          set -euo pipefail
+          result="$RUNNER_TEMP/result"
+          # Exactly these five names, each a regular file: no other entry,
+          # hidden or not, and no symlink or directory in their place.
+          [ "$(find "$result" -mindepth 1 | wc -l)" -eq 5 ]
+          [ "$(find "$result" -mindepth 1 -maxdepth 1 -type f \( -name base.txt -o -name build.txt \
+            -o -name hook.txt -o -name ingest.txt -o -name report.md \) | wc -l)" -eq 5 ]
+          for f in build base hook ingest; do
+            # grep -v exits 1 when every line matched, 0 when it printed one
+            # that did not, and 2 when it could not run: only 1 passes.
+            rc=0
+            grep -vE -e '^$' -e '^(#.*|[a-z0-9][a-z0-9._-]*==[^ ;\\]+( ; [^\\]*)? \\|en-core-web-lg @ https://github\.com/explosion/spacy-models/releases/download/[A-Za-z0-9._/-]+#sha256=[0-9a-f]{64} \\|    --hash=sha256:[0-9a-f]{64}( \\)?|    # .*)$' "$result/$f.txt" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::error::$f.txt has a line that is not uv's constraint format, or grep failed ($rc)"
+              exit 1
+            fi
+            cp "$result/$f.txt" "deploy/constraints/$f.txt"
+          done
+          [ -z "$(git status --porcelain -- . ':!deploy/constraints/build.txt' ':!deploy/constraints/base.txt' ':!deploy/constraints/hook.txt' ':!deploy/constraints/ingest.txt')" ]
+
+      # The report goes into the commit and the issue, so it must be what
+      # fix_advisories.py writes: its headings, its table rows, cells of
+      # [A-Za-z0-9._+:?-] and the few words it uses, and nothing else.
+      - name: Take the report only in the form the script writes it
+        if: env.CHANGED == 'true' || env.UNFIXED == 'true'
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/result/report.md"
+          [ "$(find "$report" -maxdepth 0 -type f -size -32k | wc -l)" -eq 1 ]
+          c='[A-Za-z0-9._+:?-]+'
+          f='(build|base|hook|ingest)[.]txt'
+          rc=0
+          grep -vE -e '^$' -e "^(## Pins moved for advisories|## Advisories still open|None[.]|[|] package [|] file [|] from [|] to [|] advisories [|]|[|] package [|] file [|] version [|] advisory [|] fixed in [|]|[|]---[|]---[|]---[|]---[|]---[|]|[|] $c [|] $f [|] $c [|] ($c|[(]dropped[)]) [|] $c(, $c)* [|]|[|] $c [|] $f [|] $c [|] $c [|] ($c(, $c)*|no fixed release) [|])$" "$report" || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::report.md has a line fix_advisories.py does not write, or grep failed ($rc)"
+            exit 1
+          fi
+
+      # The branch is the workflow's own: it is pushed only when every
+      # commit already on it, past main, has github-actions[bot] as author,
+      # and with a lease, so a person's commit there stops the push. The
+      # author is what the commit says; someone who can push here can say
+      # anything, so this guards against mistakes, not against them.
+      - name: Push the fix
+        if: env.CHANGED == 'true'
+        run: |
+          set -euo pipefail
+          lease="--force-with-lease=$BRANCH:"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git fetch -q origin "$BRANCH"
+            others="$(git log --format='%ae' "origin/main..origin/$BRANCH" | grep -vx '41898282+github-actions\[bot\]@users.noreply.github.com' || true)"
+            if [ -n "$others" ]; then
+              echo "::error::$BRANCH has commits by someone other than github-actions[bot]; not overwriting it"
+              exit 1
+            fi
+            lease="--force-with-lease=$BRANCH:$(git rev-parse "origin/$BRANCH")"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -q -c "$BRANCH"
+          git add deploy/constraints/build.txt deploy/constraints/base.txt \
+            deploy/constraints/hook.txt deploy/constraints/ingest.txt
+          {
+            printf 'build(deps): move pins named by advisories\n\n'
+            cat "$RUNNER_TEMP/result/report.md"
+            printf '\nSigned-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>\n'
+          } > "$RUNNER_TEMP/commit.txt"
+          git commit -q -F "$RUNNER_TEMP/commit.txt"
+          git push -q "$lease" origin "$BRANCH"
+
+      - name: Open or update the report
+        if: env.CHANGED == 'true' || env.UNFIXED == 'true'
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/issue.md"
+          {
+            if [ "$CHANGED" = true ]; then
+              printf 'The daily dependency fix moved these pins on `%s`.\n\n' "$BRANCH"
+              printf '[Open the pull request](https://github.com/%s/compare/main...%s?expand=1), check CI, and merge it.\n\n' "$REPO" "$BRANCH"
+            else
+              printf 'The daily dependency fix found advisories it could not fix by moving a pin.\n\n'
+            fi
+            cat "$RUNNER_TEMP/result/report.md"
+          } > "$body"
+          number="$(gh issue list -R "$REPO" --state open --limit 200 --search "in:title \"$ISSUE_TITLE\"" \
+            --json number,title --jq "map(select(.title == env.ISSUE_TITLE)) | .[0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue edit "$number" -R "$REPO" --body-file "$body"
+          else
+            gh issue create -R "$REPO" --title "$ISSUE_TITLE" --body-file "$body"
+          fi
+
+      - name: Close the report when nothing is flagged
+        if: env.CHANGED == 'false' && env.UNFIXED == 'false'
+        run: |
+          set -euo pipefail
+          number="$(gh issue list -R "$REPO" --state open --limit 200 --search "in:title \"$ISSUE_TITLE\"" \
+            --json number,title --jq "map(select(.title == env.ISSUE_TITLE)) | .[0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue close "$number" -R "$REPO" --comment "No advisory names a pinned package on main."
+          fi
+
+      - name: Fail while an advisory has no fix here
+        if: env.UNFIXED == 'true'
+        run: |
+          echo "::error::an advisory remains after moving pins; see the issue '$ISSUE_TITLE'"
+          exit 1
