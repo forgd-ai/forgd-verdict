@@ -67,6 +67,8 @@ forgd-verdict.
   reasoning.
 - [design/connector.md](design/connector.md): what the sources say about
   Claude's connectors, MCP and the SDK, and the connector's open questions.
+- [design/agc.md](design/agc.md): moving AKS ingress from app-routing
+  NGINX to Application Gateway for Containers and its WAF.
 
 ## Project
 
