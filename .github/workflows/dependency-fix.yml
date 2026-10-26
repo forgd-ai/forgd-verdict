@@ -116,19 +116,47 @@ jobs:
         run: |
           set -euo pipefail
           result="$RUNNER_TEMP/result"
-          [ "$(cd "$result" && ls | sort | tr '\n' ' ')" = "base.txt build.txt hook.txt ingest.txt report.md " ]
+          # Exactly these five names, each a regular file: no other entry,
+          # hidden or not, and no symlink or directory in their place.
+          [ "$(find "$result" -mindepth 1 | wc -l)" -eq 5 ]
+          [ "$(find "$result" -mindepth 1 -maxdepth 1 -type f \( -name base.txt -o -name build.txt \
+            -o -name hook.txt -o -name ingest.txt -o -name report.md \) | wc -l)" -eq 5 ]
           for f in build base hook ingest; do
-            if grep -vE '^(#.*|[a-z0-9][a-z0-9._-]*==[^ ;\\]+( ; [^\\]*)? \\|en-core-web-lg @ https://github\.com/explosion/spacy-models/releases/download/[A-Za-z0-9._/-]+#sha256=[0-9a-f]{64} \\|    --hash=sha256:[0-9a-f]{64}( \\)?|    # .*|)$' "$result/$f.txt"; then
-              echo "::error::$f.txt has a line that is not uv's constraint format"
+            # grep -v exits 1 when every line matched, 0 when it printed one
+            # that did not, and 2 when it could not run: only 1 passes.
+            rc=0
+            grep -vE -e '^$' -e '^(#.*|[a-z0-9][a-z0-9._-]*==[^ ;\\]+( ; [^\\]*)? \\|en-core-web-lg @ https://github\.com/explosion/spacy-models/releases/download/[A-Za-z0-9._/-]+#sha256=[0-9a-f]{64} \\|    --hash=sha256:[0-9a-f]{64}( \\)?|    # .*)$' "$result/$f.txt" || rc=$?
+            if [ "$rc" -ne 1 ]; then
+              echo "::error::$f.txt has a line that is not uv's constraint format, or grep failed ($rc)"
               exit 1
             fi
             cp "$result/$f.txt" "deploy/constraints/$f.txt"
           done
           [ -z "$(git status --porcelain -- . ':!deploy/constraints/build.txt' ':!deploy/constraints/base.txt' ':!deploy/constraints/hook.txt' ':!deploy/constraints/ingest.txt')" ]
 
+      # The report goes into the commit and the issue, so it must be what
+      # fix_advisories.py writes: its headings, its table rows, cells of
+      # [A-Za-z0-9._+:?-] and the few words it uses, and nothing else.
+      - name: Take the report only in the form the script writes it
+        if: env.CHANGED == 'true' || env.UNFIXED == 'true'
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/result/report.md"
+          [ "$(find "$report" -maxdepth 0 -type f -size -32k | wc -l)" -eq 1 ]
+          c='[A-Za-z0-9._+:?-]+'
+          f='(build|base|hook|ingest)[.]txt'
+          rc=0
+          grep -vE -e '^$' -e "^(## Pins moved for advisories|## Advisories still open|None[.]|[|] package [|] file [|] from [|] to [|] advisories [|]|[|] package [|] file [|] version [|] advisory [|] fixed in [|]|[|]---[|]---[|]---[|]---[|]---[|]|[|] $c [|] $f [|] $c [|] ($c|[(]dropped[)]) [|] $c(, $c)* [|]|[|] $c [|] $f [|] $c [|] $c [|] ($c(, $c)*|no fixed release) [|])$" "$report" || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::report.md has a line fix_advisories.py does not write, or grep failed ($rc)"
+            exit 1
+          fi
+
       # The branch is the workflow's own: it is pushed only when every
-      # commit already on it, past main, is github-actions[bot]'s, and with
-      # a lease, so a person's commit there stops the push.
+      # commit already on it, past main, has github-actions[bot] as author,
+      # and with a lease, so a person's commit there stops the push. The
+      # author is what the commit says; someone who can push here can say
+      # anything, so this guards against mistakes, not against them.
       - name: Push the fix
         if: env.CHANGED == 'true'
         run: |

@@ -203,7 +203,7 @@ def test_the_publish_job_runs_no_fetched_code_and_takes_only_the_four_files():
     run = "\n".join(s.get("run", "") for s in publish["steps"])
     commands = {line.split()[0] for line in run.splitlines() if line.strip()}
     assert not commands & {"uv", "uvx", "pip", "pip-audit", "python", "python3", "npx", "npm"}, commands
-    assert '"base.txt build.txt hook.txt ingest.txt report.md "' in run
+    assert '-mindepth 1 | wc -l)" -eq 5' in run and "-type f" in run
     assert "gh pr create" not in run
     assert "Signed-off-by: github-actions[bot]" in run
 
@@ -229,7 +229,8 @@ def test_the_audit_uses_cis_uv():
 
 def _format_check() -> re.Pattern[str]:
     run = "\n".join(s.get("run", "") for s in _workflow()["jobs"]["publish"]["steps"])
-    return re.compile(re.search(r"grep -vE '(.*?)' \"\$result", run).group(1))
+    body = re.search(r"grep -vE -e '\^\$' -e '(.*?)' \"\$result", run).group(1)
+    return re.compile(f"^$|{body}")
 
 
 @pytest.mark.parametrize("name", ["build", "base", "hook", "ingest"])
@@ -248,3 +249,41 @@ def test_the_publish_format_check_accepts_every_line_uv_wrote(name):
 ])
 def test_the_publish_format_check_refuses_anything_else(line):
     assert not _format_check().match(line)
+
+
+def _report_check() -> re.Pattern[str]:
+    step = next(s for s in _workflow()["jobs"]["publish"]["steps"]
+                if s.get("name", "").startswith("Take the report"))
+    c, f = "[A-Za-z0-9._+:?-]+", "(build|base|hook|ingest)[.]txt"
+    body = re.search(r"grep -vE -e '\^\$' -e \"(.*?)\" \"\$report\"", step["run"]).group(1)
+    return re.compile("^$|" + body.replace("$c", c).replace("$f", f))
+
+
+def test_the_report_check_accepts_what_the_script_writes():
+    before = [fa.Finding("base", "certifi", "2026.7.22", "PYSEC-2026-4320", ("2026.10.19", "2026.10.23"))]
+    after = [fa.Finding("hook", "leftpad", "1.0", "GHSA-xxxx-yyyy-zzzz", ())]
+    moved = {"certifi": {"base": ("2026.7.22", "2026.10.23"), "ingest": ("2026.7.22", "(dropped)")}}
+    pattern = _report_check()
+    for text in (fa.report(before, after, moved), fa.report([], [], {})):
+        assert [line for line in text.split("\n") if not pattern.match(line)] == []
+
+
+@pytest.mark.parametrize("line", [
+    "@org/team please look",
+    "[a link](https://example.com)",
+    "Signed-off-by: someone <a@b>",
+    "| certifi | base.txt | 1 | 2 | see https://evil |",
+    "| certifi | other.txt | 1 | 2 | PYSEC-1 |",
+])
+def test_the_report_check_refuses_anything_else(line):
+    assert not _report_check().match(line)
+
+
+def test_the_publish_checks_fail_closed_when_grep_fails():
+    """`if grep -v ...` reads grep's own error (exit 2) as "no bad line".
+    BSD grep, for one, refuses an empty alternative with exit 2. Only exit 1,
+    every line matched, may pass."""
+    run = "\n".join(s.get("run", "") for s in _workflow()["jobs"]["publish"]["steps"])
+    assert "if grep" not in run
+    assert run.count("grep -vE -e '^$'") == 2
+    assert run.count('|| rc=$?') == 2 and run.count('if [ "$rc" -ne 1 ]') == 2
