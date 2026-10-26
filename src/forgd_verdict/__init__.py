@@ -16,7 +16,7 @@ from .models import Finding, ScanUnit, Verdict  # noqa: E402
 from .plugins import loaded_distributions  # noqa: E402
 from .policy import Policy, load_policy  # noqa: E402
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 # The commit the image was built from, injected at build time. A version
 # alone is not enough to identify a running instance: deploys happen between
