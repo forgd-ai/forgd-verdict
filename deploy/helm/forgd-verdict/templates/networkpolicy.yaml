@@ -33,10 +33,12 @@ request that does not pass the proxy cannot reach it.
 {{- end }}
 {{/*
 A selector matches a pod when every one of its labels is on the pod. One
-whose every label is one this chart sets on its own pods would admit them
-to the dashboard, past oauth2-proxy.
+whose every label is one this chart sets on its own pods -- its standard
+labels, a role's component, the workload identity label, or any podLabels
+entry -- would admit them to the dashboard, past oauth2-proxy.
 */}}
-{{- $own := dict "helm.sh/chart" (printf "%s-%s" $.Chart.Name $.Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-") "app.kubernetes.io/name" (include "forgd-verdict.name" $) "app.kubernetes.io/instance" $.Release.Name "app.kubernetes.io/version" $.Chart.AppVersion "app.kubernetes.io/managed-by" $.Release.Service }}
+{{- $own := dict "helm.sh/chart" (printf "%s-%s" $.Chart.Name $.Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-") "app.kubernetes.io/name" (include "forgd-verdict.name" $) "app.kubernetes.io/instance" $.Release.Name "app.kubernetes.io/version" $.Chart.AppVersion "app.kubernetes.io/managed-by" $.Release.Service "azure.workload.identity/use" "true" }}
+{{- range $k, $v := $.Values.podLabels }}{{ $_ := set $own $k $v }}{{ end }}
 {{- $ownCount := 0 }}
 {{- range $k, $v := .matchLabels }}
 {{- if or (and (hasKey $own $k) (eq (toString (get $own $k)) (toString $v))) (and (eq $k "app.kubernetes.io/component") (has (toString $v) (list "verdict" "collector" "dashboard" "intake" "connector" "ingest"))) }}

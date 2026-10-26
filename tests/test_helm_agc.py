@@ -326,6 +326,20 @@ def test_a_proxy_selector_that_matches_the_releases_own_pods_is_refused(labels):
     assert "selects this release's own pods" in render_error(*AGC_NO_PROXY, *flags)
 
 
+def test_a_proxy_selector_built_from_pod_labels_is_refused():
+    """podLabels go on every chart pod, so a selector made of them and the
+    chart's labels matches the chart's pods."""
+    assert "selects this release's own pods" in render_error(
+        *AGC_NO_PROXY, "--set", "podLabels.proxy-peer=true",
+        "--set", f"{PROXY}.matchLabels.app\\.kubernetes\\.io/name=forgd-verdict",
+        "--set", f"{PROXY}.matchLabels.proxy-peer=true")
+
+
+def test_a_proxy_selector_on_the_workload_identity_label_is_refused():
+    assert "selects this release's own pods" in render_error(
+        *AGC_NO_PROXY, "--set", f"{PROXY}.matchLabels.azure\\.workload\\.identity/use=true")
+
+
 def test_a_proxy_selector_with_a_label_of_its_own_is_accepted():
     """Labels are ANDed, so one label the chart's pods lack is enough."""
     render(*AGC_NO_PROXY,
