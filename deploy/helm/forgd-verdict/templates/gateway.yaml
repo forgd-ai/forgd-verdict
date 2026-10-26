@@ -52,10 +52,16 @@ the redirect's /, so the solver's route answers the challenge.
 {{- fail "ingress.gke values do not apply in ingress.mode agc. Leave them at their defaults." }}
 {{- end }}
 {{- $np := .Values.networkPolicy }}
-{{- if not (or $np.enabled $np.agcWithoutPolicyAcknowledged) }}
-{{- fail "ingress.mode agc needs networkPolicy.enabled, with networkPolicy.agc.subnetCidr and networkPolicy.agc.dashboardProxy. AGC reaches pod IPs from its subnet, and without a policy anything there or in the cluster reaches the dashboard's pods past oauth2-proxy. Set networkPolicy.agcWithoutPolicyAcknowledged: true only if something else isolates them." }}
-{{- end }}
 {{- $routeDash := and .Values.dashboard.enabled .Values.ingress.dashboard.enabled }}
+{{- if and $routeDash (not $np.enabled) }}
+{{- fail "ingress.mode agc with the dashboard routed needs networkPolicy.enabled, with networkPolicy.agc.subnetCidr and networkPolicy.agc.dashboardProxy. The dashboard is reached through oauth2-proxy, and only a policy admitting the proxy alone keeps every other pod from reaching it directly." }}
+{{- end }}
+{{- if and (not $routeDash) (not (or $np.enabled $np.agcWithoutPolicyAcknowledged)) }}
+{{- fail "ingress.mode agc needs networkPolicy.enabled, with networkPolicy.agc.subnetCidr, or networkPolicy.agcWithoutPolicyAcknowledged: true if something else limits which pods reach the routed roles." }}
+{{- end }}
+{{- if and $routeDash $np.dashboardExtraFrom }}
+{{- fail "networkPolicy.dashboardExtraFrom does not apply in ingress.mode agc with the dashboard routed: the dashboard admits oauth2-proxy and nothing else. A peer listed there would reach it past the proxy." }}
+{{- end }}
 {{- $conn := .Values.connector.enabled }}
 {{- $connHost := include "forgd-verdict.connectorHost" . }}
 {{- $separateDash := and $routeDash (ne $dashHost $host) }}
@@ -64,6 +70,9 @@ the redirect's /, so the solver's route answers the challenge.
 {{- $diag := and .Values.ingress.diagnostics.enabled (or .Values.verdict.enabled .Values.collector.enabled) }}
 {{- if and $routeDash (not $agc.dashboardBackend.name) }}
 {{- fail "ingress.mode agc with the dashboard routed needs ingress.agc.dashboardBackend.name, oauth2-proxy's Service. AGC has no auth subrequest, so without the proxy the route would reach the dashboard directly." }}
+{{- end }}
+{{- if and $routeDash (eq $agc.dashboardBackend.name (printf "%s-dashboard" $full)) }}
+{{- fail "ingress.agc.dashboardBackend.name is the dashboard's own Service. It names oauth2-proxy's Service, the proxy that signs users in and forwards to the dashboard; routing to the dashboard directly skips the sign-in." }}
 {{- end }}
 {{- $need := list }}
 {{- if .Values.verdict.enabled }}{{ $need = append $need "hook" }}{{ end }}
@@ -360,17 +369,19 @@ own roles answer forgd-verdict.readyPath; oauth2-proxy answers its own
 health path, and the dashboard's readiness stays its pod probe.
 */}}
 {{- $probes := list }}
-{{- if .Values.verdict.enabled }}{{ $probes = append $probes (list (printf "%s-verdict" $full) (int .Values.verdict.port) (include "forgd-verdict.readyPath" .)) }}{{ end }}
-{{- if .Values.collector.enabled }}{{ $probes = append $probes (list (printf "%s-collector" $full) (int .Values.collector.port) (include "forgd-verdict.readyPath" .)) }}{{ end }}
-{{- if .Values.intake.enabled }}{{ $probes = append $probes (list (printf "%s-intake" $full) (int .Values.intake.port) (include "forgd-verdict.readyPath" .)) }}{{ end }}
-{{- if $conn }}{{ $probes = append $probes (list (printf "%s-connector" $full) (int .Values.connector.port) (include "forgd-verdict.readyPath" .)) }}{{ end }}
-{{- if $routeDash }}{{ $probes = append $probes (list $agc.dashboardBackend.name (int $agc.dashboardBackend.port) $agc.dashboardBackend.healthPath) }}{{ end }}
+{{- if .Values.verdict.enabled }}{{ $probes = append $probes (list (printf "%s-verdict" $full) (int .Values.verdict.port) (include "forgd-verdict.readyPath" .) (printf "%s-verdict" $full)) }}{{ end }}
+{{- if .Values.collector.enabled }}{{ $probes = append $probes (list (printf "%s-collector" $full) (int .Values.collector.port) (include "forgd-verdict.readyPath" .) (printf "%s-collector" $full)) }}{{ end }}
+{{- if .Values.intake.enabled }}{{ $probes = append $probes (list (printf "%s-intake" $full) (int .Values.intake.port) (include "forgd-verdict.readyPath" .) (printf "%s-intake" $full)) }}{{ end }}
+{{- if $conn }}{{ $probes = append $probes (list (printf "%s-connector" $full) (int .Values.connector.port) (include "forgd-verdict.readyPath" .) (printf "%s-connector" $full)) }}{{ end }}
+{{- if $routeDash }}{{ $probes = append $probes (list $agc.dashboardBackend.name (int $agc.dashboardBackend.port) $agc.dashboardBackend.healthPath (printf "%s-dashboard-proxy" $full)) }}{{ end }}
 {{- range $p := $probes }}
 ---
 apiVersion: alb.networking.azure.io/v1
 kind: HealthCheckPolicy
 metadata:
-  name: {{ index $p 0 }}
+  # Named for this release: the proxy's Service may be shared, and a
+  # policy named after it would be claimed by two releases.
+  name: {{ index $p 3 }}
   labels:
     {{- include "forgd-verdict.labels" $ | nindent 4 }}
 spec:

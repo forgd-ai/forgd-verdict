@@ -812,9 +812,10 @@ networkPolicy:
     dashboardProxy:
       namespaceSelector: {}
       podSelector: {}
-  # ingress.mode agc renders only when enabled is true or this is true.
-  # Without a policy, anything in AGC's subnet or the cluster reaches the
-  # dashboard's pods directly, past oauth2-proxy.
+  # ingress.mode agc with the dashboard routed needs enabled: true, with no
+  # exception: the policy is what keeps every pod but oauth2-proxy away from
+  # the dashboard. With the dashboard not routed, this lets agc mode render
+  # without a policy, for a cluster that limits pod traffic another way.
   agcWithoutPolicyAcknowledged: false
 
 # A PodDisruptionBudget would be wrong here. Every role runs one replica by

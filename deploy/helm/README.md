@@ -288,9 +288,12 @@ kubectl get crd gateways.gateway.networking.k8s.io webapplicationfirewallpolicie
    With `grant_alb_controller_node_reader = false`, the controller cannot
    configure AGC until its Reader on the node resource group is granted.
 3. **cert-manager** with Gateway API support (`config.enableGatewayAPI=true`)
-   and a ClusterIssuer whose HTTP-01 solver uses `gatewayHTTPRoute` with the
-   Gateway as its parent. The chart puts `cert-manager.io/cluster-issuer` on
-   the Gateway, and cert-manager issues one certificate per HTTPS listener.
+   and a ClusterIssuer whose HTTP-01 solver uses `gatewayHTTPRoute` with
+   the Gateway as its parent. The chart puts `cert-manager.io/cluster-issuer`
+   on the Gateway, and gives each HTTPS listener a secret of its own, so
+   cert-manager issues one certificate per hostname. With `ingress.tls.secretName`
+   set instead, every listener names that one secret, and it must cover every
+   hostname.
 4. **oauth2-proxy in upstream mode**, in the release's namespace. AGC has no
    auth subrequest, so the proxy sits in the path: the dashboard route sends
    everything to it, and it forwards signed-in requests to the dashboard.
@@ -331,10 +334,10 @@ What the mode changes:
 - AGC's request timeout is 60 s by default and runs while a body is still
   arriving. The hook and public routes set `ingress.agc.publicRequestTimeout`
   (300s).
-- `networkPolicy.ingressController` is refused, and the chart requires
-  `networkPolicy.enabled` or `networkPolicy.agcWithoutPolicyAcknowledged`.
-  AGC reaches pod IPs from its subnet, so without a policy anything in that
-  subnet or the cluster reaches the dashboard's pods past oauth2-proxy.
+- `networkPolicy.ingressController` and, with the dashboard routed,
+  `networkPolicy.dashboardExtraFrom` are refused, and `networkPolicy.enabled`
+  is required: the dashboard admits oauth2-proxy's pods and nothing else.
+  `ingress.agc.dashboardBackend.name` may not be the dashboard's own Service.
 
 ## What sharing the hostname costs
 

@@ -24,17 +24,13 @@ AGC = (
     "--set", "ingress.agc.frontend=fe",
     *[x for name, policy in POLICIES.items() for x in ("--set", f"ingress.agc.wafPolicies.{name}={policy}")],
     "--set", "ingress.agc.dashboardBackend.name=oauth2-proxy",
-    "--set", "networkPolicy.agcWithoutPolicyAcknowledged=true",
-)
-INTAKE = ("--set", "intake.enabled=true", "--set", "intake.clients={dev-laptop}")
-ALL_ON = (*AGC, *INTAKE, *CONNECTOR)
-POLICY_ON = (
     "--set", "networkPolicy.enabled=true",
-    "--set", "networkPolicy.agcWithoutPolicyAcknowledged=false",
     "--set", "networkPolicy.agc.subnetCidr=10.240.8.0/24",
     "--set", "networkPolicy.agc.dashboardProxy.namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name=forgd",
     "--set", "networkPolicy.agc.dashboardProxy.podSelector.matchLabels.app\\.kubernetes\\.io/name=oauth2-proxy",
 )
+INTAKE = ("--set", "intake.enabled=true", "--set", "intake.clients={dev-laptop}")
+ALL_ON = (*AGC, *INTAKE, *CONNECTOR)
 
 
 def _kind(docs: list[dict], kind: str) -> dict[str, dict]:
@@ -198,7 +194,11 @@ def test_the_defaults_for_other_modes_do_not_refuse_agc():
     (("--set", "ingress.dashboard.annotations.foo=bar"), "are Ingress annotations"),
     (("--set", "ingress.gke.staticIpName=ip"), "ingress.gke values do not apply"),
     (("--set", "ingress.gke.collectorTimeoutSec=30"), "ingress.gke values do not apply"),
-    (("--set", "networkPolicy.agcWithoutPolicyAcknowledged=false"), "needs networkPolicy.enabled"),
+    (("--set", "networkPolicy.enabled=false"), "with the dashboard routed needs networkPolicy.enabled"),
+    (("--set", "networkPolicy.enabled=false", "--set", "networkPolicy.agcWithoutPolicyAcknowledged=true"),
+     "with the dashboard routed needs networkPolicy.enabled"),
+    (("--set", "ingress.agc.dashboardBackend.name=rel-forgd-verdict-dashboard"), "is the dashboard's own Service"),
+    (("--set", "networkPolicy.dashboardExtraFrom[0].ipBlock.cidr=10.0.0.0/8"), "dashboardExtraFrom does not apply"),
     (("--set", "ingress.agc.dashboardBackend.name="), "needs ingress.agc.dashboardBackend.name"),
     (("--set", "ingress.agc.wafPolicies.hook="), "ingress.agc.wafPolicies.hook is empty"),
     (("--set", "ingress.agc.wafPolicies.api="), "ingress.agc.wafPolicies.api is empty"),
@@ -221,6 +221,26 @@ def test_agc_refuses_an_unrouted_connector_policy():
 def test_a_policy_for_an_unrouted_role_is_not_required():
     render(*AGC, "--set", "ingress.dashboard.enabled=false", "--set", "ingress.agc.wafPolicies.protected=",
            "--set", "ingress.agc.dashboardBackend.name=")
+
+
+def test_without_a_routed_dashboard_the_policy_can_be_acknowledged_away():
+    render(*AGC, "--set", "ingress.dashboard.enabled=false", "--set", "networkPolicy.enabled=false",
+           "--set", "networkPolicy.agcWithoutPolicyAcknowledged=true")
+    assert "needs networkPolicy.enabled" in render_error(
+        *AGC, "--set", "ingress.dashboard.enabled=false", "--set", "networkPolicy.enabled=false")
+
+
+def test_the_proxy_health_check_is_named_for_the_release():
+    checks = _kind(render(*AGC), "HealthCheckPolicy")
+    proxy = checks[f"{FULL}-dashboard-proxy"]
+    assert proxy["spec"]["targetRef"]["name"] == "oauth2-proxy"
+    assert "oauth2-proxy" not in checks
+
+
+def test_trusted_header_in_agc_mode_takes_the_proxy_as_its_peer():
+    """The shipped policy's trusted_header mode needs the policy to admit the
+    stripping proxy alone; in agc mode that is dashboardProxy."""
+    assert render(*AGC, "--set", "networkPolicy.trustedHeaderWithoutPolicyAcknowledged=false")
 
 
 def test_the_open_dashboard_refusal_holds_in_agc_mode():
@@ -251,7 +271,7 @@ def _policies(docs: list[dict]) -> dict[str, list]:
 
 
 def test_the_agc_subnet_reaches_every_role_but_the_dashboard():
-    policies = _policies(render(*ALL_ON, *POLICY_ON))
+    policies = _policies(render(*ALL_ON))
     for role, ingress in policies.items():
         peers = ingress[0]["from"] if ingress else []
         cidrs = [p["ipBlock"]["cidr"] for p in peers if "ipBlock" in p]
@@ -267,22 +287,22 @@ def test_the_agc_subnet_reaches_every_role_but_the_dashboard():
 
 def test_agc_refuses_the_ingress_controller_selectors():
     assert "networkPolicy.ingressController does not apply in ingress.mode agc" in render_error(
-        *AGC, *POLICY_ON,
+        *AGC,
         "--set", "networkPolicy.ingressController.namespaceSelector.matchLabels.a=b",
         "--set", "networkPolicy.ingressController.podSelector.matchLabels.a=b")
 
 
 def test_agc_policy_needs_the_subnet():
     assert "needs networkPolicy.agc.subnetCidr" in render_error(
-        *AGC, *POLICY_ON, "--set", "networkPolicy.agc.subnetCidr=")
+        *AGC, "--set", "networkPolicy.agc.subnetCidr=")
 
 
 def test_agc_policy_needs_the_proxy_when_the_dashboard_is_routed():
     assert "needs networkPolicy.agc.dashboardProxy" in render_error(
-        *AGC, "--set", "networkPolicy.enabled=true", "--set", "networkPolicy.agc.subnetCidr=10.240.8.0/24")
+        *AGC, "--set", "networkPolicy.agc.dashboardProxy.namespaceSelector=null",
+        "--set", "networkPolicy.agc.dashboardProxy.podSelector=null")
 
 
 def test_agc_policy_needs_both_proxy_selectors():
     assert "dashboardProxy needs both" in render_error(
-        *AGC, "--set", "networkPolicy.enabled=true", "--set", "networkPolicy.agc.subnetCidr=10.240.8.0/24",
-        "--set", "networkPolicy.agc.dashboardProxy.podSelector.matchLabels.a=b")
+        *AGC, "--set", "networkPolicy.agc.dashboardProxy.namespaceSelector=null")
