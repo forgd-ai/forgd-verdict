@@ -2,7 +2,7 @@
 # Terraform modules at `v<version>`, and both workflows read this file:
 # ci.yml checks the policy, values and Terraform against the release, and
 # deploy.yml rolls it.
-version: 1.1.3
+version: 1.1.4
 # The chart version whose appVersion is `version`, at
 # oci://ghcr.io/forgd-ai/charts/forgd-verdict.
-chart: 0.1.7
+chart: 0.1.8
