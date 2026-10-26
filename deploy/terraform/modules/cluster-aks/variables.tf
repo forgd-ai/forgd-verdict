@@ -312,3 +312,23 @@ variable "dns_service_ip" {
   default     = null
   description = "The cluster DNS service's address, inside service_cidr. Null is AKS's 10.0.0.10. Set with service_cidr."
 }
+
+variable "upgrade_max_unavailable" {
+  type        = string
+  default     = null
+  description = "Nodes of the default pool an upgrade may take down at once, e.g. \"1\". Null keeps the surge of 1, which needs one node's vCPUs of quota beyond the pool. Set, the pool upgrades by draining and replacing nodes in place, with upgrade_max_surge extra nodes (\"0\" for none)."
+  validation {
+    condition     = var.upgrade_max_unavailable == null || can(regex("^([0-9]+|[0-9]+%)$", coalesce(var.upgrade_max_unavailable, "x")))
+    error_message = "upgrade_max_unavailable is a count such as \"1\" or a percentage such as \"50%\"."
+  }
+}
+
+variable "upgrade_max_surge" {
+  type        = string
+  default     = "0"
+  description = "With upgrade_max_unavailable: extra nodes an upgrade adds. \"0\" adds none."
+  validation {
+    condition     = can(regex("^([0-9]+|[0-9]+%)$", var.upgrade_max_surge))
+    error_message = "upgrade_max_surge is a count such as \"0\" or a percentage such as \"10%\"."
+  }
+}
