@@ -10,6 +10,7 @@ modules/app-aca/       the five roles as Container Apps
 modules/app-ecs/       the same on AWS: Fargate services, an ALB, ingest on a schedule
 modules/app-cloudrun/  the same on Google Cloud: Cloud Run services, IAP on the dashboard, ingest as a scheduled job
 modules/cluster-aks/   an AKS cluster, and the federation the chart needs
+modules/network-azure/ a VNet for cluster-aks, with a subnet for Application Gateway for Containers
 modules/cluster-eks/   the same on AWS: an EKS cluster, and the pod identities the chart needs
 modules/cluster-gke/   the same on Google Cloud: a GKE Autopilot cluster, and the Workload Identity bindings the chart needs
 modules/monitor-azure/ adapter 5's Azure Monitor destination (optional)
