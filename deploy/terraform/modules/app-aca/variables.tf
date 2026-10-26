@@ -458,6 +458,12 @@ variable "dashboard_auth_client_id" {
   D
 }
 
+variable "dashboard_auth_enabled" {
+  type        = bool
+  default     = null
+  description = "Configure platform sign-in for the dashboard with dashboard_auth_client_id. Null decides from the client id being set. Set true when the Entra app is created in the same apply: its client id is not known at plan."
+}
+
 variable "dashboard_auth_tenant_id" {
   type    = string
   default = ""

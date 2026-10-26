@@ -146,7 +146,8 @@ def test_api_connector_and_hook_end_in_an_allow_so_managed_rules_never_run(tmp_p
     last = rules[-1]
     assert (last["action"], last["rule_type"]) == ("Allow", "MatchRule")
     [condition] = last["match_conditions"]
-    assert condition["operator"] == "Any"
+    assert condition["match_variables"][0]["variable_name"] == "RequestUri"
+    assert (condition["operator"], condition["match_values"]) == ("BeginsWith", ["/"])
     assert all(r["action"] != "Allow" for r in rules[:-1])
 
 
@@ -253,3 +254,25 @@ def test_agc_accepts_kubernetes_1_32_and_later(tmp_path, version):
 def test_the_node_resource_group_name_reaches_the_cluster(tmp_path):
     cluster = _render(tmp_path, **AGC, node_resource_group="rg-aks-nodes")["azurerm_kubernetes_cluster.this"]
     assert cluster["node_resource_group"] == "rg-aks-nodes"
+
+
+def test_no_custom_rule_pairs_remote_addr_with_the_any_operator(tmp_path):
+    """Application Gateway refuses it ("does not support match variable
+    'RemoteAddr'"): Any is for variables that take a selector. The lab's
+    first apply failed on it in every policy that had one."""
+    rendered = _render(tmp_path, **AGC, hook_source_ranges=["203.0.113.0/24"],
+                       connector_source_ranges=["198.51.100.0/24"], api_rate_limit_per_minute=6000)
+    for name in ("protected", "connector", "hook", "api"):
+        for rule in _custom_rules(_one(rendered, f"azurerm_web_application_firewall_policy.{name}")):
+            for condition in rule["match_conditions"]:
+                variables = {v["variable_name"] for v in condition["match_variables"]}
+                if condition["operator"] == "Any":
+                    assert variables.isdisjoint({"RemoteAddr", "RequestMethod", "RequestUri"}), (name, rule["name"])
+                if condition["operator"] == "IPMatch":
+                    assert variables == {"RemoteAddr"}, (name, rule["name"])
+
+
+def test_without_a_registry_there_is_no_pull_grant(tmp_path):
+    """With grant_registry_pull = true and a registry made in the same apply,
+    test_cluster_aks_plan_time.py plans the grant with the id unknown."""
+    assert not _present(_render(tmp_path, **AGC), "azurerm_role_assignment.kubelet_pulls_images")

@@ -41,6 +41,10 @@ locals {
   # answers without reading the id.
   own_vnet = local.agc ? true : var.vnet_subnet_id != null
 
+  # The same for the kubelet's AcrPull grant: grant_registry_pull answers
+  # for a registry created in the same apply, whose id is not known at plan.
+  registry_pull = var.grant_registry_pull != null ? var.grant_registry_pull : var.registry_id != ""
+
   # "1.35" or "1.35.7" -> [1, 35]; kubernetes_version's validation admits
   # only that shape.
   kubernetes_minor = var.kubernetes_version == null ? null : [for n in slice(split(".", var.kubernetes_version), 0, 2) : tonumber(n)]
@@ -251,7 +255,7 @@ resource "azurerm_kubernetes_cluster" "this" {
 # AKS the puller is the kubelet's identity, and naming the control plane's
 # here would produce ImagePullBackOff with a plan that looked clean.
 resource "azurerm_role_assignment" "kubelet_pulls_images" {
-  count                = var.registry_id == "" ? 0 : 1
+  count                = local.registry_pull ? 1 : 0
   scope                = var.registry_id
   role_definition_name = "AcrPull"
   principal_id         = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id

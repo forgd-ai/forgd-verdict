@@ -1,5 +1,5 @@
 """cluster-aks plans in the same run as the network-azure that makes its
-subnets.
+subnets and the registry it pulls from.
 
 A subnet's id is not known until the subnet exists. A count that reads
 vnet_subnet_id then fails the plan with "Invalid count argument", which
@@ -14,7 +14,7 @@ import shutil
 import subprocess
 
 import pytest
-from terraform_render import module, plugin_dir
+from terraform_render import STACK_EDITS, module, plugin_dir
 
 terraform = shutil.which("terraform")
 pytestmark = pytest.mark.skipif(terraform is None, reason="terraform is not installed")
@@ -31,6 +31,13 @@ terraform {
 provider "azurerm" {
   features {}
   subscription_id = "00000000-0000-0000-0000-000000000000"
+}
+
+resource "azurerm_container_registry" "lab" {
+  name                = "acrlab"
+  resource_group_name = "rg"
+  location            = "centralus"
+  sku                 = "Basic"
 }
 
 module "network" {
@@ -52,6 +59,8 @@ module "cluster" {
   ingress                              = "agc"
   vnet_subnet_id                       = module.network.node_subnet_id
   agc_subnet_id                        = module.network.agc_subnet_id
+  registry_id                          = azurerm_container_registry.lab.id
+  grant_registry_pull                  = true
 }
 '''
 
@@ -64,9 +73,18 @@ run "plan" {
 '''
 
 
-def test_cluster_aks_plans_with_the_subnets_network_azure_has_not_made_yet(tmp_path):
+def test_cluster_aks_plans_with_subnets_and_a_registry_not_made_yet(tmp_path):
     for name in ("network-azure", "cluster-aks"):
         shutil.copytree(module(name), tmp_path / name, ignore=shutil.ignore_patterns(".terraform*"))
+    # A mocked plan gives the cluster an empty kubelet_identity list where
+    # the provider would give an unknown; the render harness's edit for it.
+    for (name, file), edits in STACK_EDITS.items():
+        path = tmp_path / name / file
+        text = path.read_text(encoding="utf-8")
+        for now, then in edits:
+            assert now in text, now
+            text = text.replace(now, then, 1)
+        path.write_text(text, encoding="utf-8")
     (tmp_path / "main.tf").write_text(ROOT, encoding="utf-8")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "plan.tftest.hcl").write_text(TEST, encoding="utf-8")

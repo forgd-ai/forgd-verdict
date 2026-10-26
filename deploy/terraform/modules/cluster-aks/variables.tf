@@ -70,6 +70,12 @@ variable "registry_id" {
   description = "The registry holding the image. Empty skips the AcrPull grant, which is right only when the image is public."
 }
 
+variable "grant_registry_pull" {
+  type        = bool
+  default     = null
+  description = "Give the kubelet AcrPull on registry_id. Null decides from registry_id being set. Set true when the registry is created in the same apply: its id is not known at plan, and the module cannot count the grant from it."
+}
+
 variable "namespace" {
   type        = string
   default     = "forgd"

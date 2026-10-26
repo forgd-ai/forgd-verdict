@@ -92,6 +92,10 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 # apply to whatever the Gateway routes there, with no path match in the
 # WAF to disagree with the route's.
 #
+# The allow and rate-limit rules match every request by its URI beginning
+# with "/": Application Gateway refuses RemoteAddr with the Any operator,
+# which is for variables that take a selector, and IPMatch covers IPv4 only.
+#
 # The provider requires a managed rule set on every policy. On connector,
 # hook and api the last custom rule allows every request, and a request a
 # custom rule allows is not evaluated by the managed rules, so DRS never
@@ -170,9 +174,10 @@ resource "azurerm_web_application_firewall_policy" "connector" {
 
     match_conditions {
       match_variables {
-        variable_name = "RemoteAddr"
+        variable_name = "RequestUri"
       }
-      operator = "Any"
+      operator     = "BeginsWith"
+      match_values = ["/"]
     }
   }
 
@@ -230,9 +235,10 @@ resource "azurerm_web_application_firewall_policy" "hook" {
 
       match_conditions {
         match_variables {
-          variable_name = "RemoteAddr"
+          variable_name = "RequestUri"
         }
-        operator = "Any"
+        operator     = "BeginsWith"
+        match_values = ["/"]
       }
     }
   }
@@ -245,9 +251,10 @@ resource "azurerm_web_application_firewall_policy" "hook" {
 
     match_conditions {
       match_variables {
-        variable_name = "RemoteAddr"
+        variable_name = "RequestUri"
       }
-      operator = "Any"
+      operator     = "BeginsWith"
+      match_values = ["/"]
     }
   }
 
@@ -286,9 +293,10 @@ resource "azurerm_web_application_firewall_policy" "api" {
 
       match_conditions {
         match_variables {
-          variable_name = "RemoteAddr"
+          variable_name = "RequestUri"
         }
-        operator = "Any"
+        operator     = "BeginsWith"
+        match_values = ["/"]
       }
     }
   }
@@ -301,9 +309,10 @@ resource "azurerm_web_application_firewall_policy" "api" {
 
     match_conditions {
       match_variables {
-        variable_name = "RemoteAddr"
+        variable_name = "RequestUri"
       }
-      operator = "Any"
+      operator     = "BeginsWith"
+      match_values = ["/"]
     }
   }
 
