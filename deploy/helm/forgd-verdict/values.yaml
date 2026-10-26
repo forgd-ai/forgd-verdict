@@ -807,10 +807,13 @@ networkPolicy:
     # network-azure's agc_subnet_cidr. Admitted to the verdict server, the
     # collector, the intake and the connector.
     subnetCidr: ""
-    # oauth2-proxy's pods: the only peer the dashboard admits, beside
-    # dashboardExtraFrom. Both selectors, as for ingressController.
+    # oauth2-proxy's pods, in this release's namespace (an HTTPRoute's
+    # backend is in the route's namespace): the only peer the dashboard
+    # admits. matchLabels only, so the chart can check it: a selector whose
+    # every label is one this chart puts on its own pods is refused.
+    #   podSelector:
+    #     matchLabels: {app.kubernetes.io/name: oauth2-proxy}
     dashboardProxy:
-      namespaceSelector: {}
       podSelector: {}
   # ingress.mode agc with the dashboard routed needs enabled: true, with no
   # exception: the policy is what keeps every pod but oauth2-proxy away from

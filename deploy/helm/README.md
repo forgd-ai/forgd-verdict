@@ -314,8 +314,7 @@ kubectl get crd gateways.gateway.networking.k8s.io webapplicationfirewallpolicie
 --set ingress.agc.dashboardBackend.name=oauth2-proxy
 --set networkPolicy.enabled=true
 --set networkPolicy.agc.subnetCidr=<agc_subnet_cidr>
-# oauth2-proxy's pods, the only peer the dashboard admits:
---set networkPolicy.agc.dashboardProxy.namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=<namespace>
+# oauth2-proxy's pods in this namespace, the only peer the dashboard admits:
 --set networkPolicy.agc.dashboardProxy.podSelector.matchLabels.app\.kubernetes\.io/name=oauth2-proxy
 ```
 

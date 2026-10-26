@@ -26,7 +26,6 @@ AGC = (
     "--set", "ingress.agc.dashboardBackend.name=oauth2-proxy",
     "--set", "networkPolicy.enabled=true",
     "--set", "networkPolicy.agc.subnetCidr=10.240.8.0/24",
-    "--set", "networkPolicy.agc.dashboardProxy.namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name=forgd",
     "--set", "networkPolicy.agc.dashboardProxy.podSelector.matchLabels.app\\.kubernetes\\.io/name=oauth2-proxy",
 )
 INTAKE = ("--set", "intake.enabled=true", "--set", "intake.clients={dev-laptop}")
@@ -154,6 +153,14 @@ def test_cert_manager_issues_one_certificate_per_listener():
     assert secrets == [f"{FULL}-tls-0", f"{FULL}-tls-1"]
 
 
+def test_a_named_secret_with_the_issuer_names_that_secret_on_every_listener():
+    docs = render(*AGC, "--set", "ingress.tls.secretName=shared", "--set", "ingress.extraHosts={alt.example.test}")
+    [gateway] = _kind(docs, "Gateway").values()
+    assert gateway["metadata"]["annotations"]["cert-manager.io/cluster-issuer"] == "letsencrypt"
+    https = [listener for listener in _listeners(docs).values() if listener["protocol"] == "HTTPS"]
+    assert [listener["tls"]["certificateRefs"][0]["name"] for listener in https] == ["shared", "shared"]
+
+
 def test_a_named_secret_goes_on_every_listener():
     docs = render(*AGC, "--set", "ingress.tls.clusterIssuer=", "--set", "ingress.tls.secretName=wildcard")
     [gateway] = _kind(docs, "Gateway").values()
@@ -279,7 +286,8 @@ def test_the_agc_subnet_reaches_every_role_but_the_dashboard():
             assert cidrs == [], role
             [proxy] = peers
             assert proxy["podSelector"] == {"matchLabels": {"app.kubernetes.io/name": "oauth2-proxy"}}
-            assert proxy["namespaceSelector"] == {"matchLabels": {"kubernetes.io/metadata.name": "forgd"}}
+            # The release's own namespace: an HTTPRoute's backend Service is in the route's.
+            assert proxy["namespaceSelector"] == {"matchLabels": {"kubernetes.io/metadata.name": "default"}}
         else:
             assert cidrs == ["10.240.8.0/24"], role
             assert all("podSelector" not in p for p in peers), role
@@ -298,11 +306,34 @@ def test_agc_policy_needs_the_subnet():
 
 
 def test_agc_policy_needs_the_proxy_when_the_dashboard_is_routed():
-    assert "needs networkPolicy.agc.dashboardProxy" in render_error(
-        *AGC, "--set", "networkPolicy.agc.dashboardProxy.namespaceSelector=null",
-        "--set", "networkPolicy.agc.dashboardProxy.podSelector=null")
+    assert "needs networkPolicy.agc.dashboardProxy.podSelector" in render_error(*AGC_NO_PROXY)
 
 
-def test_agc_policy_needs_both_proxy_selectors():
-    assert "dashboardProxy needs both" in render_error(
-        *AGC, "--set", "networkPolicy.agc.dashboardProxy.namespaceSelector=null")
+PROXY = "networkPolicy.agc.dashboardProxy.podSelector"
+# AGC without its oauth2-proxy selector, for tests that set their own.
+AGC_NO_PROXY = tuple(x for pair in zip(AGC[::2], AGC[1::2]) if not pair[1].startswith(PROXY) for x in pair)
+
+
+@pytest.mark.parametrize("labels", [
+    {"app\\.kubernetes\\.io/name": "forgd-verdict"},
+    {"app\\.kubernetes\\.io/instance": "rel"},
+    {"app\\.kubernetes\\.io/component": "verdict"},
+    {"app\\.kubernetes\\.io/managed-by": "Helm"},
+    {"app\\.kubernetes\\.io/name": "forgd-verdict", "app\\.kubernetes\\.io/component": "collector"},
+])
+def test_a_proxy_selector_that_matches_the_releases_own_pods_is_refused(labels):
+    flags = [x for k, v in labels.items() for x in ("--set", f"{PROXY}.matchLabels.{k}={v}")]
+    assert "selects this release's own pods" in render_error(*AGC_NO_PROXY, *flags)
+
+
+def test_a_proxy_selector_with_a_label_of_its_own_is_accepted():
+    """Labels are ANDed, so one label the chart's pods lack is enough."""
+    render(*AGC_NO_PROXY,
+           "--set", f"{PROXY}.matchLabels.app\\.kubernetes\\.io/managed-by=Helm",
+           "--set", f"{PROXY}.matchLabels.app\\.kubernetes\\.io/name=oauth2-proxy")
+
+
+def test_a_proxy_selector_with_match_expressions_is_refused():
+    assert "matchLabels only" in render_error(
+        *AGC_NO_PROXY, "--set", f"{PROXY}.matchExpressions[0].key=app",
+        "--set", f"{PROXY}.matchExpressions[0].operator=Exists")

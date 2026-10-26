@@ -24,11 +24,28 @@ request that does not pass the proxy cannot reach it.
 {{- if not $np.agc.subnetCidr }}
 {{- fail "networkPolicy.enabled in ingress.mode agc needs networkPolicy.agc.subnetCidr, network-azure's agc_subnet_cidr. Without it every routed role refuses AGC's traffic and its health probes." }}
 {{- end }}
-{{- if and (or $dp.namespaceSelector $dp.podSelector) (not (and $dp.namespaceSelector $dp.podSelector)) }}
-{{- fail "networkPolicy.agc.dashboardProxy needs both namespaceSelector and podSelector. A namespaceSelector alone admits every pod in those namespaces, and a podSelector alone matches only pods in the release's namespace." }}
+{{- if and .Values.dashboard.enabled .Values.ingress.dashboard.enabled (not $dp.podSelector) }}
+{{- fail "networkPolicy.enabled in ingress.mode agc with the dashboard routed needs networkPolicy.agc.dashboardProxy.podSelector, oauth2-proxy's pods: the dashboard admits the proxy and nothing else, and with no selector it would refuse the proxy too." }}
 {{- end }}
-{{- if and .Values.dashboard.enabled .Values.ingress.dashboard.enabled (not $dp.namespaceSelector) }}
-{{- fail "networkPolicy.enabled in ingress.mode agc with the dashboard routed needs networkPolicy.agc.dashboardProxy, oauth2-proxy's namespace and pods: the dashboard admits the proxy and nothing else, and with no selector it would refuse the proxy too." }}
+{{- with $dp.podSelector }}
+{{- if or .matchExpressions (not .matchLabels) }}
+{{- fail "networkPolicy.agc.dashboardProxy.podSelector takes matchLabels only, so the chart can check that it does not select this release's own pods." }}
+{{- end }}
+{{/*
+A selector matches a pod when every one of its labels is on the pod. One
+whose every label is one this chart sets on its own pods would admit them
+to the dashboard, past oauth2-proxy.
+*/}}
+{{- $own := dict "helm.sh/chart" (printf "%s-%s" $.Chart.Name $.Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-") "app.kubernetes.io/name" (include "forgd-verdict.name" $) "app.kubernetes.io/instance" $.Release.Name "app.kubernetes.io/version" $.Chart.AppVersion "app.kubernetes.io/managed-by" $.Release.Service }}
+{{- $ownCount := 0 }}
+{{- range $k, $v := .matchLabels }}
+{{- if or (and (hasKey $own $k) (eq (toString (get $own $k)) (toString $v))) (and (eq $k "app.kubernetes.io/component") (has (toString $v) (list "verdict" "collector" "dashboard" "intake" "connector" "ingest"))) }}
+{{- $ownCount = add1 $ownCount }}
+{{- end }}
+{{- end }}
+{{- if eq (int $ownCount) (len .matchLabels) }}
+{{- fail "networkPolicy.agc.dashboardProxy.podSelector selects this release's own pods: every label in it is one the chart sets on them, so they would reach the dashboard past oauth2-proxy. Select oauth2-proxy's pods by a label of their own, such as app.kubernetes.io/name: oauth2-proxy." }}
+{{- end }}
 {{- end }}
 {{- else if not (or $ic.namespaceSelector $ic.podSelector $np.extraFrom) }}
 {{- fail "networkPolicy.enabled needs networkPolicy.ingressController.namespaceSelector and podSelector, the ingress controller's namespace and pods, or networkPolicy.extraFrom for a load balancer that reaches the pods directly (and networkPolicy.dashboardExtraFrom for the dashboard). With neither, every role would refuse all traffic." }}
@@ -59,7 +76,10 @@ spec:
     - Ingress
   {{- $extra := ternary $np.dashboardExtraFrom $np.extraFrom (eq $role "dashboard") }}
   {{- $sel := $ic }}
-  {{- if $agcMode }}{{ $sel = ternary $dp (dict) (eq $role "dashboard") }}{{ end }}
+  {{- if $agcMode }}
+  {{- $proxy := dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $.Release.Namespace)) "podSelector" $dp.podSelector }}
+  {{- $sel = ternary $proxy (dict) (and (eq $role "dashboard") (not (empty $dp.podSelector))) }}
+  {{- end }}
   {{- $agcSubnet := and $agcMode (ne $role "dashboard") }}
   {{- if or $sel.namespaceSelector $agcSubnet $extra }}
   ingress:
