@@ -311,7 +311,7 @@ def test_agc_policy_needs_the_proxy_when_the_dashboard_is_routed():
 
 PROXY = "networkPolicy.agc.dashboardProxy.podSelector"
 # AGC without its oauth2-proxy selector, for tests that set their own.
-AGC_NO_PROXY = tuple(x for pair in zip(AGC[::2], AGC[1::2]) if not pair[1].startswith(PROXY) for x in pair)
+AGC_NO_PROXY = tuple(x for pair in zip(AGC[::2], AGC[1::2], strict=True) if not pair[1].startswith(PROXY) for x in pair)
 
 
 @pytest.mark.parametrize("labels", [
