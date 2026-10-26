@@ -28,6 +28,15 @@ locals {
     && var.dns_service_ip != cidrhost(var.service_cidr, 0),
     false,
   )
+
+  # "none" is app_routing_enabled = false with ingress unset: an ingress
+  # controller the deployment supplies itself.
+  ingress = var.ingress != null ? var.ingress : (var.app_routing_enabled == false ? "none" : "app_routing")
+  agc     = local.ingress == "agc"
+
+  # "1.35" or "1.35.7" -> [1, 35]; kubernetes_version's validation admits
+  # only that shape.
+  kubernetes_minor = var.kubernetes_version == null ? null : [for n in slice(split(".", var.kubernetes_version), 0, 2) : tonumber(n)]
 }
 
 # With vnet_subnet_id, the control plane runs as this identity, which needs
@@ -58,6 +67,8 @@ resource "azurerm_kubernetes_cluster" "this" {
   location            = var.location
   dns_prefix          = var.cluster_name
   sku_tier            = var.sku_tier
+  kubernetes_version  = var.kubernetes_version
+  node_resource_group = var.node_resource_group
   tags                = var.tags
 
   # Both are required and neither is the default.
@@ -164,14 +175,14 @@ resource "azurerm_kubernetes_cluster" "this" {
   # reach the API server fails instead of reporting drift.
   #
   # It is nginx underneath, so the chart's nginx.ingress.kubernetes.io/*
-  # annotations apply. The ingress class is webapprouting.kubernetes.io --
+  # annotations apply. The ingress class is webapprouting.kubernetes.azure.com --
   # pass the `ingress_class_name` output to the chart rather than assuming
   # "nginx".
   # toset([...]) rather than [1]: Terraform 1.9 rejects a bare numeric list
   # here and 1.5 accepts it, so a local validate on an older binary does not
   # catch it. app-aca uses the same pattern for the same reason.
   dynamic "web_app_routing" {
-    for_each = toset(var.app_routing_enabled ? ["enabled"] : [])
+    for_each = toset(local.ingress == "app_routing" ? ["enabled"] : [])
     content {
       # Empty: TLS is expected to terminate with cert-manager against a
       # hostname managed outside this module. A zone id here would make the
@@ -192,6 +203,26 @@ resource "azurerm_kubernetes_cluster" "this" {
     precondition {
       condition     = var.service_cidr == null || var.dns_service_ip == null || local.dns_in_service_cidr
       error_message = "dns_service_ip must be an address inside service_cidr other than its first."
+    }
+    precondition {
+      condition     = var.ingress == null || var.app_routing_enabled == null
+      error_message = "Set ingress, not app_routing_enabled as well: app_routing_enabled is the older form of the same choice, and the two can disagree."
+    }
+    precondition {
+      condition     = !local.agc || (var.vnet_subnet_id != null && var.agc_subnet_id != null)
+      error_message = "ingress = \"agc\" needs vnet_subnet_id and agc_subnet_id: Application Gateway for Containers needs its own /24 in the nodes' VNet, and a VNet AKS manages cannot take one. network-azure makes both."
+    }
+    precondition {
+      condition     = local.agc || var.agc_subnet_id == null
+      error_message = "agc_subnet_id is only for ingress = \"agc\"."
+    }
+    precondition {
+      condition     = !local.agc || lower(coalesce(var.agc_subnet_id, "x")) != lower(coalesce(var.vnet_subnet_id, "y"))
+      error_message = "agc_subnet_id is the nodes' subnet. AGC needs a /24 of its own, delegated to Microsoft.ServiceNetworking/trafficControllers, holding nothing else."
+    }
+    precondition {
+      condition     = !local.agc || var.kubernetes_version == null || try(local.kubernetes_minor[0] > 1 || (local.kubernetes_minor[0] == 1 && local.kubernetes_minor[1] >= 32), false)
+      error_message = "ingress = \"agc\" needs kubernetes_version 1.32 or later, the oldest the ALB Controller supports, or null for AKS's default."
     }
     precondition {
       condition     = !var.private_cluster_enabled || length(var.api_server_authorized_ip_ranges) == 0

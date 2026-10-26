@@ -1755,7 +1755,7 @@ def test_the_module_reports_the_add_ons_real_ingress_class():
     shows webapprouting.kubernetes.azure.com. The .io form does not exist.
     """
     outputs = (CLUSTER_AKS / "outputs.tf").read_text()
-    m = re.search(r'value\s*=\s*var\.app_routing_enabled \? "([^"]+)"', outputs)
+    m = re.search(r'local\.ingress == "app_routing" \? "([^"]+)"', outputs)
     assert m, "cluster-aks no longer reports an ingress class the way this reads it"
     assert m.group(1) == "webapprouting.kubernetes.azure.com", m.group(1)
 

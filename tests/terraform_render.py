@@ -40,7 +40,7 @@ MISSING = object()
 
 
 def addresses(module: Path) -> list[tuple[str, str, str]]:
-    return ADDRESS.findall((module / "main.tf").read_text(encoding="utf-8"))
+    return [a for f in sorted(module.glob("*.tf")) for a in ADDRESS.findall(f.read_text(encoding="utf-8"))]
 
 
 def _require(ok: bool, why: str) -> None:
@@ -220,7 +220,7 @@ def _azure(block: str, kind: str, name: str) -> dict:
         return {"id": f"{RG}/providers/Microsoft.Storage/storageAccounts/forgdfindings"
                       "/blobServices/default/containers/findings"}
     if kind == "azurerm_user_assigned_identity":
-        digit = {"app": "1", "reader": "2", "control": "3", "control_plane": "5"}[name]
+        digit = {"app": "1", "reader": "2", "control": "3", "control_plane": "5", "alb_controller": "6"}[name]
         return {"id": f"{RG}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{name}",
                 "principal_id": f"{digit * 8}-0000-0000-0000-000000000000",
                 "client_id": f"{digit * 8}-1111-1111-1111-111111111111",

@@ -98,8 +98,92 @@ variable "reader_service_account" {
 
 variable "app_routing_enabled" {
   type        = bool
+  default     = null
+  description = "Deprecated: use ingress. Null or true is ingress = \"app_routing\"; false, with ingress unset, means supplying an ingress controller yourself, and the chart's Ingress objects do nothing until you do. Setting it together with ingress fails the plan."
+}
+
+variable "ingress" {
+  type        = string
+  default     = null
+  description = "\"app_routing\": the managed NGINX add-on, which Microsoft supports through November 2026. \"agc\": Application Gateway for Containers with its WAF (docs/design/agc.md), which needs vnet_subnet_id and agc_subnet_id. Null keeps app_routing_enabled's behaviour."
+  validation {
+    condition     = var.ingress == null || contains(["app_routing", "agc"], coalesce(var.ingress, "x"))
+    error_message = "ingress is \"app_routing\" or \"agc\"."
+  }
+}
+
+variable "agc_subnet_id" {
+  type        = string
+  default     = null
+  description = "With ingress = \"agc\": the /24 delegated to Microsoft.ServiceNetworking/trafficControllers in vnet_subnet_id's VNet (network-azure's agc_subnet_id)."
+  validation {
+    condition     = var.agc_subnet_id == null || can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/virtualNetworks/[^/]+/subnets/[^/]+$", coalesce(var.agc_subnet_id, "x")))
+    error_message = "agc_subnet_id must be a subnet's resource id: /subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>."
+  }
+}
+
+variable "node_resource_group" {
+  type        = string
+  default     = null
+  description = "The name of the resource group AKS puts the nodes in. Null is AKS's MC_<group>_<cluster>_<region>. Set it when something outside this module grants a role on that group, such as the ALB Controller's Reader."
+}
+
+variable "kubernetes_version" {
+  type        = string
+  default     = null
+  description = "The cluster's Kubernetes minor version, e.g. \"1.35\". Null takes AKS's default. ingress = \"agc\" needs 1.32 or later for the ALB Controller. Read at create only: AKS moves the patch under its upgrade channel, and the module ignores later changes."
+  validation {
+    condition     = var.kubernetes_version == null || can(regex("^1\\.[0-9]+(\\.[0-9]+)?$", coalesce(var.kubernetes_version, "x")))
+    error_message = "kubernetes_version is MAJOR.MINOR or MAJOR.MINOR.PATCH, such as \"1.35\" or \"1.35.7\"."
+  }
+}
+
+variable "alb_controller_identity_name" {
+  type        = string
+  default     = null
+  description = "With ingress = \"agc\": the ALB Controller's user-assigned identity. Null is <cluster_name>-alb-controller."
+}
+
+variable "alb_controller_namespace" {
+  type        = string
+  default     = "azure-alb-system"
+  description = "The namespace the ALB Controller's Helm release installs into. Its federated credential trusts this namespace's alb-controller-sa."
+}
+
+variable "grant_alb_controller_node_reader" {
+  type        = bool
   default     = true
-  description = "The managed nginx add-on. False means supplying an ingress controller yourself, and the chart's Ingress objects do nothing until you do."
+  description = "Grant the ALB Controller Reader on the node resource group. The node group is outside resource_group_name, so a Terraform identity scoped to that group cannot make this grant: set false and have it made elsewhere, and the controller cannot configure AGC until it is."
+}
+
+variable "hook_source_ranges" {
+  type        = list(string)
+  default     = []
+  description = "With ingress = \"agc\": the only client ranges the WAF admits to the /hook route. Empty admits every address. Replaces the chart's ingress.hook.sourceRanges, which agc mode refuses."
+  validation {
+    condition     = alltrue([for c in var.hook_source_ranges : can(cidrhost(c, 0))])
+    error_message = "hook_source_ranges holds CIDR blocks."
+  }
+}
+
+variable "connector_source_ranges" {
+  type        = list(string)
+  default     = []
+  description = "With ingress = \"agc\": the only client ranges the WAF admits to the connector. Empty admits every address. Replaces the chart's ingress.connector.sourceRanges."
+  validation {
+    condition     = alltrue([for c in var.connector_source_ranges : can(cidrhost(c, 0))])
+    error_message = "connector_source_ranges holds CIDR blocks."
+  }
+}
+
+variable "api_rate_limit_per_minute" {
+  type        = number
+  default     = null
+  description = "With ingress = \"agc\": requests per client address per minute on the hook, public and diagnostics routes, above which the WAF answers 429. Null sets no limit. Anthropic's webhook and OTLP traffic arrives from a small pool of addresses, so a limit sized for one client throttles every governed prompt in an organization."
+  validation {
+    condition     = var.api_rate_limit_per_minute == null || coalesce(var.api_rate_limit_per_minute, 0) >= 1
+    error_message = "api_rate_limit_per_minute is a positive number, or null for no limit."
+  }
 }
 
 variable "tags" {
