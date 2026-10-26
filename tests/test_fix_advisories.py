@@ -5,6 +5,7 @@ workflow that runs the script is .github/workflows/dependency-fix.yml."""
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -62,6 +63,21 @@ def test_a_pin_is_found_and_dropped_with_its_hashes_and_via_lines():
     assert fa.drop_pin(text, "certifi") == _pin("idna", "3.11")
 
 
+def test_a_pin_with_an_environment_marker_is_found_and_dropped():
+    """hook.txt's universal resolution writes `cffi==2.1.1 ; <marker> \\`."""
+    marked = "cffi==2.1.1 ; platform_python_implementation != 'PyPy' \\\n" + HASH + "    # via cryptography\n"
+    text = marked + _pin("idna", "3.11")
+    assert fa.pinned(text, "cffi") == "2.1.1"
+    assert fa.drop_pin(text, "cffi") == _pin("idna", "3.11")
+
+
+def test_every_real_pin_parses():
+    for name in fa.FILES:
+        text = (REPO / "deploy" / "constraints" / f"{name}.txt").read_text(encoding="utf-8")
+        for package in re.findall(r"^([a-z0-9][a-z0-9._-]*)==", text, re.M):
+            assert fa.pinned(text, package), (name, package)
+
+
 def test_names_compare_as_pep_503_normalizes_them():
     text = _pin("opentelemetry-api", "1.45.0")
     assert fa.pinned(text, "OpenTelemetry_API") == "1.45.0"
@@ -107,6 +123,25 @@ def test_nothing_flagged_touches_nothing(tmp_path, monkeypatch):
     assert fa.fix(files, lambda: pytest.fail("compiled with nothing flagged")) == ([], [], {})
 
 
+def test_a_re_resolve_to_the_same_version_stays_open(tmp_path, monkeypatch):
+    """A dependency that caps the package below the fix: the pin comes back
+    unchanged, nothing counts as moved, and the advisory is still open."""
+    files = _files(tmp_path, base=_pin("certifi", "1") + "# was certifi\n")
+    monkeypatch.setattr(fa, "audit", _fake_audit({"certifi": ("1", "PYSEC-1", ("2",))}))
+    before, after, moved = fa.fix(files, _fake_compile(files, {"certifi": "1"}))
+    assert moved == {}
+    assert [f.advisory for f in after] == ["PYSEC-1"]
+
+
+def test_feed_fields_cannot_break_the_report_or_the_commit():
+    hostile = "X|y\n\nSigned-off-by: someone <a@b> [l](https://e) @org/team"
+    before = [fa.Finding("base", hostile, hostile, hostile, (hostile,))]
+    text = fa.report(before, before, {hostile: {"base": (hostile, hostile)}})
+    for bad in ("|y", "\n\nSigned-off-by", "](", "@org", "<a@b>"):
+        assert bad not in text, bad
+    assert all(line.startswith(("|", "#")) or not line for line in text.splitlines())
+
+
 def test_the_report_names_each_move_and_each_open_advisory():
     before = [fa.Finding("base", "certifi", "2026.7.22", "PYSEC-1", ("2026.10.19",))]
     after = [fa.Finding("hook", "leftpad", "1.0", "GHSA-x", ())]
@@ -147,16 +182,69 @@ def test_the_workflow_audits_the_files_ci_audits():
     assert audited == set(fa.FILES)
 
 
-def test_the_workflow_uses_cis_uv_and_hands_over_through_a_branch():
-    wf = yaml.safe_load((REPO / ".github" / "workflows" / "dependency-fix.yml").read_text(encoding="utf-8"))
-    ci = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
-    uv = lambda job: next(s for s in job["steps"] if s.get("uses", "").startswith("astral-sh/setup-uv@"))  # noqa: E731
-    fix, audit = wf["jobs"]["fix"], ci["jobs"]["pip-audit"]
-    assert uv(fix)["uses"] == uv(audit)["uses"]
-    assert uv(fix)["with"]["version"] == uv(audit)["with"]["version"]
-    assert fix["permissions"] == {"contents": "write", "issues": "write"}
-    assert wf["permissions"] == {"contents": "read"}
-    run = "\n".join(s.get("run", "") for s in fix["steps"])
+def _workflow() -> dict:
+    return yaml.safe_load((REPO / ".github" / "workflows" / "dependency-fix.yml").read_text(encoding="utf-8"))
+
+
+def test_the_audit_runs_fetched_code_without_a_write_token():
+    """pip-audit and uv come from PyPI. The job that runs them can only read,
+    and the checkout does not keep its token."""
+    audit = _workflow()["jobs"]["audit"]
+    assert audit["permissions"] == {"contents": "read"}
+    [checkout] = [s for s in audit["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+    assert checkout["with"]["persist-credentials"] is False
+
+
+def test_the_publish_job_runs_no_fetched_code_and_takes_only_the_four_files():
+    publish = _workflow()["jobs"]["publish"]
+    assert publish["permissions"] == {"contents": "write", "issues": "write"}
+    uses = {s["uses"].split("@")[0] for s in publish["steps"] if "uses" in s}
+    assert uses == {"actions/checkout", "actions/download-artifact"}
+    run = "\n".join(s.get("run", "") for s in publish["steps"])
+    commands = {line.split()[0] for line in run.splitlines() if line.strip()}
+    assert not commands & {"uv", "uvx", "pip", "pip-audit", "python", "python3", "npx", "npm"}, commands
+    assert '"base.txt build.txt hook.txt ingest.txt report.md "' in run
     assert "gh pr create" not in run
     assert "Signed-off-by: github-actions[bot]" in run
-    assert 'git push -q --force origin "$BRANCH"' in run
+
+
+def test_the_push_is_leased_and_refuses_a_branch_with_someone_elses_commit():
+    run = "\n".join(s.get("run", "") for s in _workflow()["jobs"]["publish"]["steps"])
+    assert "--force-with-lease=" in run and "--force " not in run
+    assert "has commits by someone other than github-actions[bot]" in run
+
+
+def test_both_jobs_run_only_from_main():
+    for name, job in _workflow()["jobs"].items():
+        assert job["if"] == "github.ref == 'refs/heads/main'", name
+
+
+def test_the_audit_uses_cis_uv():
+    ci = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    uv = lambda job: next(s for s in job["steps"] if s.get("uses", "").startswith("astral-sh/setup-uv@"))  # noqa: E731
+    fix, audit = _workflow()["jobs"]["audit"], ci["jobs"]["pip-audit"]
+    assert uv(fix)["uses"] == uv(audit)["uses"]
+    assert uv(fix)["with"]["version"] == uv(audit)["with"]["version"]
+
+
+def _format_check() -> re.Pattern[str]:
+    run = "\n".join(s.get("run", "") for s in _workflow()["jobs"]["publish"]["steps"])
+    return re.compile(re.search(r"grep -vE '(.*?)' \"\$result", run).group(1))
+
+
+@pytest.mark.parametrize("name", ["build", "base", "hook", "ingest"])
+def test_the_publish_format_check_accepts_every_line_uv_wrote(name):
+    pattern = _format_check()
+    text = (REPO / "deploy" / "constraints" / f"{name}.txt").read_text(encoding="utf-8")
+    assert [line for line in text.split("\n") if not pattern.match(line)] == []
+
+
+@pytest.mark.parametrize("line", [
+    "foo==1 \\ ; curl x | sh",
+    "[a link](https://example.com)",
+    "    --hash=sha256:zz",
+    "-e git+https://example.com/repo.git",
+    "--index-url https://example.com/simple",
+])
+def test_the_publish_format_check_refuses_anything_else(line):
+    assert not _format_check().match(line)

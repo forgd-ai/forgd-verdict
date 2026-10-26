@@ -48,8 +48,11 @@ def normalize(name: str) -> str:
 
 
 def _pin_block(package: str) -> re.Pattern[str]:
-    # A pin is `name==version \` and its indented hash and `# via` lines.
-    return re.compile(rf"^{re.escape(normalize(package))}==(\S+) \\\n(?:    .*\n)*", re.M)
+    # A pin is `name==version \`, or `name==version ; <marker> \` in
+    # hook.txt's universal resolution, and its indented hash and `# via`
+    # lines.
+    name = re.escape(normalize(package))
+    return re.compile(rf"^{name}==([^\s;]+)(?: ;[^\\\n]*)? \\\n(?:    .*\n)*", re.M)
 
 
 def pinned(text: str, package: str) -> str | None:
@@ -84,23 +87,35 @@ def audit_all(files: dict[str, Path]) -> list[Finding]:
 
 Moved = dict[str, dict[str, tuple[str, str]]]
 
+# Package names, versions and advisory ids come from PyPI and the advisory
+# feeds, and go into the issue and the commit message. Anything outside
+# these characters is shown as "?", so a field cannot break a table row,
+# add a link or a mention, or end the message early with a trailer.
+_SAFE = re.compile(r"[^A-Za-z0-9._+:-]")
+
+
+def cell(value: str) -> str:
+    return _SAFE.sub("?", value)[:80] or "?"
+
 
 def report(before: list[Finding], after: list[Finding], moved: Moved) -> str:
     lines = ["## Pins moved for advisories", ""]
     if moved:
         lines += ["| package | file | from | to | advisories |", "|---|---|---|---|---|"]
         for package in sorted(moved):
-            ids = ", ".join(sorted({f.advisory for f in before if f.package == package}))
+            ids = ", ".join(sorted({cell(f.advisory) for f in before if f.package == package}))
             for file, (old, new) in sorted(moved[package].items()):
-                lines.append(f"| {package} | {file}.txt | {old} | {new} | {ids} |")
+                lines.append(f"| {cell(package)} | {file}.txt | {cell(old)} | {cell(new)} "
+                             f"| {ids} |")
     else:
         lines.append("None.")
     if after:
         lines += ["", "## Advisories still open", "",
                   "| package | file | version | advisory | fixed in |", "|---|---|---|---|---|"]
         for f in sorted(after, key=lambda f: (f.package, f.file, f.advisory)):
-            lines.append(f"| {f.package} | {f.file}.txt | {f.version} | {f.advisory} | "
-                         f"{', '.join(f.fixed_in) or 'no fixed release'} |")
+            fixed = ", ".join(cell(v) for v in f.fixed_in) or "no fixed release"
+            lines.append(f"| {cell(f.package)} | {f.file}.txt | {cell(f.version)} | "
+                         f"{cell(f.advisory)} | {fixed} |")
     return "\n".join(lines) + "\n"
 
 
