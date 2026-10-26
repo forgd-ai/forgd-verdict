@@ -98,7 +98,7 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 # sees the prompt text, tool output and telemetry those routes carry. A 403
 # there is a webhook failure, or for the connector a broken OAuth discovery,
 # since its own 401 is how Claude finds the identity provider. Body
-# inspection is off on both as well.
+# inspection is off on all three as well.
 
 locals {
   managed_rule_set_drs = { type = "Microsoft_DefaultRuleSet", version = "2.1" }

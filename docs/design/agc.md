@@ -153,14 +153,15 @@ subnets instead.
 | `hook` | not evaluated (see below) | off | `hook_source_ranges` allowlist; rate limit if `api_rate_limit_per_minute` is set; then allow everything | hook |
 | `api` | not evaluated (see below) | off | rate limit if `api_rate_limit_per_minute` is set; then allow everything | public, diagnostics |
 
-- **Managed rules on `connector` and `api`.** The azurerm provider requires
-  at least one managed rule set on every WAF policy, so both carry DRS 2.1.
+- **Managed rules on `connector`, `hook` and `api`.** The azurerm provider
+  requires at least one managed rule set on every WAF policy, so all three
+  carry DRS 2.1.
   Each ends with a custom rule that allows every request (`RemoteAddr`,
   operator `Any`, priority 100). A request a custom rule allows is not
   evaluated by the managed rules, so DRS never runs on these routes. The
   allowlists and rate limit come before it, at lower priority numbers.
   Cutover gate 1 is what proves it on AGC.
-- `api`: the bodies on `/hook`, `/v1`, `/intake` and `/scan` are prompt
+- `hook` and `api`: the bodies on `/hook`, `/v1`, `/intake` and `/scan` are prompt
   text, tool output and telemetry, which DRS is written to flag. A 403 on a
   governed prompt is a webhook failure. The rate limit is off by default:
   Anthropic's webhook and OTLP traffic arrives from a small pool of
@@ -286,8 +287,8 @@ chart values.
 ### What does not change
 
 - No platform auth on `/hook`, `/v1`, `/intake`, `/scan` or the connector.
-  Neither the `api` nor the `connector` policy evaluates managed rules or
-  carries auth, and
+  None of the `hook`, `api` and `connector` policies evaluates managed
+  rules or carries auth, and
   a render test asserts that only the dashboard route's backend is
   oauth2-proxy.
 - The verdict server, collector and connector authenticate their callers

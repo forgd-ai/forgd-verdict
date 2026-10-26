@@ -1,5 +1,5 @@
 """cluster-aks with ingress = "agc": Application Gateway for Containers,
-the ALB Controller's identity and grants, and the three WAF policies
+the ALB Controller's identity and grants, and the four WAF policies
 (docs/design/agc.md).
 
 Rendered with a mocked azurerm provider; nothing reaches a cloud.
