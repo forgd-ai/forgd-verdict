@@ -243,6 +243,99 @@ Set `dashboard.auth.header=authorization` too: in `oidc_jwt` mode that is
 the header the bearer token arrives in, and it defaults to the Container
 Apps EasyAuth name.
 
+## Application Gateway for Containers: `ingress.mode: agc`
+
+Microsoft supports the AKS app-routing add-on's managed NGINX through
+November 2026. `ingress.mode: agc` serves the same paths through Azure
+Application Gateway for Containers instead, with a WAF policy on each route.
+The reasoning and the cutover gates are in
+[docs/design/agc.md](../../docs/design/agc.md).
+
+The chart renders a Gateway and HTTPRoutes, and no Ingress:
+
+| Route | Paths | Backend | WAF policy |
+|---|---|---|---|
+| hook | `/hook` | verdict | `hook`: `hook_source_ranges`, then allow |
+| public | `/v1`, `/intake`, `/scan` | collector, intake | `api`: allow |
+| diagnostics | `/healthz`, `/metrics`, `/health`, `/stats` | verdict, collector | `api` |
+| dashboard | `/` | oauth2-proxy | `protected`: DRS 2.1, Bot Manager 1.1 |
+| connector | `/mcp` and its metadata | connector | `connector`: `connector_source_ranges`, then allow |
+
+Only the dashboard's route runs the managed rules. The others carry prompt
+text, tool output and telemetry, which the rule sets are written to flag,
+and a 403 there is a webhook failure or, for the connector, a broken OAuth
+discovery.
+
+In order:
+
+1. **Infrastructure.** `network-azure` for the VNet, and `cluster-aks` with
+   `ingress = "agc"`, `vnet_subnet_id` and `agc_subnet_id`. Allowlists for
+   `/hook` and the connector are `cluster-aks` variables
+   (`hook_source_ranges`, `connector_source_ranges`), not chart values.
+2. **The ALB Controller**, pinned by digest, into its own namespace, as the
+   identity `cluster-aks` federated to it:
+
+```sh
+helm upgrade --install alb-controller \
+  oci://mcr.microsoft.com/application-lb/charts/alb-controller@sha256:c6c097b2de66d59bff682a03b732bdb9439b788bf190eb1e6043b87c499f4bbd \
+  --namespace azure-alb-system --create-namespace --version 1.12.4 \
+  --set albController.namespace=azure-alb-system \
+  --set albController.podIdentity.clientID=<alb_controller_client_id>
+kubectl wait --for=condition=Available deploy/alb-controller -n azure-alb-system --timeout=5m
+kubectl get crd gateways.gateway.networking.k8s.io webapplicationfirewallpolicies.alb.networking.azure.io
+```
+
+   With `grant_alb_controller_node_reader = false`, the controller cannot
+   configure AGC until its Reader on the node resource group is granted.
+3. **cert-manager** with Gateway API support (`config.enableGatewayAPI=true`)
+   and a ClusterIssuer whose HTTP-01 solver uses `gatewayHTTPRoute` with the
+   Gateway as its parent. The chart puts `cert-manager.io/cluster-issuer` on
+   the Gateway, and cert-manager issues one certificate per HTTPS listener.
+4. **oauth2-proxy in upstream mode**, in the release's namespace. AGC has no
+   auth subrequest, so the proxy sits in the path: the dashboard route sends
+   everything to it, and it forwards signed-in requests to the dashboard.
+   On top of the install in [Putting oauth2-proxy in front](#putting-oauth2-proxy-in-front),
+   set `extraArgs.upstream=http://<release>-forgd-verdict-dashboard.<namespace>.svc:<dashboard.port>`
+   and turn its own ingress off (`ingress.enabled=false`). If its pods run
+   under a NetworkPolicy, admit AGC's subnet to them.
+5. **This chart**, with the module's outputs:
+
+```sh
+--set ingress.mode=agc
+--set ingress.agc.albId=<alb_id>
+--set ingress.agc.frontend=<alb_frontend_name>
+--set ingress.agc.wafPolicies.protected=<waf_policy_ids.protected>
+--set ingress.agc.wafPolicies.connector=<waf_policy_ids.connector>
+--set ingress.agc.wafPolicies.hook=<waf_policy_ids.hook>
+--set ingress.agc.wafPolicies.api=<waf_policy_ids.api>
+--set ingress.agc.dashboardBackend.name=oauth2-proxy
+--set networkPolicy.enabled=true
+--set networkPolicy.agc.subnetCidr=<agc_subnet_cidr>
+# oauth2-proxy's pods, the only peer the dashboard admits:
+--set networkPolicy.agc.dashboardProxy.namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=<namespace>
+--set networkPolicy.agc.dashboardProxy.podSelector.matchLabels.app\.kubernetes\.io/name=oauth2-proxy
+```
+
+6. **DNS.** A CNAME from each hostname to `alb_frontend_fqdn`.
+
+What the mode changes:
+
+- `ingress.hook.sourceRanges` and `ingress.connector.sourceRanges` are
+  refused: AGC's only allowlist is the WAF, set in Terraform.
+- Ingress annotations, a `className` other than its default, and changed
+  `ingress.gke` values are refused: nothing would read them.
+- `ingress.tls.enabled: false` is refused: the only listener left would be
+  HTTP.
+- `ingress.proxyBodySize` has no AGC setting. AGC's request body limit is
+  not published; docs/design/agc.md's first cutover gate measures it.
+- AGC's request timeout is 60 s by default and runs while a body is still
+  arriving. The hook and public routes set `ingress.agc.publicRequestTimeout`
+  (300s).
+- `networkPolicy.ingressController` is refused, and the chart requires
+  `networkPolicy.enabled` or `networkPolicy.agcWithoutPolicyAcknowledged`.
+  AGC reaches pod IPs from its subnet, so without a policy anything in that
+  subnet or the cluster reaches the dashboard's pods past oauth2-proxy.
+
 ## What sharing the hostname costs
 
 `ingress.dashboard.host` is empty by default, so the dashboard shares the

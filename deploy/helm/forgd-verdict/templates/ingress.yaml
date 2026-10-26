@@ -208,7 +208,7 @@ spec:
                 port:
                   number: {{ $.Values.dashboard.port }}
     {{- end }}
-{{- else }}
+{{- else if not (include "forgd-verdict.agc" .) }}
 {{- if and .Values.ingress.tls.enabled (not .Values.ingress.tls.clusterIssuer) (not .Values.ingress.tls.secretName) }}
 {{- fail "ingress.tls.enabled with neither ingress.tls.clusterIssuer nor ingress.tls.secretName: nginx then serves its own self-signed certificate, and the failure is a browser warning on the dashboard and a TLS verification error inside Anthropic's exporter -- which it reports as a delivery failure, not as a certificate problem" }}
 {{- end }}

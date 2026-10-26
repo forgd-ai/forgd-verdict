@@ -35,6 +35,15 @@ ingress.dashboard.host to give it a name of its own -- that also lifts the
 refusal on server-scoped annotations and gives it its own certificate.
 {{ end -}}
 {{ end -}}
+{{ if include "forgd-verdict.agc" . }}
+Application Gateway for Containers: point each hostname at the frontend's
+generated name with a CNAME (cluster-aks's alb_frontend_fqdn output). The
+ALB Controller and oauth2-proxy are installed before this chart
+(deploy/helm/README.md). Check the Gateway, the routes and their WAF
+policies are accepted:
+
+  kubectl get gateway,httproute,webapplicationfirewallpolicy,healthcheckpolicy -n {{ .Release.Namespace }}
+{{ end -}}
 {{- else -}}
 No ingress. Port-forward to reach a role:
 
@@ -50,7 +59,7 @@ Compliance Access Key{{ end }} in a chart-managed Secret, so `helm get values` s
 them. Point secrets.existingSecret at external-secrets or the CSI driver
 for anything but a lab.
 {{ end -}}
-{{- if and .Values.dashboard.enabled .Values.ingress.dashboard.enabled (not .Values.ingress.dashboard.annotations) (not (include "forgd-verdict.gke" .)) }}
+{{- if and .Values.dashboard.enabled .Values.ingress.dashboard.enabled (not .Values.ingress.dashboard.annotations) (not (include "forgd-verdict.gke" .)) (not (include "forgd-verdict.agc" .)) }}
 The dashboard has no auth proxy in front of it. It will refuse every
 request until policy.yaml configures auth.mode -- oidc_jwt to verify tokens
 itself, or trusted_header behind a proxy that provably strips inbound

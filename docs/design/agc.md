@@ -212,7 +212,7 @@ refused.
 | `diagnostics` | `host`, `extraHosts` | `/healthz`, `/metrics` (verdict), `/health`, `/stats` (collector), if `ingress.diagnostics.enabled` | verdict, collector | `api` |
 | `dashboard` | `dashboard.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/` (prefix) | `ingress.agc.dashboardBackend` (oauth2-proxy) | `protected` |
 | `connector` | `connector.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/mcp` and `/.well-known/oauth-protected-resource/mcp`, both exact, on either kind of host | connector | `connector` |
-| `redirect` | every host | port 80, everything except `/.well-known/acme-challenge/` | 301 to HTTPS | none (no backend) |
+| `redirect` | every host | port 80, `/`; cert-manager's own solver route for `/.well-known/acme-challenge/<token>` is longer and wins | 301 to HTTPS | none (no backend) |
 
 - every collision check the Ingress template makes today, on the same
   values: `extraHosts` repeating `host`, `dashboard.host` or `connector.host`
@@ -240,7 +240,7 @@ certificate Secret:
 
 | `ingress.tls` | Listener `certificateRefs` | Issued by |
 |---|---|---|
-| `enabled`, `clusterIssuer` set | `<release>-tls-<n>` per host, one SAN each | cert-manager, from the Gateway's `cert-manager.io/cluster-issuer` annotation, HTTP-01 through the `redirect` route's exempt path |
+| `enabled`, `clusterIssuer` set | `<release>-tls-<n>` per host, one SAN each | cert-manager, from the Gateway's `cert-manager.io/cluster-issuer` annotation, HTTP-01 through cert-manager's solver route on the port-80 listener |
 | `enabled`, `secretName` set | `secretName` on every listener; it must cover every host | the operator |
 | `enabled`, neither set | fails, as today | |
 | `enabled: false` | fails in `agc` mode | an HTTP-only listener would carry bearer tokens in clear |
@@ -331,7 +331,8 @@ chart. The lab does not move until every one passes:
 - each collision check failing as it does in `nginx` mode;
 - every route having a WAF policy, and each policy matching the table;
 - only the dashboard route's backend being oauth2-proxy;
-- the ACME exemption on the redirect route;
+- the redirect route binding to the port-80 listener only, and every other
+  route to HTTPS listeners only;
 - every refused value in `agc` mode;
 - the TLS table;
 - the NetworkPolicy peers.

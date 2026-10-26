@@ -9,7 +9,28 @@ source. Egress is left alone.
 */}}
 {{- $np := .Values.networkPolicy }}
 {{- $ic := $np.ingressController }}
-{{- if not (or $ic.namespaceSelector $ic.podSelector $np.extraFrom) }}
+{{- $agcMode := include "forgd-verdict.agc" . }}
+{{- $dp := $np.agc.dashboardProxy }}
+{{- if $agcMode }}
+{{/*
+AGC MODE. AGC sends traffic and probes from its delegated subnet straight
+to pod IPs: the subnet is admitted to every role but the dashboard, and the
+dashboard admits only oauth2-proxy's pods (and dashboardExtraFrom), so a
+request that does not pass the proxy cannot reach it.
+*/}}
+{{- if or $ic.namespaceSelector $ic.podSelector }}
+{{- fail "networkPolicy.ingressController does not apply in ingress.mode agc: AGC reaches pods from its subnet, with no controller in the data path. Set networkPolicy.agc.subnetCidr, and networkPolicy.agc.dashboardProxy for oauth2-proxy." }}
+{{- end }}
+{{- if not $np.agc.subnetCidr }}
+{{- fail "networkPolicy.enabled in ingress.mode agc needs networkPolicy.agc.subnetCidr, network-azure's agc_subnet_cidr. Without it every routed role refuses AGC's traffic and its health probes." }}
+{{- end }}
+{{- if and (or $dp.namespaceSelector $dp.podSelector) (not (and $dp.namespaceSelector $dp.podSelector)) }}
+{{- fail "networkPolicy.agc.dashboardProxy needs both namespaceSelector and podSelector. A namespaceSelector alone admits every pod in those namespaces, and a podSelector alone matches only pods in the release's namespace." }}
+{{- end }}
+{{- if and .Values.dashboard.enabled .Values.ingress.dashboard.enabled (not $dp.namespaceSelector) }}
+{{- fail "networkPolicy.enabled in ingress.mode agc with the dashboard routed needs networkPolicy.agc.dashboardProxy, oauth2-proxy's namespace and pods: the dashboard admits the proxy and nothing else, and with no selector it would refuse the proxy too." }}
+{{- end }}
+{{- else if not (or $ic.namespaceSelector $ic.podSelector $np.extraFrom) }}
 {{- fail "networkPolicy.enabled needs networkPolicy.ingressController.namespaceSelector and podSelector, the ingress controller's namespace and pods, or networkPolicy.extraFrom for a load balancer that reaches the pods directly (and networkPolicy.dashboardExtraFrom for the dashboard). With neither, every role would refuse all traffic." }}
 {{- end }}
 {{- if and (or $ic.namespaceSelector $ic.podSelector) (not (and $ic.namespaceSelector $ic.podSelector)) }}
@@ -37,14 +58,21 @@ spec:
   policyTypes:
     - Ingress
   {{- $extra := ternary $np.dashboardExtraFrom $np.extraFrom (eq $role "dashboard") }}
-  {{- if or $ic.namespaceSelector $extra }}
+  {{- $sel := $ic }}
+  {{- if $agcMode }}{{ $sel = ternary $dp (dict) (eq $role "dashboard") }}{{ end }}
+  {{- $agcSubnet := and $agcMode (ne $role "dashboard") }}
+  {{- if or $sel.namespaceSelector $agcSubnet $extra }}
   ingress:
     - from:
-        {{- if $ic.namespaceSelector }}
+        {{- if $sel.namespaceSelector }}
         - namespaceSelector:
-            {{- toYaml $ic.namespaceSelector | nindent 12 }}
+            {{- toYaml $sel.namespaceSelector | nindent 12 }}
           podSelector:
-            {{- toYaml $ic.podSelector | nindent 12 }}
+            {{- toYaml $sel.podSelector | nindent 12 }}
+        {{- end }}
+        {{- if $agcSubnet }}
+        - ipBlock:
+            cidr: {{ $np.agc.subnetCidr }}
         {{- end }}
         {{- with $extra }}
         {{- toYaml . | nindent 8 }}
