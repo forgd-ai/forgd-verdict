@@ -138,18 +138,20 @@ subnets instead.
   credential and three role assignments, and the WAF policies below.
 - Outputs: `ingress_mode`; `ingress_class_name` (null under `"agc"`); and
   under `"agc"`, `alb_id`, `alb_frontend_name`, `alb_frontend_fqdn`,
-  `agc_subnet_cidr`, `waf_policy_ids` (a map keyed `protected`, `connector`,
-  `api`), and the controller identity's client id. The AKS example's
+  `waf_policy_ids` (a map keyed `protected`, `connector`, `hook`, `api`),
+  and the controller identity's client and principal ids. The AGC
+  subnet's CIDR comes from `network-azure`. The AKS example's
   `helm_install_command` output emits the matching `--set` flags for whichever mode is
   on.
 
-**WAF policies.** Three, all in Prevention mode:
+**WAF policies.** Four, all in Prevention mode:
 
 | Policy | Managed rules | Body inspection | Custom rules | Routes |
 |---|---|---|---|---|
 | `protected` | DRS 2.1, Bot Manager 1.1 | on | none | dashboard (oauth2-proxy) |
 | `connector` | not evaluated (see below) | off | `connector_source_ranges` allowlist, then allow everything | connector |
-| `api` | not evaluated (see below) | off | `hook_source_ranges` allowlist on `/hook`; rate limit if `api_rate_limit_per_minute` is set; then allow everything | public, diagnostics |
+| `hook` | not evaluated (see below) | off | `hook_source_ranges` allowlist; rate limit if `api_rate_limit_per_minute` is set; then allow everything | hook |
+| `api` | not evaluated (see below) | off | rate limit if `api_rate_limit_per_minute` is set; then allow everything | public, diagnostics |
 
 - **Managed rules on `connector` and `api`.** The azurerm provider requires
   at least one managed rule set on every WAF policy, so both carry DRS 2.1.
@@ -167,6 +169,10 @@ subnets instead.
 - `connector`: the connector answers 401 itself so Claude can find its
   OAuth metadata (the chart sets `enable-modsecurity: "false"` on its
   Ingress for this). A managed-rule 403 in its place breaks discovery.
+- `/hook` has a route and a policy of its own, so `hook_source_ranges`
+  applies to whatever the Gateway routes there. A path match inside a
+  shared policy (`RequestUri` begins with `/hook`) could disagree with the
+  Gateway's path matching on case, repeated slashes or encoding.
 - The allowlists are `RemoteAddr` `IPMatch` rules. They move from chart
   values to module variables because the WAF policy is an Azure resource;
   in `agc` mode the chart refuses `ingress.hook.sourceRanges` and
@@ -200,7 +206,8 @@ refused.
 
 | Route | Hosts | Paths | Backend | WAF policy |
 |---|---|---|---|---|
-| `public` | `host`, `extraHosts` | `/hook`, `/v1`, `/intake`, `/scan`, each only if its role is enabled | verdict, collector, intake | `api` |
+| `hook` | `host`, `extraHosts` | `/hook`, if the verdict server is enabled | verdict | `hook` |
+| `public` | `host`, `extraHosts` | `/v1`, `/intake`, `/scan`, each only if its role is enabled | collector, intake | `api` |
 | `diagnostics` | `host`, `extraHosts` | `/healthz`, `/metrics` (verdict), `/health`, `/stats` (collector), if `ingress.diagnostics.enabled` | verdict, collector | `api` |
 | `dashboard` | `dashboard.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/` (prefix) | `ingress.agc.dashboardBackend` (oauth2-proxy) | `protected` |
 | `connector` | `connector.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/mcp` and `/.well-known/oauth-protected-resource/mcp`, both exact, on either kind of host | connector | `connector` |
@@ -209,10 +216,10 @@ refused.
 - every collision check the Ingress template makes today, on the same
   values: `extraHosts` repeating `host`, `dashboard.host` or `connector.host`
   inside `extraHosts`, and the connector sharing the dashboard's host;
-- `timeouts.request` on the public route from
+- `timeouts.request` on the hook and public routes from
   `ingress.agc.publicRequestTimeout` (default `300s`);
 - a `WebApplicationFirewallPolicy` per route from
-  `ingress.agc.wafPolicies.{protected,connector,api}`. The chart fails to
+  `ingress.agc.wafPolicies.{protected,connector,hook,api}`. The chart fails to
   render a routed role whose policy id is empty. There is no route without
   a policy;
 - a `HealthCheckPolicy` per routed backend: GET `forgd-verdict.readyPath` on
@@ -238,7 +245,7 @@ certificate Secret:
 | `enabled: false` | fails in `agc` mode | an HTTP-only listener would carry bearer tokens in clear |
 
 **NetworkPolicy.** In `agc` mode, when `networkPolicy.enabled`:
-- `networkPolicy.agc.subnetCidr` (the module's `agc_subnet_cidr`) is admitted
+- `networkPolicy.agc.subnetCidr` (`network-azure`'s `agc_subnet_cidr`) is admitted
   as an `ipBlock` to the pods behind the public, diagnostics and connector
   routes: verdict, collector, intake, connector. AGC sends data traffic and
   probes from that subnet.
@@ -311,7 +318,8 @@ chart. The lab does not move until every one passes:
    to every backend succeed.
 6. An Entra ID sign-in through the dashboard route, with oauth2-proxy's
    split `Set-Cookie`, completes.
-7. A request held open longer than 60 s on the public route completes.
+7. A request held open longer than 60 s on the hook and public routes
+   completes.
 8. Every certificate is Ready, every HTTPRoute and
    WebApplicationFirewallPolicy reports Accepted, and the existing
    `forgd-verdict verify-deployment` passes against the scratch hostname.

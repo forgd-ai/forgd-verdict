@@ -78,16 +78,22 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 
 # --- WAF policies ----------------------------------------------------------
 #
-# Three, all in Prevention mode, attached per HTTPRoute by the chart's
+# Four, all in Prevention mode, attached per HTTPRoute by the chart's
 # WebApplicationFirewallPolicy objects:
 #
 #   protected  the dashboard: DRS 2.1 and Bot Manager 1.1 on, bodies inspected
 #   connector  the connector: its source-range rule, then allow
-#   api        /hook, /v1, /intake, /scan and diagnostics: the /hook
-#              source-range rule and an optional rate limit, then allow
+#   hook       /hook: its source-range rule and the optional rate limit,
+#              then allow
+#   api        /v1, /intake, /scan and diagnostics: the optional rate limit,
+#              then allow
 #
-# The provider requires a managed rule set on every policy. On connector
-# and api the last custom rule allows every request, and a request a
+# /hook has a route and a policy of its own so that its source ranges
+# apply to whatever the Gateway routes there, with no path match in the
+# WAF to disagree with the route's.
+#
+# The provider requires a managed rule set on every policy. On connector,
+# hook and api the last custom rule allows every request, and a request a
 # custom rule allows is not evaluated by the managed rules, so DRS never
 # sees the prompt text, tool output and telemetry those routes carry. A 403
 # there is a webhook failure, or for the connector a broken OAuth discovery,
@@ -178,9 +184,9 @@ resource "azurerm_web_application_firewall_policy" "connector" {
   }
 }
 
-resource "azurerm_web_application_firewall_policy" "api" {
+resource "azurerm_web_application_firewall_policy" "hook" {
   count               = local.agc ? 1 : 0
-  name                = "${var.cluster_name}-waf-api"
+  name                = "${var.cluster_name}-waf-hook"
   resource_group_name = var.resource_group_name
   location            = var.location
   tags                = var.tags
@@ -208,15 +214,63 @@ resource "azurerm_web_application_firewall_policy" "api" {
         negation_condition = true
         match_values       = var.hook_source_ranges
       }
+    }
+  }
+
+  dynamic "custom_rules" {
+    for_each = toset(var.api_rate_limit_per_minute == null ? [] : ["limit"])
+    content {
+      name                 = "RateLimit"
+      priority             = 20
+      rule_type            = "RateLimitRule"
+      action               = "Block"
+      rate_limit_duration  = "OneMin"
+      rate_limit_threshold = var.api_rate_limit_per_minute
+      group_rate_limit_by  = "ClientAddr"
+
       match_conditions {
         match_variables {
-          variable_name = "RequestUri"
+          variable_name = "RemoteAddr"
         }
-        operator     = "BeginsWith"
-        transforms   = ["Lowercase"]
-        match_values = ["/hook"]
+        operator = "Any"
       }
     }
+  }
+
+  custom_rules {
+    name      = "AllowRest"
+    priority  = 100
+    rule_type = "MatchRule"
+    action    = "Allow"
+
+    match_conditions {
+      match_variables {
+        variable_name = "RemoteAddr"
+      }
+      operator = "Any"
+    }
+  }
+
+  managed_rules {
+    managed_rule_set {
+      type    = local.managed_rule_set_drs.type
+      version = local.managed_rule_set_drs.version
+    }
+  }
+}
+
+resource "azurerm_web_application_firewall_policy" "api" {
+  count               = local.agc ? 1 : 0
+  name                = "${var.cluster_name}-waf-api"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  tags                = var.tags
+
+  policy_settings {
+    enabled                  = true
+    mode                     = "Prevention"
+    request_body_check       = false
+    request_body_enforcement = false
   }
 
   dynamic "custom_rules" {
@@ -267,6 +321,7 @@ resource "azurerm_application_load_balancer_security_policy" "waf" {
   for_each = local.agc ? {
     protected = azurerm_web_application_firewall_policy.protected[0].id
     connector = azurerm_web_application_firewall_policy.connector[0].id
+    hook      = azurerm_web_application_firewall_policy.hook[0].id
     api       = azurerm_web_application_firewall_policy.api[0].id
   } : {}
   name                               = "${var.cluster_name}-${each.key}"

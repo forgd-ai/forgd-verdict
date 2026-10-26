@@ -34,9 +34,9 @@ locals {
   ingress = var.ingress != null ? var.ingress : (var.app_routing_enabled == false ? "none" : "app_routing")
   agc     = local.ingress == "agc"
 
-  # "1.35" or "1.35.7" -> [1, 35]. Null when kubernetes_version is unset or
-  # not of that shape.
-  kubernetes_minor = try([for n in slice(split(".", var.kubernetes_version), 0, 2) : tonumber(n)], null)
+  # "1.35" or "1.35.7" -> [1, 35]; kubernetes_version's validation admits
+  # only that shape.
+  kubernetes_minor = var.kubernetes_version == null ? null : [for n in slice(split(".", var.kubernetes_version), 0, 2) : tonumber(n)]
 }
 
 # With vnet_subnet_id, the control plane runs as this identity, which needs
@@ -175,7 +175,7 @@ resource "azurerm_kubernetes_cluster" "this" {
   # reach the API server fails instead of reporting drift.
   #
   # It is nginx underneath, so the chart's nginx.ingress.kubernetes.io/*
-  # annotations apply. The ingress class is webapprouting.kubernetes.io --
+  # annotations apply. The ingress class is webapprouting.kubernetes.azure.com --
   # pass the `ingress_class_name` output to the chart rather than assuming
   # "nginx".
   # toset([...]) rather than [1]: Terraform 1.9 rejects a bare numeric list
@@ -215,6 +215,10 @@ resource "azurerm_kubernetes_cluster" "this" {
     precondition {
       condition     = local.agc || var.agc_subnet_id == null
       error_message = "agc_subnet_id is only for ingress = \"agc\"."
+    }
+    precondition {
+      condition     = !local.agc || lower(coalesce(var.agc_subnet_id, "x")) != lower(coalesce(var.vnet_subnet_id, "y"))
+      error_message = "agc_subnet_id is the nodes' subnet. AGC needs a /24 of its own, delegated to Microsoft.ServiceNetworking/trafficControllers, holding nothing else."
     }
     precondition {
       condition     = !local.agc || var.kubernetes_version == null || try(local.kubernetes_minor[0] > 1 || (local.kubernetes_minor[0] == 1 && local.kubernetes_minor[1] >= 32), false)

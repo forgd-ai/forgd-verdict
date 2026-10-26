@@ -68,6 +68,7 @@ output "waf_policy_ids" {
   value = local.agc ? {
     protected = azurerm_web_application_firewall_policy.protected[0].id
     connector = azurerm_web_application_firewall_policy.connector[0].id
+    hook      = azurerm_web_application_firewall_policy.hook[0].id
     api       = azurerm_web_application_firewall_policy.api[0].id
   } : null
   description = "The chart's ingress.agc.wafPolicies."
