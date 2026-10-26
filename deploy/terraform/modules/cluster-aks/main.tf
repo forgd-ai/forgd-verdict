@@ -34,6 +34,13 @@ locals {
   ingress = var.ingress != null ? var.ingress : (var.app_routing_enabled == false ? "none" : "app_routing")
   agc     = local.ingress == "agc"
 
+  # Whether the nodes join vnet_subnet_id, which decides the control
+  # plane's identity. A subnet created in the same apply has an id that is
+  # not known at plan, and a count that read it would fail the plan with
+  # "Invalid count argument". ingress = "agc" always has a subnet, so it
+  # answers without reading the id.
+  own_vnet = local.agc ? true : var.vnet_subnet_id != null
+
   # "1.35" or "1.35.7" -> [1, 35]; kubernetes_version's validation admits
   # only that shape.
   kubernetes_minor = var.kubernetes_version == null ? null : [for n in slice(split(".", var.kubernetes_version), 0, 2) : tonumber(n)]
@@ -45,7 +52,7 @@ locals {
 # cluster, so the assignment comes first. A system-assigned identity cannot
 # be granted anything before the cluster exists.
 resource "azurerm_user_assigned_identity" "control_plane" {
-  count               = var.vnet_subnet_id == null ? 0 : 1
+  count               = local.own_vnet ? 1 : 0
   name                = "${var.cluster_name}-control-plane"
   resource_group_name = var.resource_group_name
   location            = var.location
@@ -53,7 +60,7 @@ resource "azurerm_user_assigned_identity" "control_plane" {
 }
 
 resource "azurerm_role_assignment" "control_plane_subnet" {
-  count                = var.vnet_subnet_id == null ? 0 : 1
+  count                = local.own_vnet ? 1 : 0
   scope                = var.vnet_subnet_id
   role_definition_name = "Network Contributor"
   principal_id         = azurerm_user_assigned_identity.control_plane[0].principal_id
@@ -107,8 +114,8 @@ resource "azurerm_kubernetes_cluster" "this" {
   # separate again from the two the workloads federate to. Changing its type
   # replaces the cluster.
   identity {
-    type         = var.vnet_subnet_id == null ? "SystemAssigned" : "UserAssigned"
-    identity_ids = var.vnet_subnet_id == null ? null : [azurerm_user_assigned_identity.control_plane[0].id]
+    type         = local.own_vnet ? "UserAssigned" : "SystemAssigned"
+    identity_ids = local.own_vnet ? [azurerm_user_assigned_identity.control_plane[0].id] : null
   }
 
   # Manual: the default node pool below and no node auto-provisioning,
