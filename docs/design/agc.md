@@ -176,11 +176,14 @@ chart, followed by a wait for its CRDs (`gateway.networking.k8s.io`,
 **Mode.** `ingress.mode`: `nginx` (default), `gke`, `agc`. Today GKE mode is
 detected from `ingress.className: gce`. For one release that still selects
 `gke` when `ingress.mode` is unset; setting `ingress.mode` to something else
-with `className: gce` fails. `agc` refuses `ingress.className`,
-`ingress.annotations`, `ingress.dashboard.annotations`,
-`ingress.diagnostics.annotations`, `ingress.connector.annotations` and every
-`ingress.gke.*` value: each is NGINX- or GKE-only and would otherwise be
-ignored.
+with `className: gce` fails. `agc` refuses each NGINX- or GKE-only value
+that differs from the chart's default, since it would otherwise be ignored:
+`ingress.className` other than `nginx`, a non-empty `ingress.annotations`,
+`ingress.dashboard.annotations`, `ingress.diagnostics.annotations` or
+`ingress.connector.annotations`, and any `ingress.gke.*` value changed from
+its default. The defaults themselves (`className: nginx`,
+`gke.collectorTimeoutSec: 120`) render nothing in `agc` mode and are not
+refused.
 
 **What `agc` renders.** No Ingress. Instead:
 
@@ -192,8 +195,8 @@ ignored.
 |---|---|---|---|---|
 | `public` | `host`, `extraHosts` | `/hook`, `/v1`, `/intake`, `/scan`, each only if its role is enabled | verdict, collector, intake | `api` |
 | `diagnostics` | `host`, `extraHosts` | `/healthz`, `/metrics` (verdict), `/health`, `/stats` (collector), if `ingress.diagnostics.enabled` | verdict, collector | `api` |
-| `dashboard` | `dashboard.host` or `host` | `/` | `ingress.agc.dashboardBackend` (oauth2-proxy) | `protected` |
-| `connector` | `connector.host` | `/` (separate host) or its paths on `host`, as today | connector | `connector` |
+| `dashboard` | `dashboard.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/` (prefix) | `ingress.agc.dashboardBackend` (oauth2-proxy) | `protected` |
+| `connector` | `connector.host` when it differs from `host`; otherwise `host` and `extraHosts` | `/mcp` and `/.well-known/oauth-protected-resource/mcp`, both exact, on either kind of host | connector | `connector` |
 | `redirect` | every host | port 80, everything except `/.well-known/acme-challenge/` | 301 to HTTPS | none (no backend) |
 
 - every collision check the Ingress template makes today, on the same
@@ -241,9 +244,16 @@ certificate Secret:
 - The `trusted_header` checks in `dashboard.yaml` accept
   `networkPolicy.agc.dashboardProxy` as the proxy peer in `agc` mode, in
   place of `ingressController`.
-- `networkPolicy.enabled` defaults to true in `agc` mode. Without it,
-  anything in the AGC subnet or the cluster can reach the dashboard pods
-  directly.
+- `networkPolicy.extraFrom` and `networkPolicy.dashboardExtraFrom` keep
+  their meaning: extra peers beside the AGC subnet for the routed roles,
+  and beside `dashboardProxy` for the dashboard, the latter still needing
+  `dashboardExtraFromTrustedAcknowledged` under `trusted_header`.
+- `networkPolicy.enabled` stays a boolean defaulting to false, so the chart
+  cannot tell an omitted value from an explicit one. In `agc` mode it fails
+  to render unless `networkPolicy.enabled` is true or
+  `networkPolicy.agcWithoutPolicyAcknowledged` is true. Without a policy,
+  anything in the AGC subnet or the cluster reaches the dashboard pods
+  directly, past oauth2-proxy.
 
 **NOTES.txt** prints the frontend FQDN to CNAME, the HTTPRoute and
 WebApplicationFirewallPolicy status commands, and the oauth2-proxy and ALB
@@ -275,15 +285,19 @@ chart. The lab does not move until every one passes:
 
 1. A 64 MiB request through each of `/hook`, `/v1`, `/intake` and `/scan`
    reaches its backend, both with a plain body and with a body carrying
-   DRS-triggering strings (SQL injection, XSS, path traversal). If AGC caps
-   bodies below 64 MiB, the cap is recorded and the chart's documented
-   limit changes before anything moves.
+   DRS-triggering strings (SQL injection, XSS, path traversal). The chart
+   promises 64 MiB today (`ingress.proxyBodySize`). If AGC caps bodies
+   below that, the migration stops. Lowering the promise is a separate,
+   reviewed change that the owner decides on, not a step in this runbook.
 2. The same DRS-triggering strings in a request to `/` (the dashboard route)
    answer 403.
 3. An unauthenticated request to the connector answers the connector's 401
    with its `WWW-Authenticate` metadata, not a WAF 403.
-4. With `hook_source_ranges` set, `/hook` from outside it answers 403, and
-   the WAF log shows the real client address in `RemoteAddr`.
+4. With `hook_source_ranges` set, `/hook` from outside it answers 403 and
+   from inside it reaches the verdict server, and the WAF log shows the real
+   client address in `RemoteAddr`. The same for the connector with
+   `connector_source_ranges`: outside answers 403, inside answers the
+   connector's own 401.
 5. A pod in another namespace, and a request addressed to a dashboard pod
    IP, cannot reach the dashboard. oauth2-proxy can, and AGC's health probes
    to every backend succeed.
