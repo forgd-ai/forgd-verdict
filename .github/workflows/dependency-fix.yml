@@ -1,0 +1,114 @@
+name: dependency fix
+
+# Daily: audits deploy/constraints/*.txt as the dependency audit in ci.yml
+# does, and when an advisory names a pinned package with a fixed release,
+# moves only those pins (scripts/fix_advisories.py). Dependabot does not read
+# these files, so without this an advisory fails every pull request until
+# someone moves the pin by hand.
+#
+# The fix goes to the deps/advisory-fixes branch, and one open issue carries
+# the report and a link that opens the pull request. Actions may not create
+# pull requests in this repository, and a pull request a person opens runs
+# CI as any other does.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-fix
+  cancel-in-progress: false
+
+env:
+  BRANCH: deps/advisory-fixes
+  ISSUE_TITLE: "Dependency advisories: pins to move"
+
+jobs:
+  fix:
+    name: move pins an advisory names
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The uv ci.yml's dependency audit pins, so the files are rewritten
+      # exactly as compile_constraints.sh writes them there.
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.9.27"
+
+      - name: Audit and move flagged pins
+        id: fix
+        run: python3 scripts/fix_advisories.py --report "$RUNNER_TEMP/report.md"
+
+      - name: The rewritten files still match pyproject.toml
+        if: steps.fix.outputs.changed == 'true'
+        run: scripts/compile_constraints.sh --check
+
+      - name: Push the fix and report it
+        if: steps.fix.outputs.changed == 'true' || steps.fix.outputs.unfixed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CHANGED: ${{ steps.fix.outputs.changed }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/issue.md"
+          if [ "$CHANGED" = true ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$BRANCH"
+            git add deploy/constraints/build.txt deploy/constraints/base.txt \
+              deploy/constraints/hook.txt deploy/constraints/ingest.txt
+            {
+              printf 'build(deps): move pins named by advisories\n\n'
+              cat "$RUNNER_TEMP/report.md"
+              printf '\nSigned-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>\n'
+            } > "$RUNNER_TEMP/commit.txt"
+            git commit -q -F "$RUNNER_TEMP/commit.txt"
+            git push -q --force origin "$BRANCH"
+            {
+              printf 'The daily dependency fix moved these pins on `%s`.\n\n' "$BRANCH"
+              printf '[Open the pull request](https://github.com/%s/compare/main...%s?expand=1), check CI, and merge it.\n\n' "$REPO" "$BRANCH"
+              cat "$RUNNER_TEMP/report.md"
+            } > "$body"
+          else
+            {
+              printf 'The daily dependency fix found advisories it could not fix by moving a pin.\n\n'
+              cat "$RUNNER_TEMP/report.md"
+            } > "$body"
+          fi
+          number="$(gh issue list -R "$REPO" --state open --search "in:title \"$ISSUE_TITLE\"" \
+            --json number,title --jq "map(select(.title == env.ISSUE_TITLE)) | .[0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue edit "$number" -R "$REPO" --body-file "$body"
+          else
+            gh issue create -R "$REPO" --title "$ISSUE_TITLE" --body-file "$body"
+          fi
+
+      - name: Close the report when nothing is flagged
+        if: steps.fix.outputs.changed == 'false' && steps.fix.outputs.unfixed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          number="$(gh issue list -R "$REPO" --state open --search "in:title \"$ISSUE_TITLE\"" \
+            --json number,title --jq "map(select(.title == env.ISSUE_TITLE)) | .[0].number // empty")"
+          if [ -n "$number" ]; then
+            gh issue close "$number" -R "$REPO" --comment "No advisory names a pinned package on main."
+          fi
+
+      - name: Fail while an advisory has no fix here
+        if: steps.fix.outputs.unfixed == 'true'
+        run: |
+          echo "::error::an advisory remains after moving pins; see the issue '$ISSUE_TITLE'"
+          exit 1
