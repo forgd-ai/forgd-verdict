@@ -140,7 +140,7 @@ subnets instead.
   under `"agc"`, `alb_id`, `alb_frontend_name`, `alb_frontend_fqdn`,
   `agc_subnet_cidr`, `waf_policy_ids` (a map keyed `protected`, `connector`,
   `api`), and the controller identity's client id. The AKS example's
-  `helm_set` output emits the matching `--set` flags for whichever mode is
+  `helm_install_command` output emits the matching `--set` flags for whichever mode is
   on.
 
 **WAF policies.** Three, all in Prevention mode:
@@ -306,7 +306,7 @@ chart. The lab does not move until every one passes:
 7. A request held open longer than 60 s on the public route completes.
 8. Every certificate is Ready, every HTTPRoute and
    WebApplicationFirewallPolicy reports Accepted, and the existing
-   `verify-deployment` passes against the scratch hostname.
+   `forgd-verdict verify-deployment` passes against the scratch hostname.
 
 **Render tests:**
 - the routing tables above, for every combination of enabled roles,
