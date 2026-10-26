@@ -70,6 +70,12 @@ variable "registry_id" {
   description = "The registry holding the image. Empty skips the AcrPull grant, which is right only when the image is public."
 }
 
+variable "grant_registry_pull" {
+  type        = bool
+  default     = null
+  description = "Give the kubelet AcrPull on registry_id. Null decides from registry_id being set. Set true when the registry is created in the same apply: its id is not known at plan, and the module cannot count the grant from it."
+}
+
 variable "namespace" {
   type        = string
   default     = "forgd"
@@ -274,7 +280,7 @@ variable "entra_admin_group_object_ids" {
 variable "vnet_subnet_id" {
   type        = string
   default     = null
-  description = "A subnet of your own VNet for the nodes and the private API server's endpoint. Null lets AKS create a VNet in the node resource group. Set, the control plane runs as a user-assigned identity given Network Contributor on the subnet. Setting or clearing it on an existing cluster replaces the cluster."
+  description = "A subnet of your own VNet for the nodes and the private API server's endpoint. Null lets AKS create a VNet in the node resource group. Set, the control plane runs as a user-assigned identity given Network Contributor on the subnet. Setting or clearing it on an existing cluster replaces the cluster. Outside ingress = \"agc\", the id must be known at plan: for a subnet created in the same apply, pass an id built from its names."
   validation {
     condition     = var.vnet_subnet_id == null || can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Network/virtualNetworks/[^/]+/subnets/[^/]+$", var.vnet_subnet_id))
     error_message = "vnet_subnet_id must be a subnet's resource id: /subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>."

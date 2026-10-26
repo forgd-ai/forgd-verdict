@@ -35,6 +35,11 @@ terraform {
 }
 
 locals {
+  # Whether the dashboard gets platform sign-in. dashboard_auth_enabled
+  # answers for a client id created in the same apply, whose value is not
+  # known at plan and cannot decide a count.
+  dashboard_auth = var.dashboard_auth_enabled != null ? var.dashboard_auth_enabled : var.dashboard_auth_client_id != ""
+
   # Upper case, hyphens to underscores, as the Helm chart and app-ecs name
   # them: an environment variable name cannot hold a hyphen.
   org_env = { for name, id in var.org_ids : "FORGD_ORG_ID_${upper(replace(name, "-", "_"))}" => id }
@@ -802,7 +807,7 @@ resource "azurerm_container_app" "dashboard" {
   }
 
   dynamic "secret" {
-    for_each = toset(var.dashboard_auth_client_id == "" ? [] : ["entra"])
+    for_each = toset(local.dashboard_auth ? ["entra"] : [])
     content {
       name                = "entra-client-secret"
       value               = var.dashboard_auth_client_secret_secret_id == "" ? var.dashboard_auth_client_secret : null
@@ -916,7 +921,7 @@ resource "azurerm_container_app" "dashboard" {
       # outcome, not a regression.
       env {
         name  = "FORGD_DASHBOARD_STRIPPED_BY"
-        value = var.dashboard_auth_client_id == "" ? "" : "Container Apps EasyAuth"
+        value = local.dashboard_auth ? "Container Apps EasyAuth" : ""
       }
       dynamic "env" {
         for_each = { for k, v in local.base_env : k => v if k != "AZURE_CLIENT_ID" }
@@ -1337,7 +1342,7 @@ resource "azurerm_container_app_job" "ingest" {
 # oauth2-proxy, its own oidc_jwt mode -- should not get a half-configured
 # Entra provider. Leave the client id empty and none is created.
 resource "azapi_resource" "dashboard_auth" {
-  count = var.dashboard_auth_client_id == "" ? 0 : 1
+  count = local.dashboard_auth ? 1 : 0
 
   type      = "Microsoft.App/containerApps/authConfigs@2024-03-01"
   name      = "current"
