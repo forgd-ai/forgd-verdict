@@ -113,132 +113,225 @@ which forwards signed-in requests to the dashboard with the ID token in
 `Authorization`. That is oauth2-proxy's own upstream mode, not a
 Microsoft-documented pattern.
 
+
 ## Design
 
 ### Terraform
 
 **`network-azure` (new).** A VNet with a node subnet and a /24 delegated to
-`Microsoft.ServiceNetworking/trafficControllers`. Outputs both subnet ids.
-A deployment with its own network passes its subnets instead.
+`Microsoft.ServiceNetworking/trafficControllers`. Outputs both subnet ids
+and the AGC subnet's CIDR. A deployment with its own network passes its
+subnets instead.
 
 **`cluster-aks`.**
-- New `ingress` variable: `"app_routing"` (today's behaviour, the default
-  for now) or `"agc"`. `"agc"` requires `vnet_subnet_id` and
-  `agc_subnet_id`, turns the app-routing add-on off, and sets
-  `ingress_class_name` to null so nothing renders an Ingress.
-- New `node_resource_group` variable, so the controller's Reader grant
-  targets a name known before the cluster exists.
-- Under `"agc"`, the module creates the AGC, its frontend and subnet
-  association, the controller's identity with its federated credential and
-  three role assignments, and two WAF policies with their security
-  policies (below). Outputs: `alb_id`, `alb_frontend_name`,
-  `alb_frontend_fqdn`, `waf_policy_ids`, and the controller identity's
-  client id.
+- `ingress`: `"app_routing"` (today's behaviour, the default for now) or
+  `"agc"`. It replaces `app_routing_enabled`, which stays one release as an
+  alias: `app_routing_enabled = false` with `ingress` unset means no
+  ingress at all, as now, and setting both fails the plan.
+- `"agc"` requires `vnet_subnet_id` and `agc_subnet_id`, turns the
+  app-routing add-on off, and requires `kubernetes_version` at 1.32 or
+  later (a precondition; the ALB Controller needs it).
+- `node_resource_group`, so the controller's Reader grant targets a name
+  known before the cluster exists.
+- Under `"agc"` the module creates the AGC, its frontend and subnet
+  association, the controller's user-assigned identity with its federated
+  credential and three role assignments, and the WAF policies below.
+- Outputs: `ingress_mode`; `ingress_class_name` (null under `"agc"`); and
+  under `"agc"`, `alb_id`, `alb_frontend_name`, `alb_frontend_fqdn`,
+  `agc_subnet_cidr`, `waf_policy_ids` (a map keyed `protected`, `connector`,
+  `api`), and the controller identity's client id. The AKS example's
+  `helm_set` output emits the matching `--set` flags for whichever mode is
+  on.
 
-**WAF policies.**
-- `protected`: Prevention mode, DRS 2.1 and Bot Manager 1.1, body
-  inspection on. Attached to the dashboard and the connector.
-- `api`: Prevention mode, no managed rule sets, `request_body_check` off.
-  Custom rules only: the allowlists that replace NGINX's
-  `whitelist-source-range` (`RemoteAddr` `IPMatch` scoped by `RequestUri`
-  to `/hook`, and to the connector's host), and a per-client rate limit
-  that is off unless `api_rate_limit_per_minute` is set. Anthropic's
-  webhook and OTLP traffic arrives from a small pool of addresses, so a
-  limit sized for one laptop would throttle every governed prompt in an
-  organization. Attached to the
-  public and diagnostics routes. The request bodies here are prompt text,
-  tool output and telemetry, which DRS is written to flag, and a 403 on a
-  governed prompt is a webhook failure.
-- The allowlists move from chart values to module variables
-  (`hook_source_ranges`, `connector_source_ranges`), because the WAF policy
-  is an Azure resource. In `agc` mode the chart refuses
-  `ingress.hook.sourceRanges` and `ingress.connector.sourceRanges` rather
-  than drop them silently.
+**WAF policies.** Three, all in Prevention mode:
 
-**Controller install.** The ALB Controller is pinned by OCI digest, and is
-installed the way oauth2-proxy is: a documented `helm upgrade --install`
-that a deployment workflow runs before the chart. The module outputs the
-values it needs.
+| Policy | Managed rules | Body inspection | Custom rules | Routes |
+|---|---|---|---|---|
+| `protected` | DRS 2.1, Bot Manager 1.1 | on | none | dashboard (oauth2-proxy) |
+| `connector` | none | off | `connector_source_ranges` allowlist | connector |
+| `api` | none | off | `hook_source_ranges` allowlist on `/hook`; rate limit if `api_rate_limit_per_minute` is set | public, diagnostics |
+
+- `api`: the bodies on `/hook`, `/v1`, `/intake` and `/scan` are prompt
+  text, tool output and telemetry, which DRS is written to flag. A 403 on a
+  governed prompt is a webhook failure. The rate limit is off by default:
+  Anthropic's webhook and OTLP traffic arrives from a small pool of
+  addresses, so a limit sized for one client would throttle every governed
+  prompt in an organization.
+- `connector`: the connector answers 401 itself so Claude can find its
+  OAuth metadata (the chart sets `enable-modsecurity: "false"` on its
+  Ingress for this). A managed-rule 403 in its place breaks discovery.
+- The allowlists are `RemoteAddr` `IPMatch` rules. They move from chart
+  values to module variables because the WAF policy is an Azure resource;
+  in `agc` mode the chart refuses `ingress.hook.sourceRanges` and
+  `ingress.connector.sourceRanges` rather than drop them silently.
+
+**Controller install.** The ALB Controller chart is pinned by OCI digest
+and installed the way oauth2-proxy is: a documented
+`helm upgrade --install` that the deployment workflow runs before this
+chart, followed by a wait for its CRDs (`gateway.networking.k8s.io`,
+`alb.networking.azure.io`) and a ready controller.
 
 ### Chart
 
-`ingress.mode`: `nginx` (default), `gke`, `agc`. The GKE helper becomes
-`ingress.mode == "gke"`, keeping the current GKE value as an alias for one
-release.
+**Mode.** `ingress.mode`: `nginx` (default), `gke`, `agc`. Today GKE mode is
+detected from `ingress.className: gce`. For one release that still selects
+`gke` when `ingress.mode` is unset; setting `ingress.mode` to something else
+with `className: gce` fails. `agc` refuses `ingress.className`,
+`ingress.annotations`, `ingress.dashboard.annotations`,
+`ingress.diagnostics.annotations`, `ingress.connector.annotations` and every
+`ingress.gke.*` value: each is NGINX- or GKE-only and would otherwise be
+ignored.
 
-In `agc` mode the chart renders no Ingress. It renders:
+**What `agc` renders.** No Ingress. Instead:
 
-- a `Gateway` with the `alb-id` annotation and frontend address from
-  `ingress.agc.albId` and `ingress.agc.frontend`, an HTTP listener on 80
-  and an HTTPS listener on 443 for each host, and cert-manager's
-  `cert-manager.io/cluster-issuer` annotation from
-  `ingress.tls.clusterIssuer`;
-- one HTTPRoute per current Ingress object, with the same paths and hosts
-  (`public`, `diagnostics`, `dashboard`, `connector`), and a redirect route
-  on port 80 that sends everything except `/.well-known/acme-challenge/` to
-  HTTPS;
+- one `Gateway` with the `alb-id` annotation and frontend address from
+  `ingress.agc.albId` and `ingress.agc.frontend`;
+- the same host and path routing as today, as HTTPRoutes:
+
+| Route | Hosts | Paths | Backend | WAF policy |
+|---|---|---|---|---|
+| `public` | `host`, `extraHosts` | `/hook`, `/v1`, `/intake`, `/scan`, each only if its role is enabled | verdict, collector, intake | `api` |
+| `diagnostics` | `host`, `extraHosts` | `/healthz`, `/metrics` (verdict), `/health`, `/stats` (collector), if `ingress.diagnostics.enabled` | verdict, collector | `api` |
+| `dashboard` | `dashboard.host` or `host` | `/` | `ingress.agc.dashboardBackend` (oauth2-proxy) | `protected` |
+| `connector` | `connector.host` | `/` (separate host) or its paths on `host`, as today | connector | `connector` |
+| `redirect` | every host | port 80, everything except `/.well-known/acme-challenge/` | 301 to HTTPS | none (no backend) |
+
+- every collision check the Ingress template makes today, on the same
+  values: `extraHosts` repeating `host`, `dashboard.host` or `connector.host`
+  inside `extraHosts`, and the connector sharing the dashboard's host;
 - `timeouts.request` on the public route from
-  `ingress.agc.publicRequestTimeout` (default 300s, OTLP batches and hook
-  frames on slow links);
+  `ingress.agc.publicRequestTimeout` (default `300s`);
 - a `WebApplicationFirewallPolicy` per route from
-  `ingress.agc.wafPolicies.protected` and `.api`; the chart fails to render
-  a route with no policy id;
-- a `HealthCheckPolicy` per routed Service: GET `forgd-verdict.readyPath`
-  on the serving port;
-- the dashboard route's backend from `ingress.agc.dashboardBackend`
-  (oauth2-proxy's Service). The chart refuses `agc` mode with the
-  dashboard enabled and no backend set, unless `dashboard.serveOpen`;
-- a NetworkPolicy, on by default in `agc` mode, admitting the dashboard
-  Service only from oauth2-proxy's pods. AGC reaches pod IPs from its
-  subnet, so without one a request that bypasses the route reaches the
-  dashboard unauthenticated.
+  `ingress.agc.wafPolicies.{protected,connector,api}`. The chart fails to
+  render a routed role whose policy id is empty. There is no route without
+  a policy;
+- a `HealthCheckPolicy` per routed backend: GET `forgd-verdict.readyPath` on
+  the serving port for the chart's own Services, and GET `/ping` on
+  oauth2-proxy's port for the dashboard route (oauth2-proxy's health
+  endpoint; its port and path are `ingress.agc.dashboardBackend.healthPath`
+  and `.port`). The dashboard's own readiness stays its pod probe.
+
+**The dashboard.** The same refusal as today: `dashboard.serveOpen` with
+the dashboard routed fails to render, in every mode. A routed dashboard in
+`agc` mode needs `ingress.agc.dashboardBackend`. Without it the chart fails,
+since AGC has no auth subrequest and the route would otherwise reach the app
+directly.
+
+**TLS.** One HTTPS listener per distinct hostname, each with its own
+certificate Secret:
+
+| `ingress.tls` | Listener `certificateRefs` | Issued by |
+|---|---|---|
+| `enabled`, `clusterIssuer` set | `<release>-tls-<n>` per host, one SAN each | cert-manager, from the Gateway's `cert-manager.io/cluster-issuer` annotation, HTTP-01 through the `redirect` route's exempt path |
+| `enabled`, `secretName` set | `secretName` on every listener; it must cover every host | the operator |
+| `enabled`, neither set | fails, as today | |
+| `enabled: false` | fails in `agc` mode | an HTTP-only listener would carry bearer tokens in clear |
+
+**NetworkPolicy.** In `agc` mode, when `networkPolicy.enabled`:
+- `networkPolicy.agc.subnetCidr` (the module's `agc_subnet_cidr`) is admitted
+  as an `ipBlock` to the pods behind the public, diagnostics and connector
+  routes: verdict, collector, intake, connector. AGC sends data traffic and
+  probes from that subnet.
+- The dashboard pods admit only `networkPolicy.agc.dashboardProxy`
+  (oauth2-proxy's `namespaceSelector` and `podSelector`). The AGC subnet is
+  admitted to oauth2-proxy by oauth2-proxy's own NetworkPolicy, which the
+  README's install command sets.
+- `networkPolicy.ingressController` is refused in `agc` mode. There is no
+  controller in the data path.
+- The `trusted_header` checks in `dashboard.yaml` accept
+  `networkPolicy.agc.dashboardProxy` as the proxy peer in `agc` mode, in
+  place of `ingressController`.
+- `networkPolicy.enabled` defaults to true in `agc` mode. Without it,
+  anything in the AGC subnet or the cluster can reach the dashboard pods
+  directly.
+
+**NOTES.txt** prints the frontend FQDN to CNAME, the HTTPRoute and
+WebApplicationFirewallPolicy status commands, and the oauth2-proxy and ALB
+Controller prerequisites.
 
 `ingress.proxyBodySize` has no AGC setting. The chart documents the limit
 found in testing.
 
-`deploy/helm/README.md` gains an AGC section: oauth2-proxy in upstream mode
+`deploy/helm/README.md` gains an AGC section: the ALB Controller install,
+oauth2-proxy in upstream mode
 (`--upstream=http://<release>-dashboard.<ns>.svc:<port>`,
-`--pass-authorization-header`, `--set-authorization-header`), the ALB
-Controller install, and how the module's outputs map to chart values.
+`--pass-authorization-header`, `--set-authorization-header`, plus its
+NetworkPolicy admitting the AGC subnet), and how the module's outputs map to
+chart values.
 
 ### What does not change
 
-- No platform auth on `/hook`, `/v1`, `/intake` or `/scan`. The `api`
-  policy has no managed rules and no auth, and the chart test keeps
-  asserting no route other than the dashboard sends traffic through
+- No platform auth on `/hook`, `/v1`, `/intake`, `/scan` or the connector.
+  Neither the `api` nor the `connector` policy has managed rules or auth, and
+  a render test asserts that only the dashboard route's backend is
   oauth2-proxy.
-- The verdict server and collector authenticate their callers themselves,
-  as now.
+- The verdict server, collector and connector authenticate their callers
+  themselves, as now.
 
 ## Tests
 
-Before the lab moves, in a scratch cluster on the same module:
+**Cutover gates.** Run in a scratch cluster built from the same modules and
+chart. The lab does not move until every one passes:
 
-1. An OTLP/HTTP batch and a hook frame of 1, 8, 32 and 64 MB through the
-   public route. Record the largest that passes and what AGC answers above
-   it.
-2. A request carrying a DRS-triggering string (SQL injection, XSS) to `/`
-   answers 403; the same string in a hook frame's prompt passes to the
-   verdict server. This covers both "no policy means no WAF" and the `api`
-   policy's body settings.
-3. A request to `/hook` from outside `hook_source_ranges` answers 403
-   when the list is set.
-4. A large Entra ID session (oauth2-proxy's split `Set-Cookie`) through the
-   dashboard route: header limits.
-5. A request held open longer than 60 s on the public route completes.
+1. A 64 MiB request through each of `/hook`, `/v1`, `/intake` and `/scan`
+   reaches its backend, both with a plain body and with a body carrying
+   DRS-triggering strings (SQL injection, XSS, path traversal). If AGC caps
+   bodies below 64 MiB, the cap is recorded and the chart's documented
+   limit changes before anything moves.
+2. The same DRS-triggering strings in a request to `/` (the dashboard route)
+   answer 403.
+3. An unauthenticated request to the connector answers the connector's 401
+   with its `WWW-Authenticate` metadata, not a WAF 403.
+4. With `hook_source_ranges` set, `/hook` from outside it answers 403, and
+   the WAF log shows the real client address in `RemoteAddr`.
+5. A pod in another namespace, and a request addressed to a dashboard pod
+   IP, cannot reach the dashboard. oauth2-proxy can, and AGC's health probes
+   to every backend succeed.
+6. An Entra ID sign-in through the dashboard route, with oauth2-proxy's
+   split `Set-Cookie`, completes.
+7. A request held open longer than 60 s on the public route completes.
+8. Every certificate is Ready, every HTTPRoute and
+   WebApplicationFirewallPolicy reports Accepted, and the existing
+   `verify-deployment` passes against the scratch hostname.
 
-Render tests: every `agc` HTTPRoute has a WAF policy; the public and
-diagnostics routes use the `api` policy; only the dashboard route's backend
-is oauth2-proxy; the redirect route exempts the ACME path; source-range
-values are refused in `agc` mode. Terraform render tests for `network-azure`
-and `cluster-aks` under `ingress = "agc"`, including the controller's three
-role assignments and the two WAF policies' settings.
+**Render tests:**
+- the routing tables above, for every combination of enabled roles,
+  `extraHosts`, a separate dashboard host and a separate connector host;
+- each collision check failing as it does in `nginx` mode;
+- every route having a WAF policy, and each policy matching the table;
+- only the dashboard route's backend being oauth2-proxy;
+- the ACME exemption on the redirect route;
+- every refused value in `agc` mode;
+- the TLS table;
+- the NetworkPolicy peers.
+
+**Terraform render tests:** `network-azure`; `cluster-aks` under
+`ingress = "agc"`, covering the version precondition, the `app_routing_enabled`
+alias and conflict, the controller's three role assignments, and each WAF
+policy's settings.
 
 ## Migration
 
 New deployments choose `agc` from the release that ships it. An existing
 `app_routing` cluster on an AKS-managed VNet moves by building a new
-cluster beside it and moving its hostname. That is a new cluster, a new OIDC
-issuer and new federated credentials, so it is a cutover, not an upgrade.
+cluster beside it, because `vnet_subnet_id` cannot change in place. That
+means a new OIDC issuer and new federated credentials. The runbook:
+
+1. Build the new network, cluster, AGC and WAF beside the old cluster. The
+   old one keeps serving.
+2. Install the ALB Controller and oauth2-proxy, and wait for the CRDs and
+   the controller.
+3. Deploy the chart in `agc` mode on a temporary hostname, a CNAME to the
+   frontend FQDN.
+4. Run the cutover gates against the temporary hostname.
+5. Lower the production hostname's DNS TTL a day ahead, then point it at
+   the new frontend. Clients that call the Anthropic webhook and OTLP
+   endpoints by that hostname follow the change; endpoints configured as
+   the old address change in Anthropic's settings and the identity
+   provider's redirect URIs at this step.
+6. Rollback until the old cluster is deleted is pointing DNS back.
+7. Delete the old cluster after a week of clean verification, once the
+   owner confirms.
+
 The `cluster-aks` default becomes `"agc"` in the release after Microsoft's
 support for app-routing NGINX ends.
