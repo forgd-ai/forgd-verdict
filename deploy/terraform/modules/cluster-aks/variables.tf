@@ -209,6 +209,63 @@ variable "protected_waf_excluded_args" {
   }
 }
 
+variable "endpoint_waf_managed_rules" {
+  type        = string
+  default     = "off"
+  description = "With ingress = \"agc\": whether DRS 2.1 runs on the hook, api and connector WAF policies. \"off\" allows every request those policies' custom rules do not block, so prompt text and telemetry are never inspected. \"Detection\" runs DRS on headers, URI and up to 2000 KB of the body and logs what it would block; the policy mode is policy-wide, so source ranges and the rate limit only log too. \"Prevention\" answers a DRS match 403, which on /hook is a failed governed prompt: soak in Detection with agc_log_analytics_workspace_id set and add endpoint_waf_exclusions first."
+  validation {
+    condition     = contains(["off", "Detection", "Prevention"], var.endpoint_waf_managed_rules)
+    error_message = "endpoint_waf_managed_rules is \"off\", \"Detection\" or \"Prevention\"."
+  }
+}
+
+variable "endpoint_waf_exclusions" {
+  type = map(list(object({
+    match_variable          = string
+    selector                = string
+    selector_match_operator = string
+  })))
+  default     = {}
+  description = "With ingress = \"agc\": managed-rule exclusions per endpoint WAF policy, keyed hook, api or connector. Each names a request part DRS does not inspect, for example {match_variable = \"RequestArgNames\", selector = \"prompt\", selector_match_operator = \"Equals\"} for a JSON body field."
+  validation {
+    condition     = alltrue([for k in keys(var.endpoint_waf_exclusions) : contains(["hook", "api", "connector"], k)])
+    error_message = "endpoint_waf_exclusions is keyed hook, api or connector."
+  }
+  validation {
+    condition = alltrue(flatten([for k, l in var.endpoint_waf_exclusions : [for e in l :
+      contains(["RequestArgKeys", "RequestArgNames", "RequestArgValues", "RequestCookieKeys", "RequestCookieNames", "RequestCookieValues", "RequestHeaderKeys", "RequestHeaderNames", "RequestHeaderValues"], e.match_variable) &&
+      contains(["Contains", "EndsWith", "Equals", "EqualsAny", "StartsWith"], e.selector_match_operator) &&
+    length(e.selector) > 0 && (e.selector_match_operator != "EqualsAny") == (e.selector != "*")]]))
+    error_message = "Each endpoint_waf_exclusions entry has a Request{Arg,Cookie,Header}{Keys,Names,Values} match_variable, a selector, and a selector_match_operator of Contains, EndsWith, Equals, EqualsAny or StartsWith. EqualsAny matches every name whatever the selector, so it takes selector \"*\", and \"*\" takes EqualsAny."
+  }
+}
+
+variable "endpoint_waf_rule_overrides" {
+  type = map(list(object({
+    rule_group_name = string
+    rule_id         = string
+    action          = string
+  })))
+  default     = {}
+  description = "With ingress = \"agc\": DRS 2.1 rule overrides per endpoint WAF policy, keyed hook, api or connector. action is Log, AnomalyScoring, Block or Disabled. An exclusion cannot silence a rule that judges the request as a whole, such as 920420 (content type not allowed) on OTLP protobuf; this can."
+  validation {
+    condition     = alltrue([for k in keys(var.endpoint_waf_rule_overrides) : contains(["hook", "api", "connector"], k)])
+    error_message = "endpoint_waf_rule_overrides is keyed hook, api or connector."
+  }
+  validation {
+    condition = alltrue(flatten([for k, l in var.endpoint_waf_rule_overrides : [for o in l :
+      contains(["Log", "AnomalyScoring", "Block", "Disabled"], o.action) && can(regex("^[0-9]+$", o.rule_id)) &&
+    length(o.rule_group_name) > 0]]))
+    error_message = "Each endpoint_waf_rule_overrides entry has a rule_group_name, a numeric rule_id, and an action of Log, AnomalyScoring, Block or Disabled."
+  }
+}
+
+variable "agc_log_analytics_workspace_id" {
+  type        = string
+  default     = null
+  description = "With ingress = \"agc\": a Log Analytics workspace the AGC sends its access and firewall logs to. Null sends none. Pass an id built from names, so it is known at plan."
+}
+
 variable "api_rate_limit_per_minute" {
   type        = number
   default     = null

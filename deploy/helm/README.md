@@ -255,16 +255,20 @@ The chart renders a Gateway and HTTPRoutes, and no Ingress:
 
 | Route | Paths | Backend | WAF policy |
 |---|---|---|---|
-| hook | `/hook` | verdict | `hook`: `hook_source_ranges`, then allow |
-| public | `/v1`, `/intake`, `/scan` | collector, intake | `api`: allow |
+| hook | `/hook` | verdict | `hook`: `hook_source_ranges`, then DRS 2.1 or allow |
+| public | `/v1`, `/intake`, `/scan` | collector, intake | `api`: DRS 2.1 or allow |
 | diagnostics | `/healthz`, `/metrics`, `/health`, `/stats` | verdict, collector | `api` |
 | dashboard | `/` | oauth2-proxy | `protected`: DRS 2.1, Bot Manager 1.1 |
-| connector | `/mcp` and its metadata | connector | `connector`: `connector_source_ranges`, then allow |
+| connector | `/mcp` and its metadata | connector | `connector`: `connector_source_ranges`, then DRS 2.1 or allow |
 
-Only the dashboard's route runs the managed rules. The others carry prompt
+The dashboard's route always runs the managed rules. On the others,
+`cluster-aks`'s `endpoint_waf_managed_rules` decides: `off` (the default)
+allows what the custom rules do not block, `Detection` runs DRS 2.1 and
+logs its matches, and `Prevention` blocks them. Those routes carry prompt
 text, tool output and telemetry, which the rule sets are written to flag,
 and a 403 there is a webhook failure or, for the connector, a broken OAuth
-discovery.
+discovery, so soak in `Detection` with `agc_log_analytics_workspace_id`
+set and add `endpoint_waf_exclusions` before `Prevention`.
 
 In order:
 
