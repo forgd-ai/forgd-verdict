@@ -131,6 +131,35 @@ def test_the_protected_policy_runs_drs_and_bot_manager_on_bodies(tmp_path):
     assert _custom_rules(policy) == []
 
 
+def _exclusions(policy: dict) -> list[tuple[str, str, str]]:
+    [managed] = policy["managed_rules"]
+    return sorted((e["match_variable"], e["selector_match_operator"], e["selector"])
+                  for e in managed.get("exclusion", []))
+
+
+def test_the_protected_policy_skips_the_session_cookie_and_the_oidc_callback(tmp_path):
+    """DRS 2.1 blocked a signed-in browser on oauth2-proxy's encrypted
+    cookie: random bytes trip it on some sessions and not others."""
+    policy = _one(_render(tmp_path, **AGC), "azurerm_web_application_firewall_policy.protected")
+    assert _exclusions(policy) == [
+        ("RequestArgNames", "Equals", "code"),
+        ("RequestArgNames", "Equals", "state"),
+        ("RequestCookieNames", "StartsWith", "_oauth2_proxy"),
+    ]
+
+
+def test_the_protected_policy_exclusions_follow_the_variables(tmp_path):
+    policy = _one(_render(tmp_path, **AGC, protected_waf_excluded_cookies=["_sess"],
+                          protected_waf_excluded_args=[]),
+                  "azurerm_web_application_firewall_policy.protected")
+    assert _exclusions(policy) == [("RequestCookieNames", "StartsWith", "_sess")]
+
+
+def test_a_cookie_exclusion_must_be_a_cookie_name(tmp_path):
+    _refused(tmp_path, "protected_waf_excluded_cookies holds cookie names",
+             **AGC, protected_waf_excluded_cookies=["a b"])
+
+
 @pytest.mark.parametrize("name", ["api", "connector", "hook"])
 def test_api_connector_and_hook_end_in_an_allow_so_managed_rules_never_run(tmp_path, name):
     """The provider requires a managed rule set; a request a custom rule
