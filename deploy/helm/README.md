@@ -282,7 +282,7 @@ helm upgrade --install alb-controller \
   --set albController.namespace=azure-alb-system \
   --set albController.podIdentity.clientID=<alb_controller_client_id>
 kubectl wait --for=condition=Available deploy/alb-controller -n azure-alb-system --timeout=5m
-kubectl get crd gateways.gateway.networking.k8s.io webapplicationfirewallpolicies.alb.networking.azure.io
+kubectl get crd gateways.gateway.networking.k8s.io webapplicationfirewallpolicy.alb.networking.azure.io healthcheckpolicy.alb.networking.azure.io
 ```
 
    With `grant_alb_controller_node_reader = false`, the controller cannot
