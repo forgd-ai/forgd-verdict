@@ -130,6 +130,23 @@ resource "azurerm_web_application_firewall_policy" "protected" {
       type    = "Microsoft_BotManagerRuleSet"
       version = "1.1"
     }
+
+    dynamic "exclusion" {
+      for_each = toset(var.protected_waf_excluded_cookies)
+      content {
+        match_variable          = "RequestCookieNames"
+        selector                = exclusion.value
+        selector_match_operator = "StartsWith"
+      }
+    }
+    dynamic "exclusion" {
+      for_each = toset(var.protected_waf_excluded_args)
+      content {
+        match_variable          = "RequestArgNames"
+        selector                = exclusion.value
+        selector_match_operator = "Equals"
+      }
+    }
   }
 }
 

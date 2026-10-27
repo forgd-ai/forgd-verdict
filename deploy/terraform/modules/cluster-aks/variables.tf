@@ -189,6 +189,26 @@ variable "connector_source_ranges" {
   }
 }
 
+variable "protected_waf_excluded_cookies" {
+  type        = list(string)
+  default     = ["_oauth2_proxy"]
+  description = "With ingress = \"agc\": cookie name prefixes the protected (dashboard) WAF policy's managed rules do not inspect. oauth2-proxy's session cookie is encrypted random bytes, which DRS 2.1 blocks on some sessions and not others; set this to your proxy's --cookie-name if it differs."
+  validation {
+    condition     = alltrue([for c in var.protected_waf_excluded_cookies : can(regex("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$", c))])
+    error_message = "protected_waf_excluded_cookies holds cookie names."
+  }
+}
+
+variable "protected_waf_excluded_args" {
+  type        = list(string)
+  default     = ["code", "state"]
+  description = "With ingress = \"agc\": query argument names the protected (dashboard) WAF policy's managed rules do not inspect. The defaults are the OIDC callback's authorization code and state, which are random tokens."
+  validation {
+    condition     = alltrue([for a in var.protected_waf_excluded_args : length(a) > 0])
+    error_message = "protected_waf_excluded_args holds argument names."
+  }
+}
+
 variable "api_rate_limit_per_minute" {
   type        = number
   default     = null
