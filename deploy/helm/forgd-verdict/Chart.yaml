@@ -9,8 +9,8 @@ description: |
 type: application
 # `version` is the chart's own version. appVersion names the image the
 # chart deploys.
-version: 0.1.11
-appVersion: "1.2.2"
+version: 0.1.12
+appVersion: "1.2.3"
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/forgd-ai/forgd-verdict
 sources:
