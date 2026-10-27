@@ -162,9 +162,8 @@ def test_a_cookie_exclusion_must_be_a_cookie_name(tmp_path):
 
 @pytest.mark.parametrize("name", ["api", "connector", "hook"])
 def test_api_connector_and_hook_end_in_an_allow_so_managed_rules_never_run(tmp_path, name):
-    """The provider requires a managed rule set; a request a custom rule
-    allows is not evaluated by it. Without the final Allow, DRS would read
-    prompt text and telemetry, or answer the connector before its 401."""
+    """With endpoint_waf_managed_rules off. The provider requires a managed
+    rule set; a request a custom rule allows is not evaluated by it."""
     variables = {**AGC, "hook_source_ranges": ["203.0.113.0/24"], "api_rate_limit_per_minute": 6000,
                  "connector_source_ranges": ["198.51.100.0/24"]}
     policy = _one(_render(tmp_path, **variables), f"azurerm_web_application_firewall_policy.{name}")
@@ -234,6 +233,139 @@ def test_the_rate_limit_is_off_unless_set(tmp_path, name):
     [limit] = [r for r in rules if r["name"] == "RateLimit"]
     assert (limit["rule_type"], limit["rate_limit_threshold"], limit["group_rate_limit_by"]) == \
         ("RateLimitRule", 6000, "ClientAddr")
+
+
+ENDPOINTS = ("api", "connector", "hook")
+WORKSPACE = f"{RG}/providers/Microsoft.OperationalInsights/workspaces/law"
+
+
+@pytest.mark.parametrize("mode", ["Detection", "Prevention"])
+def test_endpoint_managed_rules_drop_the_allow_and_inspect_bodies(tmp_path, mode):
+    """With the final Allow gone, DRS evaluates every request the custom
+    rules do not block, bodies included."""
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules=mode)
+    for name in ENDPOINTS:
+        policy = _one(rendered, f"azurerm_web_application_firewall_policy.{name}")
+        [settings] = policy["policy_settings"]
+        assert settings["mode"] == mode, name
+        assert settings["request_body_check"] is True, name
+        assert settings["request_body_enforcement"] is False, name
+        assert settings["request_body_inspect_limit_in_kb"] == 2000, name
+        [scrub] = settings["log_scrubbing"]
+        assert scrub["enabled"] is True, name
+        assert sorted(r["match_variable"] for r in scrub["rule"]) == sorted(
+            ["RequestArgNames", "RequestPostArgNames", "RequestJSONArgNames",
+             "RequestHeaderNames", "RequestCookieNames"]), name
+        assert {r["selector_match_operator"] for r in scrub["rule"]} == {"EqualsAny"}, name
+        assert "AllowRest" not in [r["name"] for r in _custom_rules(policy)], name
+        assert _rule_sets(policy) == [("Microsoft_DefaultRuleSet", "2.1")], name
+    protected = _one(rendered, "azurerm_web_application_firewall_policy.protected")
+    assert protected["policy_settings"][0]["mode"] == "Prevention"
+
+
+def test_endpoint_managed_rules_default_off_leaves_the_policies_as_they_were(tmp_path):
+    rendered = _render(tmp_path, **AGC)
+    for name in ENDPOINTS:
+        policy = _one(rendered, f"azurerm_web_application_firewall_policy.{name}")
+        [settings] = policy["policy_settings"]
+        assert (settings["mode"], settings["request_body_check"],
+                settings["request_body_inspect_limit_in_kb"]) == ("Prevention", False, 128), name
+        assert not settings.get("log_scrubbing"), name
+        assert not policy["managed_rules"][0].get("rule_group_override"), name
+        assert _exclusions(policy) == [], name
+
+
+def test_prevention_keeps_the_source_ranges_and_rate_limit_blocking(tmp_path):
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Prevention",
+                       hook_source_ranges=["160.79.104.0/21"], api_rate_limit_per_minute=6000,
+                       connector_source_ranges=["198.51.100.0/24"])
+    hook = _custom_rules(_one(rendered, "azurerm_web_application_firewall_policy.hook"))
+    assert [(r["name"], r["action"]) for r in hook] == [("HookSourceRanges", "Block"), ("RateLimit", "Block")]
+    connector = _custom_rules(_one(rendered, "azurerm_web_application_firewall_policy.connector"))
+    assert [(r["name"], r["action"]) for r in connector] == [("ConnectorSourceRanges", "Block")]
+
+
+@pytest.mark.parametrize("extra", [{"hook_source_ranges": ["160.79.104.0/21"]},
+                                   {"connector_source_ranges": ["198.51.100.0/24"]},
+                                   {"api_rate_limit_per_minute": 6000}])
+def test_detection_with_blocking_custom_rules_is_refused(tmp_path, extra):
+    """Detection is policy-wide: the custom rules would only log."""
+    _refused(tmp_path, "only log", **AGC, endpoint_waf_managed_rules="Detection", **extra)
+
+
+def test_an_unknown_endpoint_mode_is_refused(tmp_path):
+    _refused(tmp_path, "endpoint_waf_managed_rules is", **AGC, endpoint_waf_managed_rules="on")
+
+
+def test_endpoint_exclusions_reach_only_their_policy(tmp_path):
+    field = {"match_variable": "RequestArgNames", "selector": "prompt", "selector_match_operator": "Equals"}
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Detection",
+                       endpoint_waf_exclusions={"hook": [field]})
+    hook = _one(rendered, "azurerm_web_application_firewall_policy.hook")
+    assert _exclusions(hook) == [("RequestArgNames", "Equals", "prompt")]
+    for name in ("api", "connector"):
+        assert _exclusions(_one(rendered, f"azurerm_web_application_firewall_policy.{name}")) == [], name
+
+
+@pytest.mark.parametrize("exclusions,match", [
+    ({"protected": []}, "keyed hook, api or connector"),
+    ({"hook": [{"match_variable": "RequestBody", "selector": "x", "selector_match_operator": "Equals"}]},
+     "match_variable"),
+    ({"hook": [{"match_variable": "RequestArgNames", "selector": "x", "selector_match_operator": "Regex"}]},
+     "selector_match_operator"),
+    ({"hook": [{"match_variable": "RequestArgNames", "selector": "", "selector_match_operator": "Equals"}]},
+     "a selector"),
+    ({"hook": [{"match_variable": "RequestArgNames", "selector": "prompt", "selector_match_operator": "EqualsAny"}]},
+     "EqualsAny"),
+    ({"hook": [{"match_variable": "RequestArgNames", "selector": "*", "selector_match_operator": "Equals"}]},
+     "EqualsAny"),
+])
+def test_a_malformed_endpoint_exclusion_is_refused(tmp_path, exclusions, match):
+    _refused(tmp_path, match, **AGC, endpoint_waf_exclusions=exclusions)
+
+
+def test_rule_overrides_reach_only_their_policy_grouped_by_rule_group(tmp_path):
+    """920420 judges the content type, which no exclusion can skip."""
+    overrides = {"api": [
+        {"rule_group_name": "PROTOCOL-ENFORCEMENT", "rule_id": "920420", "action": "Log"},
+        {"rule_group_name": "PROTOCOL-ENFORCEMENT", "rule_id": "920320", "action": "Disabled"},
+        {"rule_group_name": "General", "rule_id": "200002", "action": "Log"},
+    ]}
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Detection",
+                       endpoint_waf_rule_overrides=overrides)
+    [managed] = _one(rendered, "azurerm_web_application_firewall_policy.api")["managed_rules"]
+    groups = {g["rule_group_name"]: sorted((r["id"], r["enabled"], r.get("action")) for r in g["rule"])
+              for g in managed["managed_rule_set"][0]["rule_group_override"]}
+    assert groups == {
+        "PROTOCOL-ENFORCEMENT": [("920320", False, None), ("920420", True, "Log")],
+        "General": [("200002", True, "Log")],
+    }
+    for name in ("hook", "connector"):
+        [m] = _one(rendered, f"azurerm_web_application_firewall_policy.{name}")["managed_rules"]
+        assert not m["managed_rule_set"][0].get("rule_group_override"), name
+
+
+@pytest.mark.parametrize("overrides,match", [
+    ({"protected": []}, "keyed hook, api or connector"),
+    ({"api": [{"rule_group_name": "G", "rule_id": "920420", "action": "Allow"}]}, "an action of"),
+    ({"api": [{"rule_group_name": "G", "rule_id": "abc", "action": "Log"}]}, "numeric rule_id"),
+])
+def test_a_malformed_rule_override_is_refused(tmp_path, overrides, match):
+    _refused(tmp_path, match, **AGC, endpoint_waf_rule_overrides=overrides)
+
+
+def test_agc_logs_go_to_the_workspace_when_one_is_given(tmp_path):
+    assert not _present(_render(tmp_path, **AGC), "azurerm_monitor_diagnostic_setting.agc")
+    setting = _one(_render(tmp_path, **AGC, agc_log_analytics_workspace_id=WORKSPACE),
+                   "azurerm_monitor_diagnostic_setting.agc")
+    assert setting["log_analytics_workspace_id"] == WORKSPACE
+    assert setting["target_resource_id"].endswith("/trafficControllers/aks-agc")
+    assert [log["category_group"] for log in setting["enabled_log"]] == ["allLogs"]
+
+
+def test_no_agc_logs_without_agc(tmp_path):
+    assert not _present(_render(tmp_path, agc_log_analytics_workspace_id=WORKSPACE),
+                        "azurerm_monitor_diagnostic_setting.agc")
 
 
 def test_each_waf_policy_has_a_security_policy_on_the_agc(tmp_path):

@@ -144,32 +144,60 @@ subnets instead.
   `helm_install_command` output emits the matching `--set` flags for whichever mode is
   on.
 
-**WAF policies.** Four, all in Prevention mode:
+**WAF policies.** Four. `endpoint_waf_managed_rules` (`off`, `Detection`
+or `Prevention`, default `off`) sets the mode and managed rules of the
+three endpoint policies:
 
 | Policy | Managed rules | Body inspection | Custom rules | Routes |
 |---|---|---|---|---|
-| `protected` | DRS 2.1, Bot Manager 1.1 | on | none | dashboard (oauth2-proxy) |
-| `connector` | not evaluated (see below) | off | `connector_source_ranges` allowlist, then allow everything | connector |
-| `hook` | not evaluated (see below) | off | `hook_source_ranges` allowlist; rate limit if `api_rate_limit_per_minute` is set; then allow everything | hook |
-| `api` | not evaluated (see below) | off | rate limit if `api_rate_limit_per_minute` is set; then allow everything | public, diagnostics |
+| `protected` | DRS 2.1, Bot Manager 1.1; Prevention | on | none | dashboard (oauth2-proxy) |
+| `connector` | DRS 2.1 unless `off` | up to 2000 KB unless `off` | `connector_source_ranges` allowlist; with `off`, then allow everything | connector |
+| `hook` | DRS 2.1 unless `off` | up to 2000 KB unless `off` | `hook_source_ranges` allowlist; rate limit if `api_rate_limit_per_minute` is set; with `off`, then allow everything | hook |
+| `api` | DRS 2.1 unless `off` | up to 2000 KB unless `off` | rate limit if `api_rate_limit_per_minute` is set; with `off`, then allow everything | public, diagnostics |
 
-- **Managed rules on `connector`, `hook` and `api`.** The azurerm provider
-  requires at least one managed rule set on every WAF policy, so all three
-  carry DRS 2.1.
-  Each ends with a custom rule that allows every request (`RemoteAddr`,
-  operator `Any`, priority 100). A request a custom rule allows is not
-  evaluated by the managed rules, so DRS never runs on these routes. The
-  allowlists and rate limit come before it, at lower priority numbers.
-  Cutover gate 1 is what proves it on AGC.
-- `hook` and `api`: the bodies on `/hook`, `/v1`, `/intake` and `/scan` are prompt
-  text, tool output and telemetry, which DRS is written to flag. A 403 on a
-  governed prompt is a webhook failure. The rate limit is off by default:
-  Anthropic's webhook and OTLP traffic arrives from a small pool of
-  addresses, so a limit sized for one client would throttle every governed
-  prompt in an organization.
+- **`off`.** The azurerm provider requires at least one managed rule set
+  on every WAF policy, so all three carry DRS 2.1, and each ends with a
+  custom rule that allows every request (priority 100). A request a custom
+  rule allows is not evaluated by the managed rules, so DRS never runs on
+  these routes. The allowlists and rate limit come before it.
+- **`Detection`.** The allow rule is dropped and DRS evaluates headers, URI
+  and up to 2000 KB of the body, logging what it would block to the AGC
+  firewall log (`agc_log_analytics_workspace_id`). The mode is
+  policy-wide, so the allowlists and rate limit would only log too; the
+  module refuses `Detection` with any of them set.
+- **`Prevention`.** As `Detection`, and a match is answered 403.
+  `request_body_enforcement` is off, so no body is refused for its size.
+  What is not settled from the documentation, and the soak and gate 1
+  settle on traffic:
+  - DRS 2.1 parses JSON, XML, form and multipart bodies. Rule 920420
+    scores any other content type, which includes OTLP protobuf on `/v1`
+    and hook-ship's NDJSON on `/intake`, at the blocking threshold.
+  - Rule 200002 scores a body that fails to parse: a gzip-encoded JSON
+    export, and possibly a JSON body cut at the inspection limit.
+- **Overrides and exclusions.** `endpoint_waf_rule_overrides`, keyed
+  `hook`, `api` or `connector`, sets a rule to `Log`, `AnomalyScoring`,
+  `Block` or `Disabled` on that policy; that is how 920420 and 200002 are
+  handled when they fire on legitimate traffic, since an exclusion cannot
+  silence a rule that judges the whole request. `endpoint_waf_exclusions`
+  names request parts DRS skips.
+- **Logs.** The firewall log records the part of the request a rule
+  matched. On these routes that is prompt text, telemetry and content
+  submitted for scanning, so the endpoint policies scrub argument, JSON,
+  form, header and cookie values from it. Gate 9 checks the scrubbing
+  holds on AGC.
+- **Rollout.** The bodies on `/hook`, `/v1`, `/intake` and `/scan` are
+  prompt text, tool output and telemetry, which DRS is written to flag, and
+  a 403 on a governed prompt is a webhook failure. So a deployment soaks in
+  `Detection` on real traffic, reads the firewall log, adds exclusions for
+  rules that match legitimate content, and then moves to `Prevention`,
+  which is also when the allowlists start blocking.
+- The rate limit is off by default: Anthropic's webhook and OTLP traffic
+  arrives from a small pool of addresses, so a limit sized for one client
+  would throttle every governed prompt in an organization.
 - `connector`: the connector answers 401 itself so Claude can find its
   OAuth metadata (the chart sets `enable-modsecurity: "false"` on its
-  Ingress for this). A managed-rule 403 in its place breaks discovery.
+  Ingress for this). A managed-rule 403 in its place breaks discovery, so
+  the soak has to show its discovery requests pass before `Prevention`.
 - `/hook` has a route and a policy of its own, so `hook_source_ranges`
   applies to whatever the Gateway routes there. A path match inside a
   shared policy (`RequestUri` begins with `/hook`) could disagree with the
@@ -288,8 +316,7 @@ chart values.
 ### What does not change
 
 - No platform auth on `/hook`, `/v1`, `/intake`, `/scan` or the connector.
-  None of the `hook`, `api` and `connector` policies evaluates managed
-  rules or carries auth, and
+  None of the `hook`, `api` and `connector` policies carries auth, and
   a render test asserts that only the dashboard route's backend is
   oauth2-proxy.
 - The verdict server, collector and connector authenticate their callers
@@ -301,8 +328,15 @@ chart values.
 chart. The lab does not move until every one passes:
 
 1. A 64 MiB request through each of `/hook`, `/v1`, `/intake` and `/scan`
-   reaches its backend, both with a plain body and with a body carrying
-   DRS-triggering strings (SQL injection, XSS, path traversal). The chart
+   reaches its backend, both with a plain body and, with
+   `endpoint_waf_managed_rules = "off"`, with a body carrying
+   DRS-triggering strings (SQL injection, XSS, path traversal). In
+   `Detection` the same body reaches the backend and the firewall log shows
+   the match; in `Prevention` it answers 403. Before `Prevention`, each of
+   these reaches its backend with the policy in `Prevention` on a scratch
+   deployment: a 64 MiB valid JSON body on `/hook`, `/v1` and `/scan`; an
+   OTLP export as protobuf, as JSON and as gzip-encoded JSON; and a
+   hook-ship NDJSON batch on `/intake`. The chart
    promises 64 MiB today (`ingress.proxyBodySize`). If AGC caps bodies
    below that, the migration stops. Lowering the promise is a separate,
    reviewed change that the owner decides on, not a step in this runbook.
@@ -325,6 +359,9 @@ chart. The lab does not move until every one passes:
 8. Every certificate is Ready, every HTTPRoute and
    WebApplicationFirewallPolicy reports Accepted, and the existing
    `forgd-verdict verify-deployment` passes against the scratch hostname.
+9. With `endpoint_waf_managed_rules` on, a synthetic DRS-triggering value
+   in a JSON field on `/hook` and `/scan` appears in the firewall log
+   masked, not as sent.
 
 **Render tests:**
 - the routing tables above, for every combination of enabled roles,

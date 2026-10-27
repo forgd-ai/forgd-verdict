@@ -78,15 +78,34 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 
 # --- WAF policies ----------------------------------------------------------
 #
-# Four, all in Prevention mode, attached per HTTPRoute by the chart's
-# WebApplicationFirewallPolicy objects:
+# Four, attached per HTTPRoute by the chart's WebApplicationFirewallPolicy
+# objects:
 #
-#   protected  the dashboard: DRS 2.1 and Bot Manager 1.1 on, bodies inspected
-#   connector  the connector: its source-range rule, then allow
-#   hook       /hook: its source-range rule and the optional rate limit,
-#              then allow
-#   api        /v1, /intake, /scan and diagnostics: the optional rate limit,
-#              then allow
+#   protected  the dashboard: DRS 2.1 and Bot Manager 1.1 on, bodies
+#              inspected, Prevention
+#   connector  the connector: its source-range rule
+#   hook       /hook: its source-range rule and the optional rate limit
+#   api        /v1, /intake, /scan and diagnostics: the optional rate limit
+#
+# On connector, hook and api, endpoint_waf_managed_rules decides whether
+# DRS 2.1 runs:
+#
+#   off         the last custom rule allows every request, and a request a
+#               custom rule allows is not evaluated by the managed rules, so
+#               DRS never sees the prompt text, tool output and telemetry
+#               these routes carry. Body inspection is off.
+#   Detection   no allow rule; DRS evaluates headers, URI and body (up to
+#               2000 KB) and logs what it would block. The policy mode is
+#               policy-wide, so the custom rules only log as well.
+#   Prevention  as Detection, and a DRS match is answered 403.
+#
+# request_body_enforcement is off, so a body over the inspection limit is
+# not refused for its size. DRS 2.1 scores content types it does not parse
+# (OTLP protobuf, hook-ship's NDJSON) under rule 920420, and a body that
+# fails to parse (gzip, possibly JSON cut at the limit) under 200002; the
+# soak shows which fire, and endpoint_waf_rule_overrides turns them to Log
+# or off per policy. The firewall log's matched data is scrubbed for the
+# request parts in local.endpoint_log_scrubbed.
 #
 # /hook has a route and a policy of its own so that its source ranges
 # apply to whatever the Gateway routes there, with no path match in the
@@ -96,16 +115,16 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 # with "/": Application Gateway refuses RemoteAddr with the Any operator,
 # which is for variables that take a selector, and IPMatch covers IPv4 only.
 #
-# The provider requires a managed rule set on every policy. On connector,
-# hook and api the last custom rule allows every request, and a request a
-# custom rule allows is not evaluated by the managed rules, so DRS never
-# sees the prompt text, tool output and telemetry those routes carry. A 403
-# there is a webhook failure, or for the connector a broken OAuth discovery,
-# since its own 401 is how Claude finds the identity provider. Body
-# inspection is off on all three as well.
+# The provider requires a managed rule set on every policy, so with
+# endpoint_waf_managed_rules = "off" all three still carry DRS 2.1.
 
 locals {
-  managed_rule_set_drs = { type = "Microsoft_DefaultRuleSet", version = "2.1" }
+  managed_rule_set_drs   = { type = "Microsoft_DefaultRuleSet", version = "2.1" }
+  endpoint_managed_rules = var.endpoint_waf_managed_rules != "off"
+  endpoint_waf_mode      = local.endpoint_managed_rules ? var.endpoint_waf_managed_rules : "Prevention"
+  # Request parts masked in the firewall log, whose matched-data field
+  # would otherwise carry prompt text, telemetry and scanned content.
+  endpoint_log_scrubbed = ["RequestArgNames", "RequestPostArgNames", "RequestJSONArgNames", "RequestHeaderNames", "RequestCookieNames"]
 }
 
 resource "azurerm_web_application_firewall_policy" "protected" {
@@ -158,10 +177,26 @@ resource "azurerm_web_application_firewall_policy" "connector" {
   tags                = var.tags
 
   policy_settings {
-    enabled                  = true
-    mode                     = "Prevention"
-    request_body_check       = false
-    request_body_enforcement = false
+    enabled                          = true
+    mode                             = local.endpoint_waf_mode
+    request_body_check               = local.endpoint_managed_rules
+    request_body_enforcement         = false
+    request_body_inspect_limit_in_kb = local.endpoint_managed_rules ? 2000 : 128
+
+    dynamic "log_scrubbing" {
+      for_each = toset(local.endpoint_managed_rules ? ["scrub"] : [])
+      content {
+        enabled = true
+        dynamic "rule" {
+          for_each = local.endpoint_log_scrubbed
+          content {
+            enabled                 = true
+            match_variable          = rule.value
+            selector_match_operator = "EqualsAny"
+          }
+        }
+      }
+    }
   }
 
   dynamic "custom_rules" {
@@ -183,18 +218,21 @@ resource "azurerm_web_application_firewall_policy" "connector" {
     }
   }
 
-  custom_rules {
-    name      = "AllowRest"
-    priority  = 100
-    rule_type = "MatchRule"
-    action    = "Allow"
+  dynamic "custom_rules" {
+    for_each = toset(local.endpoint_managed_rules ? [] : ["allow"])
+    content {
+      name      = "AllowRest"
+      priority  = 100
+      rule_type = "MatchRule"
+      action    = "Allow"
 
-    match_conditions {
-      match_variables {
-        variable_name = "RequestUri"
+      match_conditions {
+        match_variables {
+          variable_name = "RequestUri"
+        }
+        operator     = "BeginsWith"
+        match_values = ["/"]
       }
-      operator     = "BeginsWith"
-      match_values = ["/"]
     }
   }
 
@@ -202,6 +240,30 @@ resource "azurerm_web_application_firewall_policy" "connector" {
     managed_rule_set {
       type    = local.managed_rule_set_drs.type
       version = local.managed_rule_set_drs.version
+
+      dynamic "rule_group_override" {
+        for_each = { for o in lookup(var.endpoint_waf_rule_overrides, "connector", []) : o.rule_group_name => o... }
+        content {
+          rule_group_name = rule_group_override.key
+          dynamic "rule" {
+            for_each = rule_group_override.value
+            content {
+              id      = rule.value.rule_id
+              enabled = rule.value.action != "Disabled"
+              action  = rule.value.action == "Disabled" ? null : rule.value.action
+            }
+          }
+        }
+      }
+    }
+
+    dynamic "exclusion" {
+      for_each = lookup(var.endpoint_waf_exclusions, "connector", [])
+      content {
+        match_variable          = exclusion.value.match_variable
+        selector                = exclusion.value.selector
+        selector_match_operator = exclusion.value.selector_match_operator
+      }
     }
   }
 }
@@ -214,10 +276,26 @@ resource "azurerm_web_application_firewall_policy" "hook" {
   tags                = var.tags
 
   policy_settings {
-    enabled                  = true
-    mode                     = "Prevention"
-    request_body_check       = false
-    request_body_enforcement = false
+    enabled                          = true
+    mode                             = local.endpoint_waf_mode
+    request_body_check               = local.endpoint_managed_rules
+    request_body_enforcement         = false
+    request_body_inspect_limit_in_kb = local.endpoint_managed_rules ? 2000 : 128
+
+    dynamic "log_scrubbing" {
+      for_each = toset(local.endpoint_managed_rules ? ["scrub"] : [])
+      content {
+        enabled = true
+        dynamic "rule" {
+          for_each = local.endpoint_log_scrubbed
+          content {
+            enabled                 = true
+            match_variable          = rule.value
+            selector_match_operator = "EqualsAny"
+          }
+        }
+      }
+    }
   }
 
   dynamic "custom_rules" {
@@ -260,18 +338,21 @@ resource "azurerm_web_application_firewall_policy" "hook" {
     }
   }
 
-  custom_rules {
-    name      = "AllowRest"
-    priority  = 100
-    rule_type = "MatchRule"
-    action    = "Allow"
+  dynamic "custom_rules" {
+    for_each = toset(local.endpoint_managed_rules ? [] : ["allow"])
+    content {
+      name      = "AllowRest"
+      priority  = 100
+      rule_type = "MatchRule"
+      action    = "Allow"
 
-    match_conditions {
-      match_variables {
-        variable_name = "RequestUri"
+      match_conditions {
+        match_variables {
+          variable_name = "RequestUri"
+        }
+        operator     = "BeginsWith"
+        match_values = ["/"]
       }
-      operator     = "BeginsWith"
-      match_values = ["/"]
     }
   }
 
@@ -279,6 +360,39 @@ resource "azurerm_web_application_firewall_policy" "hook" {
     managed_rule_set {
       type    = local.managed_rule_set_drs.type
       version = local.managed_rule_set_drs.version
+
+      dynamic "rule_group_override" {
+        for_each = { for o in lookup(var.endpoint_waf_rule_overrides, "hook", []) : o.rule_group_name => o... }
+        content {
+          rule_group_name = rule_group_override.key
+          dynamic "rule" {
+            for_each = rule_group_override.value
+            content {
+              id      = rule.value.rule_id
+              enabled = rule.value.action != "Disabled"
+              action  = rule.value.action == "Disabled" ? null : rule.value.action
+            }
+          }
+        }
+      }
+    }
+
+    dynamic "exclusion" {
+      for_each = lookup(var.endpoint_waf_exclusions, "hook", [])
+      content {
+        match_variable          = exclusion.value.match_variable
+        selector                = exclusion.value.selector
+        selector_match_operator = exclusion.value.selector_match_operator
+      }
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition = var.endpoint_waf_managed_rules != "Detection" || (
+        length(var.hook_source_ranges) == 0 && length(var.connector_source_ranges) == 0 &&
+      var.api_rate_limit_per_minute == null)
+      error_message = "endpoint_waf_managed_rules = \"Detection\" puts the hook, api and connector policies in Detection mode, where the source-range and rate-limit rules only log. Leave hook_source_ranges, connector_source_ranges and api_rate_limit_per_minute unset until the policies are in Prevention."
     }
   }
 }
@@ -291,10 +405,26 @@ resource "azurerm_web_application_firewall_policy" "api" {
   tags                = var.tags
 
   policy_settings {
-    enabled                  = true
-    mode                     = "Prevention"
-    request_body_check       = false
-    request_body_enforcement = false
+    enabled                          = true
+    mode                             = local.endpoint_waf_mode
+    request_body_check               = local.endpoint_managed_rules
+    request_body_enforcement         = false
+    request_body_inspect_limit_in_kb = local.endpoint_managed_rules ? 2000 : 128
+
+    dynamic "log_scrubbing" {
+      for_each = toset(local.endpoint_managed_rules ? ["scrub"] : [])
+      content {
+        enabled = true
+        dynamic "rule" {
+          for_each = local.endpoint_log_scrubbed
+          content {
+            enabled                 = true
+            match_variable          = rule.value
+            selector_match_operator = "EqualsAny"
+          }
+        }
+      }
+    }
   }
 
   dynamic "custom_rules" {
@@ -318,18 +448,21 @@ resource "azurerm_web_application_firewall_policy" "api" {
     }
   }
 
-  custom_rules {
-    name      = "AllowRest"
-    priority  = 100
-    rule_type = "MatchRule"
-    action    = "Allow"
+  dynamic "custom_rules" {
+    for_each = toset(local.endpoint_managed_rules ? [] : ["allow"])
+    content {
+      name      = "AllowRest"
+      priority  = 100
+      rule_type = "MatchRule"
+      action    = "Allow"
 
-    match_conditions {
-      match_variables {
-        variable_name = "RequestUri"
+      match_conditions {
+        match_variables {
+          variable_name = "RequestUri"
+        }
+        operator     = "BeginsWith"
+        match_values = ["/"]
       }
-      operator     = "BeginsWith"
-      match_values = ["/"]
     }
   }
 
@@ -337,6 +470,30 @@ resource "azurerm_web_application_firewall_policy" "api" {
     managed_rule_set {
       type    = local.managed_rule_set_drs.type
       version = local.managed_rule_set_drs.version
+
+      dynamic "rule_group_override" {
+        for_each = { for o in lookup(var.endpoint_waf_rule_overrides, "api", []) : o.rule_group_name => o... }
+        content {
+          rule_group_name = rule_group_override.key
+          dynamic "rule" {
+            for_each = rule_group_override.value
+            content {
+              id      = rule.value.rule_id
+              enabled = rule.value.action != "Disabled"
+              action  = rule.value.action == "Disabled" ? null : rule.value.action
+            }
+          }
+        }
+      }
+    }
+
+    dynamic "exclusion" {
+      for_each = lookup(var.endpoint_waf_exclusions, "api", [])
+      content {
+        match_variable          = exclusion.value.match_variable
+        selector                = exclusion.value.selector
+        selector_match_operator = exclusion.value.selector_match_operator
+      }
     }
   }
 }
@@ -355,4 +512,17 @@ resource "azurerm_application_load_balancer_security_policy" "waf" {
   location                           = var.location
   web_application_firewall_policy_id = each.value
   tags                               = var.tags
+}
+
+# The AGC's access and firewall logs. The firewall log is where Detection
+# mode's matches appear.
+resource "azurerm_monitor_diagnostic_setting" "agc" {
+  count                      = local.agc && var.agc_log_analytics_workspace_id != null ? 1 : 0
+  name                       = "${var.cluster_name}-agc-logs"
+  target_resource_id         = azurerm_application_load_balancer.this[0].id
+  log_analytics_workspace_id = var.agc_log_analytics_workspace_id
+
+  enabled_log {
+    category_group = "allLogs"
+  }
 }
