@@ -244,6 +244,16 @@ def test_the_proxy_health_check_is_named_for_the_release():
     assert "oauth2-proxy" not in checks
 
 
+def test_the_proxy_health_check_probes_the_container_port():
+    """AGC probes the pod, so a probe on the Service's port 80 never reaches
+    oauth2-proxy's 4180 and the route answers 503."""
+    proxy = _kind(render(*AGC), "HealthCheckPolicy")[f"{FULL}-dashboard-proxy"]
+    assert proxy["spec"]["default"]["port"] == 4180
+    proxy = _kind(render(*AGC, "--set", "ingress.agc.dashboardBackend.healthPort=8081"),
+                  "HealthCheckPolicy")[f"{FULL}-dashboard-proxy"]
+    assert proxy["spec"]["default"]["port"] == 8081
+
+
 def test_trusted_header_in_agc_mode_takes_the_proxy_as_its_peer():
     """The shipped policy's trusted_header mode needs the policy to admit the
     stripping proxy alone; in agc mode that is dashboardProxy."""

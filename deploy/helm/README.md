@@ -299,8 +299,15 @@ kubectl get crd gateways.gateway.networking.k8s.io webapplicationfirewallpolicy.
    everything to it, and it forwards signed-in requests to the dashboard.
    On top of the install in [Putting oauth2-proxy in front](#putting-oauth2-proxy-in-front),
    set `extraArgs.upstream=http://<release>-forgd-verdict-dashboard.<namespace>.svc:<dashboard.port>`
-   and turn its own ingress off (`ingress.enabled=false`). If its pods run
+   and `extraArgs.skip-provider-button=true`, and turn its own ingress off
+   (`ingress.enabled=false`). Without `skip-provider-button` an unsigned-in
+   request gets oauth2-proxy's sign-in page with status 403 rather than a
+   redirect to the provider, which `verify-deployment` fails. If its pods run
    under a NetworkPolicy, admit AGC's subnet to them.
+   AGC probes `ingress.agc.dashboardBackend.healthPath` on the proxy's pod,
+   at `healthPort` (4180, the oauth2-proxy chart's container port); a proxy
+   listening elsewhere needs `healthPort` set, or the dashboard route
+   answers 503.
 5. **This chart**, with the module's outputs:
 
 ```sh

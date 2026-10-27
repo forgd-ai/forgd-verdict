@@ -746,6 +746,10 @@ ingress:
       # oauth2-proxy's health endpoint, which AGC probes in place of the
       # dashboard's own.
       healthPath: /ping
+      # The port AGC probes healthPath on. AGC sends health probes to the
+      # pod, so this is the proxy's container port, not `port` on its
+      # Service: 4180 for the oauth2-proxy chart.
+      healthPort: 4180
 
 # --- network policy ------------------------------------------------------
 # One NetworkPolicy per role with a Service (verdict, collector, dashboard,
