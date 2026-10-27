@@ -17,11 +17,6 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 5.0"
     }
-    # For the node pool's maxUnavailable, which azurerm has no argument for.
-    azapi = {
-      source  = "Azure/azapi"
-      version = "~> 2.0"
-    }
   }
 }
 
@@ -221,10 +216,6 @@ resource "azurerm_kubernetes_cluster" "this" {
       error_message = "dns_service_ip must be an address inside service_cidr other than its first."
     }
     precondition {
-      condition     = var.upgrade_max_unavailable == null || !(trimsuffix(coalesce(var.upgrade_max_unavailable, "1"), "%") == "0" && trimsuffix(var.upgrade_max_surge, "%") == "0")
-      error_message = "upgrade_max_unavailable and upgrade_max_surge are both 0: an upgrade could neither add a node nor take one down. AKS refuses it."
-    }
-    precondition {
       condition     = var.ingress == null || var.app_routing_enabled == null
       error_message = "Set ingress, not app_routing_enabled as well: app_routing_enabled is the older form of the same choice, and the two can disagree."
     }
@@ -253,9 +244,6 @@ resource "azurerm_kubernetes_cluster" "this" {
       # permanent diff is a plan nobody reads -- which defeats the gate on
       # the apply.
       kubernetes_version,
-      # With upgrade_max_unavailable, azapi_update_resource.upgrade_settings
-      # owns the pool's surge, and azurerm would set it back.
-      default_node_pool[0].upgrade_settings[0].max_surge,
     ]
   }
 }
@@ -340,26 +328,6 @@ resource "azurerm_federated_identity_credential" "control" {
     precondition {
       condition     = !contains(concat([var.writer_service_account, var.reader_service_account], var.connector_enabled ? [var.connector_service_account] : []), var.control_service_account)
       error_message = "control_service_account must be a service account of its own, not the writer's, the reader's or the connector's."
-    }
-  }
-}
-
-# The default pool's upgrade by maxUnavailable rather than surge, with
-# upgrade_max_unavailable. azurerm 5 has no maxUnavailable argument and
-# requires max_surge, so the pool is created with azurerm's surge of 1 and
-# this sets both afterwards. A surge of 0 drains and replaces nodes in
-# place, which needs no vCPU quota beyond the pool's own.
-resource "azapi_update_resource" "upgrade_settings" {
-  count       = var.upgrade_max_unavailable == null ? 0 : 1
-  type        = "Microsoft.ContainerService/managedClusters/agentPools@2026-08-01"
-  resource_id = "${azurerm_kubernetes_cluster.this.id}/agentPools/system"
-
-  body = {
-    properties = {
-      upgradeSettings = {
-        maxSurge       = var.upgrade_max_surge
-        maxUnavailable = var.upgrade_max_unavailable
-      }
     }
   }
 }

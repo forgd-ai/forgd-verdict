@@ -42,10 +42,17 @@ variable "node_vm_size" {
     names whichever it hit first, which makes the other one look fine:
 
       The VM size of <size> is not allowed in your subscription
-      in location '<region>'          <- family limit 0
+      in location '<region>'          <- family limit 0, or the size withheld
 
       Insufficient regional vcpu quota left for location <region>.
       left regional vcpu quota <n>, requested quota <m>   <- regional total
+
+    "Not allowed" also means the size is withheld from the subscription in
+    that region whatever its family quota: a subscription created in 2026
+    with a DSv4 limit of 10 was refused Standard_D4s_v4 in centralus. The
+    error lists the sizes that are offered, and
+    `az vm list-skus --location <region> --size <size>` shows a restriction.
+    Standard_D4s_v6 has the same shape and was offered there.
 
     Check both before changing this or node_count. See the arithmetic in
     main.tf for what the chart needs.
@@ -61,7 +68,7 @@ variable "node_vm_size" {
 variable "node_count" {
   type        = number
   default     = 2
-  description = "node_count * the size's vCPU must fit the REGIONAL total, and an upgrade transiently needs one more node's worth on top -- max_surge is 1."
+  description = "node_count * the size's vCPU must fit both the family quota and the REGIONAL total, and an upgrade transiently needs one more node's worth on top: max_surge is 1, and AKS refuses maxUnavailable above 0 on a system pool, which this pool is."
 }
 
 variable "registry_id" {
@@ -311,24 +318,4 @@ variable "dns_service_ip" {
   type        = string
   default     = null
   description = "The cluster DNS service's address, inside service_cidr. Null is AKS's 10.0.0.10. Set with service_cidr."
-}
-
-variable "upgrade_max_unavailable" {
-  type        = string
-  default     = null
-  description = "Nodes of the default pool an upgrade may take down at once, e.g. \"1\". Null keeps the surge of 1, which needs one node's vCPUs of quota beyond the pool. Set, the pool upgrades by draining and replacing nodes in place, with upgrade_max_surge extra nodes (\"0\" for none)."
-  validation {
-    condition     = var.upgrade_max_unavailable == null || can(regex("^([0-9]+|[0-9]+%)$", coalesce(var.upgrade_max_unavailable, "x")))
-    error_message = "upgrade_max_unavailable is a count such as \"1\" or a percentage such as \"50%\"."
-  }
-}
-
-variable "upgrade_max_surge" {
-  type        = string
-  default     = "0"
-  description = "With upgrade_max_unavailable: extra nodes an upgrade adds. \"0\" adds none."
-  validation {
-    condition     = can(regex("^([0-9]+|[0-9]+%)$", var.upgrade_max_surge))
-    error_message = "upgrade_max_surge is a count such as \"0\" or a percentage such as \"10%\"."
-  }
 }

@@ -34,8 +34,7 @@ ALB_CONTROLLER = "66666666-0000-0000-0000-000000000000"
 
 def _overrides(block: str, kind: str, name: str) -> dict:
     if kind == "azurerm_kubernetes_cluster":
-        return {"id": f"{RG}/providers/Microsoft.ContainerService/managedClusters/aks",
-                "oidc_issuer_url": "https://issuer.example/", "node_resource_group_id": NODE_GROUP,
+        return {"oidc_issuer_url": "https://issuer.example/", "node_resource_group_id": NODE_GROUP,
                 "kubelet_identity": [{"object_id": "00000000-0000-0000-0000-000000000009",
                                       "client_id": "", "user_assigned_identity_id": ""}]}
     if kind == "azurerm_user_assigned_identity" and name == "alb_controller":
@@ -51,7 +50,7 @@ def _overrides(block: str, kind: str, name: str) -> dict:
 
 def _render(tmp_path, **variables) -> dict:
     return render_once(tmp_path / "cluster-aks", AKS, {**REQUIRED, **variables},
-                       providers=["azurerm", "azapi"], mock_data={}, overrides=_overrides,
+                       providers=["azurerm"], mock_data={}, overrides=_overrides,
                        plugins=plugin_dir(AKS))
 
 
@@ -277,33 +276,3 @@ def test_without_a_registry_there_is_no_pull_grant(tmp_path):
     """With grant_registry_pull = true and a registry made in the same apply,
     test_cluster_aks_plan_time.py plans the grant with the id unknown."""
     assert not _present(_render(tmp_path, **AGC), "azurerm_role_assignment.kubelet_pulls_images")
-
-
-def test_by_default_the_pool_upgrades_by_surge_and_azapi_changes_nothing(tmp_path):
-    rendered = _render(tmp_path, **AGC)
-    assert not _present(rendered, "azapi_update_resource.upgrade_settings")
-
-
-def test_upgrade_max_unavailable_sets_both_values_on_the_system_pool(tmp_path):
-    """azurerm 5 has no maxUnavailable; the pool is created with its surge
-    of 1 and azapi sets maxSurge and maxUnavailable after."""
-    rendered = _render(tmp_path, **AGC, upgrade_max_unavailable="1")
-    update = _one(rendered, "azapi_update_resource.upgrade_settings")
-    assert update["type"] == "Microsoft.ContainerService/managedClusters/agentPools@2026-08-01"
-    assert update["resource_id"].endswith("/agentPools/system")
-    assert update["body"] == {"properties": {"upgradeSettings": {"maxSurge": "0", "maxUnavailable": "1"}}}
-
-
-def test_azurerm_does_not_take_the_surge_back():
-    main = (AKS / "main.tf").read_text(encoding="utf-8")
-    assert "default_node_pool[0].upgrade_settings[0].max_surge," in main
-
-
-@pytest.mark.parametrize(("unavailable", "surge", "message"), [
-    ("0", "0", "both 0"),
-    ("0%", "0", "both 0"),
-    ("one", "0", "upgrade_max_unavailable is a count"),
-    ("1", "x", "upgrade_max_surge is a count"),
-])
-def test_upgrade_settings_that_cannot_work_are_refused(tmp_path, unavailable, surge, message):
-    _refused(tmp_path, message, **AGC, upgrade_max_unavailable=unavailable, upgrade_max_surge=surge)
