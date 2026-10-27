@@ -373,7 +373,7 @@ health path, and the dashboard's readiness stays its pod probe.
 {{- if .Values.collector.enabled }}{{ $probes = append $probes (list (printf "%s-collector" $full) (int .Values.collector.port) (include "forgd-verdict.readyPath" .) (printf "%s-collector" $full)) }}{{ end }}
 {{- if .Values.intake.enabled }}{{ $probes = append $probes (list (printf "%s-intake" $full) (int .Values.intake.port) (include "forgd-verdict.readyPath" .) (printf "%s-intake" $full)) }}{{ end }}
 {{- if $conn }}{{ $probes = append $probes (list (printf "%s-connector" $full) (int .Values.connector.port) (include "forgd-verdict.readyPath" .) (printf "%s-connector" $full)) }}{{ end }}
-{{- if $routeDash }}{{ $probes = append $probes (list $agc.dashboardBackend.name (int $agc.dashboardBackend.port) $agc.dashboardBackend.healthPath (printf "%s-dashboard-proxy" $full)) }}{{ end }}
+{{- if $routeDash }}{{ $probes = append $probes (list $agc.dashboardBackend.name (int $agc.dashboardBackend.healthPort) $agc.dashboardBackend.healthPath (printf "%s-dashboard-proxy" $full)) }}{{ end }}
 {{- range $p := $probes }}
 ---
 apiVersion: alb.networking.azure.io/v1
