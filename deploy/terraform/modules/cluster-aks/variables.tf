@@ -212,7 +212,7 @@ variable "protected_waf_excluded_args" {
 variable "endpoint_waf_managed_rules" {
   type        = string
   default     = "off"
-  description = "With ingress = \"agc\": whether DRS 2.1 runs on the hook, api and connector WAF policies. \"off\" allows every request those policies' custom rules do not block, so prompt text and telemetry are never inspected. \"Detection\" runs DRS on headers, URI and up to 2000 KB of the body and logs what it would block; the policy mode is policy-wide, so source ranges and the rate limit only log too. \"Prevention\" answers a DRS match 403, which on /hook is a failed governed prompt: soak in Detection with agc_log_analytics_workspace_id set and add endpoint_waf_exclusions first."
+  description = "With ingress = \"agc\": whether DRS 2.1 runs on the hook, api and connector WAF policies. \"off\" allows every request those policies' custom rules do not block, so prompt text and telemetry are never inspected. \"Detection\" runs DRS on headers, URI and up to 2000 KB of the body and logs what it would block; the policy mode is policy-wide, so source ranges and the rate limit only log too. \"Prevention\" answers a DRS match 403, which on /hook is a failed governed prompt: soak in Detection with agc_log_analytics_workspace_id set and add endpoint_waf_exclusions first. On /hook DRS inspects headers and URI only; the hook policy excludes every body argument."
   validation {
     condition     = contains(["off", "Detection", "Prevention"], var.endpoint_waf_managed_rules)
     error_message = "endpoint_waf_managed_rules is \"off\", \"Detection\" or \"Prevention\"."
@@ -226,7 +226,7 @@ variable "endpoint_waf_exclusions" {
     selector_match_operator = string
   })))
   default     = {}
-  description = "With ingress = \"agc\": managed-rule exclusions per endpoint WAF policy, keyed hook, api or connector. Each names a request part DRS does not inspect, for example {match_variable = \"RequestArgNames\", selector = \"prompt\", selector_match_operator = \"Equals\"} for a JSON body field."
+  description = "With ingress = \"agc\": managed-rule exclusions per endpoint WAF policy, keyed hook, api or connector. Each names a request part DRS does not inspect, for example {match_variable = \"RequestArgNames\", selector = \"prompt\", selector_match_operator = \"Equals\"} for a JSON body field. With managed rules on, the hook policy already excludes the keys and values of every body argument."
   validation {
     condition     = alltrue([for k in keys(var.endpoint_waf_exclusions) : contains(["hook", "api", "connector"], k)])
     error_message = "endpoint_waf_exclusions is keyed hook, api or connector."
