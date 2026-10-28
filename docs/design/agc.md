@@ -180,6 +180,14 @@ three endpoint policies:
   handled when they fire on legitimate traffic, since an exclusion cannot
   silence a rule that judges the whole request. `endpoint_waf_exclusions`
   names request parts DRS skips.
+- **`/hook`'s body.** With managed rules on, the hook policy excludes the
+  keys and values of every argument DRS parses from the body, so DRS
+  inspects `/hook`'s headers and URI only. The body is prompt text, tool
+  input and tool output, so code in a prompt matches SQL injection, PHP,
+  shell and XSS rules, and 943120 matches the `session_id` key of every
+  request, none of which carries a Referer; 943120 alone reaches the
+  anomaly threshold. The request is authenticated by its signature, and
+  `hook_source_ranges` limits it to Anthropic's addresses.
 - **Logs.** The firewall log records the part of the request a rule
   matched. On these routes that is prompt text, telemetry and content
   submitted for scanning, so the endpoint policies scrub argument, JSON,
@@ -187,7 +195,8 @@ three endpoint policies:
   holds on AGC.
 - **Rollout.** The bodies on `/hook`, `/v1`, `/intake` and `/scan` are
   prompt text, tool output and telemetry, which DRS is written to flag, and
-  a 403 on a governed prompt is a webhook failure. So a deployment soaks in
+  a 403 on a governed prompt is a webhook failure. The hook policy's
+  argument exclusions cover `/hook`; a deployment soaks in
   `Detection` on real traffic, reads the firewall log, adds exclusions for
   rules that match legitimate content, and then moves to `Prevention`,
   which is also when the allowlists start blocking.

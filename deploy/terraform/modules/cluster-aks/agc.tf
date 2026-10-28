@@ -117,6 +117,11 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 #
 # The provider requires a managed rule set on every policy, so with
 # endpoint_waf_managed_rules = "off" all three still carry DRS 2.1.
+#
+# With managed rules on, the hook policy excludes the keys and values of
+# every argument DRS parses from the body, so on /hook it inspects headers
+# and URI only. The body is prompt text, tool input and tool output, and
+# 943120 matches its session_id key on every request that has no Referer.
 
 locals {
   managed_rule_set_drs   = { type = "Microsoft_DefaultRuleSet", version = "2.1" }
@@ -125,6 +130,10 @@ locals {
   # Request parts masked in the firewall log, whose matched-data field
   # would otherwise carry prompt text, telemetry and scanned content.
   endpoint_log_scrubbed = ["RequestArgNames", "RequestPostArgNames", "RequestJSONArgNames", "RequestHeaderNames", "RequestCookieNames"]
+  hook_argument_exclusions = local.endpoint_managed_rules ? [
+    { match_variable = "RequestArgKeys", selector = "*", selector_match_operator = "EqualsAny" },
+    { match_variable = "RequestArgValues", selector = "*", selector_match_operator = "EqualsAny" },
+  ] : []
 }
 
 resource "azurerm_web_application_firewall_policy" "protected" {
@@ -378,7 +387,7 @@ resource "azurerm_web_application_firewall_policy" "hook" {
     }
 
     dynamic "exclusion" {
-      for_each = lookup(var.endpoint_waf_exclusions, "hook", [])
+      for_each = distinct(concat(local.hook_argument_exclusions, lookup(var.endpoint_waf_exclusions, "hook", [])))
       content {
         match_variable          = exclusion.value.match_variable
         selector                = exclusion.value.selector

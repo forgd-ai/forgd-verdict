@@ -297,12 +297,31 @@ def test_an_unknown_endpoint_mode_is_refused(tmp_path):
     _refused(tmp_path, "endpoint_waf_managed_rules is", **AGC, endpoint_waf_managed_rules="on")
 
 
+HOOK_ARGUMENTS = [("RequestArgKeys", "EqualsAny", "*"), ("RequestArgValues", "EqualsAny", "*")]
+
+
+@pytest.mark.parametrize("mode", ["Detection", "Prevention"])
+def test_with_managed_rules_the_hook_policy_skips_every_body_argument(tmp_path, mode):
+    """Prompt text and the session_id key score over the threshold."""
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules=mode)
+    assert _exclusions(_one(rendered, "azurerm_web_application_firewall_policy.hook")) == HOOK_ARGUMENTS
+    for name in ("api", "connector"):
+        assert _exclusions(_one(rendered, f"azurerm_web_application_firewall_policy.{name}")) == [], name
+
+
+def test_a_hook_exclusion_the_module_already_makes_is_not_repeated(tmp_path):
+    keys = {"match_variable": "RequestArgKeys", "selector": "*", "selector_match_operator": "EqualsAny"}
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Detection",
+                       endpoint_waf_exclusions={"hook": [keys]})
+    assert _exclusions(_one(rendered, "azurerm_web_application_firewall_policy.hook")) == HOOK_ARGUMENTS
+
+
 def test_endpoint_exclusions_reach_only_their_policy(tmp_path):
-    field = {"match_variable": "RequestArgNames", "selector": "prompt", "selector_match_operator": "Equals"}
+    field = {"match_variable": "RequestHeaderNames", "selector": "x-trace", "selector_match_operator": "Equals"}
     rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Detection",
                        endpoint_waf_exclusions={"hook": [field]})
     hook = _one(rendered, "azurerm_web_application_firewall_policy.hook")
-    assert _exclusions(hook) == [("RequestArgNames", "Equals", "prompt")]
+    assert _exclusions(hook) == [*HOOK_ARGUMENTS, ("RequestHeaderNames", "Equals", "x-trace")]
     for name in ("api", "connector"):
         assert _exclusions(_one(rendered, f"azurerm_web_application_firewall_policy.{name}")) == [], name
 
