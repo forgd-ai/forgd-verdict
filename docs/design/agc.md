@@ -164,7 +164,8 @@ three endpoint policies:
   and up to 2000 KB of the body, logging what it would block to the AGC
   firewall log (`agc_log_analytics_workspace_id`). The mode is
   policy-wide, so the allowlists and rate limit would only log too; the
-  module refuses `Detection` with any of them set.
+  module refuses a policy in `Detection` with its own allowlist or the
+  rate limit set.
 - **`Prevention`.** As `Detection`, and a match is answered 403.
   `request_body_enforcement` is off, so no body is refused for its size.
   What is not settled from the documentation, and the soak and gate 1
@@ -174,6 +175,12 @@ three endpoint policies:
     and hook-ship's NDJSON on `/intake`, at the blocking threshold.
   - Rule 200002 scores a body that fails to parse: a gzip-encoded JSON
     export, and possibly a JSON body cut at the inspection limit.
+- **`endpoint_waf_modes`.** `Detection` or `Prevention` for one policy,
+  keyed `hook`, `api` or `connector`, in place of
+  `endpoint_waf_managed_rules`'s mode. `{hook = "Prevention"}` blocks on
+  `/hook` while `/v1`, `/intake` and the connector keep soaking. The rate
+  limit is on both the hook and api policies, so it needs both in
+  `Prevention`.
 - **Overrides and exclusions.** `endpoint_waf_rule_overrides`, keyed
   `hook`, `api` or `connector`, sets a rule to `Log`, `AnomalyScoring`,
   `Block` or `Disabled` on that policy; that is how 920420 and 200002 are
@@ -198,8 +205,9 @@ three endpoint policies:
   a 403 on a governed prompt is a webhook failure. The hook policy's
   argument exclusions cover `/hook`; a deployment soaks in
   `Detection` on real traffic, reads the firewall log, adds exclusions for
-  rules that match legitimate content, and then moves to `Prevention`,
-  which is also when the allowlists start blocking.
+  rules that match legitimate content, and then moves each policy to
+  `Prevention` once its own traffic is clean, which is also when its
+  allowlist starts blocking.
 - The rate limit is off by default: Anthropic's webhook and OTLP traffic
   arrives from a small pool of addresses, so a limit sized for one client
   would throttle every governed prompt in an organization.

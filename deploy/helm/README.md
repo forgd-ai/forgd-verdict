@@ -268,7 +268,9 @@ logs its matches, and `Prevention` blocks them. Those routes carry prompt
 text, tool output and telemetry, which the rule sets are written to flag,
 and a 403 there is a webhook failure or, for the connector, a broken OAuth
 discovery, so soak in `Detection` with `agc_log_analytics_workspace_id`
-set and add `endpoint_waf_exclusions` before `Prevention`. On `/hook`,
+set and add `endpoint_waf_exclusions` before `Prevention`.
+`endpoint_waf_modes` moves one policy to `Prevention` ahead of the
+others. On `/hook`,
 DRS inspects headers and URI only: the hook policy excludes every argument
 it parses from the body.
 
