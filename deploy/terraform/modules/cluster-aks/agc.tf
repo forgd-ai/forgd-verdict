@@ -99,6 +99,12 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 #               policy-wide, so the custom rules only log as well.
 #   Prevention  as Detection, and a DRS match is answered 403.
 #
+# endpoint_waf_modes sets Detection or Prevention for one policy in place
+# of endpoint_waf_managed_rules's mode. A source-range or rate-limit rule
+# needs the policy carrying it in Prevention: hook_source_ranges the hook
+# policy, connector_source_ranges the connector policy, and
+# api_rate_limit_per_minute both the hook and api policies.
+#
 # request_body_enforcement is off, so a body over the inspection limit is
 # not refused for its size. DRS 2.1 scores content types it does not parse
 # (OTLP protobuf, hook-ship's NDJSON) under rule 920420, and a body that
@@ -126,7 +132,9 @@ resource "azurerm_role_assignment" "alb_controller_reads_nodes" {
 locals {
   managed_rule_set_drs   = { type = "Microsoft_DefaultRuleSet", version = "2.1" }
   endpoint_managed_rules = var.endpoint_waf_managed_rules != "off"
-  endpoint_waf_mode      = local.endpoint_managed_rules ? var.endpoint_waf_managed_rules : "Prevention"
+  endpoint_waf_mode = { for name in ["connector", "hook", "api"] : name =>
+    local.endpoint_managed_rules ? lookup(var.endpoint_waf_modes, name, var.endpoint_waf_managed_rules) : "Prevention"
+  }
   # Request parts masked in the firewall log, whose matched-data field
   # would otherwise carry prompt text, telemetry and scanned content.
   endpoint_log_scrubbed = ["RequestArgNames", "RequestPostArgNames", "RequestJSONArgNames", "RequestHeaderNames", "RequestCookieNames"]
@@ -187,7 +195,7 @@ resource "azurerm_web_application_firewall_policy" "connector" {
 
   policy_settings {
     enabled                          = true
-    mode                             = local.endpoint_waf_mode
+    mode                             = local.endpoint_waf_mode.connector
     request_body_check               = local.endpoint_managed_rules
     request_body_enforcement         = false
     request_body_inspect_limit_in_kb = local.endpoint_managed_rules ? 2000 : 128
@@ -286,7 +294,7 @@ resource "azurerm_web_application_firewall_policy" "hook" {
 
   policy_settings {
     enabled                          = true
-    mode                             = local.endpoint_waf_mode
+    mode                             = local.endpoint_waf_mode.hook
     request_body_check               = local.endpoint_managed_rules
     request_body_enforcement         = false
     request_body_inspect_limit_in_kb = local.endpoint_managed_rules ? 2000 : 128
@@ -398,10 +406,16 @@ resource "azurerm_web_application_firewall_policy" "hook" {
 
   lifecycle {
     precondition {
-      condition = var.endpoint_waf_managed_rules != "Detection" || (
-        length(var.hook_source_ranges) == 0 && length(var.connector_source_ranges) == 0 &&
-      var.api_rate_limit_per_minute == null)
-      error_message = "endpoint_waf_managed_rules = \"Detection\" puts the hook, api and connector policies in Detection mode, where the source-range and rate-limit rules only log. Leave hook_source_ranges, connector_source_ranges and api_rate_limit_per_minute unset until the policies are in Prevention."
+      condition = (
+        (local.endpoint_waf_mode.hook == "Prevention" || (length(var.hook_source_ranges) == 0 && var.api_rate_limit_per_minute == null)) &&
+        (local.endpoint_waf_mode.connector == "Prevention" || length(var.connector_source_ranges) == 0) &&
+        (local.endpoint_waf_mode.api == "Prevention" || var.api_rate_limit_per_minute == null)
+      )
+      error_message = "A policy in Detection mode would only log its source-range and rate-limit rules. hook_source_ranges needs the hook policy in Prevention, connector_source_ranges the connector policy, and api_rate_limit_per_minute both the hook and api policies."
+    }
+    precondition {
+      condition     = local.endpoint_managed_rules || length(var.endpoint_waf_modes) == 0
+      error_message = "endpoint_waf_modes needs endpoint_waf_managed_rules on: with it off the endpoint policies run no managed rules to detect or prevent."
     }
   }
 }
@@ -415,7 +429,7 @@ resource "azurerm_web_application_firewall_policy" "api" {
 
   policy_settings {
     enabled                          = true
-    mode                             = local.endpoint_waf_mode
+    mode                             = local.endpoint_waf_mode.api
     request_body_check               = local.endpoint_managed_rules
     request_body_enforcement         = false
     request_body_inspect_limit_in_kb = local.endpoint_managed_rules ? 2000 : 128

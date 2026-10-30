@@ -212,10 +212,24 @@ variable "protected_waf_excluded_args" {
 variable "endpoint_waf_managed_rules" {
   type        = string
   default     = "off"
-  description = "With ingress = \"agc\": whether DRS 2.1 runs on the hook, api and connector WAF policies. \"off\" allows every request those policies' custom rules do not block, so prompt text and telemetry are never inspected. \"Detection\" runs DRS on headers, URI and up to 2000 KB of the body and logs what it would block; the policy mode is policy-wide, so source ranges and the rate limit only log too. \"Prevention\" answers a DRS match 403, which on /hook is a failed governed prompt: soak in Detection with agc_log_analytics_workspace_id set and add endpoint_waf_exclusions first. On /hook DRS inspects headers and URI only; the hook policy excludes every body argument."
+  description = "With ingress = \"agc\": whether DRS 2.1 runs on the hook, api and connector WAF policies. \"off\" allows every request those policies' custom rules do not block, so prompt text and telemetry are never inspected. \"Detection\" runs DRS on headers, URI and up to 2000 KB of the body and logs what it would block; the policy mode is policy-wide, so source ranges and the rate limit only log too, and endpoint_waf_modes sets one policy's mode on its own. \"Prevention\" answers a DRS match 403, which on /hook is a failed governed prompt: soak in Detection with agc_log_analytics_workspace_id set and add endpoint_waf_exclusions first. On /hook DRS inspects headers and URI only; the hook policy excludes every body argument."
   validation {
     condition     = contains(["off", "Detection", "Prevention"], var.endpoint_waf_managed_rules)
     error_message = "endpoint_waf_managed_rules is \"off\", \"Detection\" or \"Prevention\"."
+  }
+}
+
+variable "endpoint_waf_modes" {
+  type        = map(string)
+  default     = {}
+  description = "With endpoint_waf_managed_rules on: Detection or Prevention per endpoint WAF policy, keyed hook, api or connector, in place of endpoint_waf_managed_rules's mode for that policy. {hook = \"Prevention\"} answers DRS matches on /hook 403 while api and connector keep soaking in Detection."
+  validation {
+    condition     = alltrue([for k in keys(var.endpoint_waf_modes) : contains(["hook", "api", "connector"], k)])
+    error_message = "endpoint_waf_modes is keyed hook, api or connector."
+  }
+  validation {
+    condition     = alltrue([for m in values(var.endpoint_waf_modes) : contains(["Detection", "Prevention"], m)])
+    error_message = "endpoint_waf_modes values are \"Detection\" or \"Prevention\"."
   }
 }
 

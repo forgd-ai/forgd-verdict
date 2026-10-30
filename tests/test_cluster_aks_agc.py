@@ -293,6 +293,66 @@ def test_detection_with_blocking_custom_rules_is_refused(tmp_path, extra):
     _refused(tmp_path, "only log", **AGC, endpoint_waf_managed_rules="Detection", **extra)
 
 
+def _modes(rendered) -> dict:
+    return {name: _one(rendered, f"azurerm_web_application_firewall_policy.{name}")["policy_settings"][0]["mode"]
+            for name in ENDPOINTS}
+
+
+def test_endpoint_waf_modes_moves_one_policy_out_of_the_shared_mode(tmp_path):
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Detection",
+                       endpoint_waf_modes={"hook": "Prevention"})
+    assert _modes(rendered) == {"api": "Detection", "connector": "Detection", "hook": "Prevention"}
+    for name in ENDPOINTS:
+        policy = _one(rendered, f"azurerm_web_application_firewall_policy.{name}")
+        assert policy["policy_settings"][0]["request_body_check"] is True, name
+        assert "AllowRest" not in [r["name"] for r in _custom_rules(policy)], name
+
+
+def test_endpoint_waf_modes_can_hold_one_policy_in_detection(tmp_path):
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Prevention",
+                       endpoint_waf_modes={"connector": "Detection"})
+    assert _modes(rendered) == {"api": "Prevention", "connector": "Detection", "hook": "Prevention"}
+
+
+def test_a_policy_in_prevention_may_block_while_the_others_soak(tmp_path):
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Detection",
+                       endpoint_waf_modes={"hook": "Prevention"}, hook_source_ranges=["160.79.104.0/21"])
+    hook = _custom_rules(_one(rendered, "azurerm_web_application_firewall_policy.hook"))
+    assert [(r["name"], r["action"]) for r in hook] == [("HookSourceRanges", "Block")]
+
+
+@pytest.mark.parametrize("modes,extra", [
+    ({"hook": "Prevention"}, {"connector_source_ranges": ["198.51.100.0/24"]}),
+    ({"connector": "Prevention"}, {"hook_source_ranges": ["160.79.104.0/21"]}),
+    ({"hook": "Prevention"}, {"api_rate_limit_per_minute": 6000}),
+    ({"api": "Prevention"}, {"api_rate_limit_per_minute": 6000}),
+])
+def test_a_blocking_rule_on_a_policy_left_in_detection_is_refused(tmp_path, modes, extra):
+    """The rate limit is on both the hook and api policies."""
+    _refused(tmp_path, "only log", **AGC, endpoint_waf_managed_rules="Detection",
+             endpoint_waf_modes=modes, **extra)
+
+
+def test_the_rate_limit_blocks_with_hook_and_api_in_prevention(tmp_path):
+    rendered = _render(tmp_path, **AGC, endpoint_waf_managed_rules="Detection",
+                       endpoint_waf_modes={"hook": "Prevention", "api": "Prevention"},
+                       api_rate_limit_per_minute=6000)
+    for name in ("hook", "api"):
+        rules = _custom_rules(_one(rendered, f"azurerm_web_application_firewall_policy.{name}"))
+        assert ("RateLimit", "Block") in [(r["name"], r["action"]) for r in rules], name
+
+
+@pytest.mark.parametrize("variables,match", [
+    ({"endpoint_waf_managed_rules": "Detection", "endpoint_waf_modes": {"protected": "Prevention"}},
+     "keyed hook, api or connector"),
+    ({"endpoint_waf_managed_rules": "Detection", "endpoint_waf_modes": {"hook": "off"}},
+     "values are"),
+    ({"endpoint_waf_modes": {"hook": "Prevention"}}, "needs endpoint_waf_managed_rules on"),
+])
+def test_bad_endpoint_waf_modes_are_refused(tmp_path, variables, match):
+    _refused(tmp_path, match, **AGC, **variables)
+
+
 def test_an_unknown_endpoint_mode_is_refused(tmp_path):
     _refused(tmp_path, "endpoint_waf_managed_rules is", **AGC, endpoint_waf_managed_rules="on")
 
