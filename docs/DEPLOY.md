@@ -147,7 +147,7 @@ works against any target. It does not follow redirects.
 
 | Service | Assertion |
 |---|---|
-| verdict | `/healthz` answers 200; an unsigned `POST /hook` gets 401 |
+| verdict | `/healthz` answers 200; an unsigned `POST /hook` gets 401, or with `FORGD_HOOK_SOURCE_RESTRICTED=1` a 403, reported as not asserted |
 | collector | `/health` answers 200; an unauthenticated `POST /v1/logs` gets 401 |
 | dashboard | `/healthz` answers 200; `GET /` and `GET /api/summary` each get 401, or a redirect to a sign-in page. A 200, a 403, or a redirect anywhere else fails |
 | intake | only with `FORGD_INTAKE_URL` set: `/healthz` answers 200; an unauthenticated `POST /intake` and `POST /scan` each get 401 |
@@ -184,6 +184,7 @@ Environment variables it reads:
 | `FORGD_INTAKE_URL` | unset | the intake's base URL. Set, the intake is checked as above; the deploy scripts set it from `AZURE_INTAKE_APP`'s address or pass it through from the CD's variables |
 | `FORGD_DASHBOARD_IAP` | unset | `1` when the dashboard is behind Identity-Aware Proxy, as on Cloud Run and GKE: its `/healthz`, `/` and `/api/summary` must redirect to `https://accounts.google.com/`, and freshness is not checked |
 | `FORGD_CONNECTOR_URL` | unset | the findings connector's MCP URL, as entered in Claude; enables the connector checks |
+| `FORGD_HOOK_SOURCE_RESTRICTED` | unset | `1` when `/hook` is behind `hook_source_ranges` and the check may run from outside them: a 403 to the unsigned POST is reported as not asserted, and the summary line names it. Unset, a 403 fails |
 
 What it does not check:
 
