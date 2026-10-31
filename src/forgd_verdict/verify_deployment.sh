@@ -48,6 +48,14 @@
 #                             token, and a sign-in in front fails every batch
 #                             it ships and every scan it asks for. Unset or
 #                             empty: not checked.
+#   FORGD_HOOK_SOURCE_RESTRICTED
+#                             1: /hook is behind a source-address allowlist
+#                             (cluster-aks's hook_source_ranges) and this may
+#                             run from outside it. A 403 to the unsigned POST
+#                             is then reported as not asserted rather than
+#                             failed, since the WAF answered and the app was
+#                             never reached. Unset or empty: a 403 fails. Any
+#                             other value is a usage error.
 #   FORGD_CONNECTOR_URL       the findings connector's MCP URL, the one
 #                             entered in Claude, e.g.
 #                             https://mcp.example.com/mcp. An unauthenticated
@@ -79,11 +87,16 @@ REQUEST_TIMEOUT="${VERIFY_REQUEST_TIMEOUT_S:-15}"
 POLL_INTERVAL="${VERIFY_POLL_INTERVAL_S:-6}"
 MAX_UPTIME="${VERIFY_MAX_UPTIME_S:-}"
 DASHBOARD_IAP="${FORGD_DASHBOARD_IAP:-}"
+HOOK_RESTRICTED="${FORGD_HOOK_SOURCE_RESTRICTED:-}"
 CONNECTOR_URL="${FORGD_CONNECTOR_URL:-}"
 INTAKE_URL="${FORGD_INTAKE_URL:-}"
 case "$DASHBOARD_IAP" in
   ""|1) ;;
   *) echo "FATAL: FORGD_DASHBOARD_IAP must be 1 or unset (got '${DASHBOARD_IAP}')" >&2; exit 2 ;;
+esac
+case "$HOOK_RESTRICTED" in
+  ""|1) ;;
+  *) echo "FATAL: FORGD_HOOK_SOURCE_RESTRICTED must be 1 or unset (got '${HOOK_RESTRICTED}')" >&2; exit 2 ;;
 esac
 
 # A base URL without a scheme would silently become a relative path and
@@ -128,10 +141,15 @@ FAIL_LOG="$TMPDIR_RUN/failures"
 : >"$FAIL_LOG"
 FAIL_COUNT=0
 PASSED=0
+NOT_ASSERTED=""
 
 say() { printf '\n==> %s\n' "$*"; }
 pass() { PASSED=$((PASSED + 1)); printf '  PASS [%s] %s\n' "$1" "$2"; }
 note() { printf '  NOTE %s\n' "$1"; }
+not_asserted() {
+  NOT_ASSERTED="${NOT_ASSERTED}${NOT_ASSERTED:+, }$1"
+  printf '  NOT ASSERTED [%s] %s\n' "$1" "$2"
+}
 fail() {
   FAIL_COUNT=$((FAIL_COUNT + 1))
   printf '%s: %s\n' "$1" "$2" >>"$FAIL_LOG"
@@ -281,12 +299,25 @@ check_verdict_unsigned() {
       "unsigned POST /hook got no HTTP response (${CURL_ERR:-connection failed}); nothing was asserted about signature enforcement"
     return 1
   fi
+  if [ "$CODE" = "403" ] && [ "$HOOK_RESTRICTED" = 1 ]; then
+    not_asserted "verdict.unsigned-post" \
+      "unsigned POST /hook: 403, refused by the source-address allowlist before the app; signature enforcement is not checked from here"
+    return 0
+  fi
+  if [ "$CODE" = "403" ]; then
+    fail "verdict.unsigned-post" \
+      "unsigned POST /hook returned $(describe_code), expected 401 — if /hook is behind hook_source_ranges and this runs from outside them, set FORGD_HOOK_SOURCE_RESTRICTED=1"
+    return 1
+  fi
   if [ "$CODE" != "401" ]; then
     fail "verdict.unsigned-post" \
       "unsigned POST /hook returned $(describe_code), expected 401 — signature verification is not active"
     return 1
   fi
   pass "verdict.unsigned-post" "unsigned POST /hook: 401 (signature enforced)"
+  if [ "$HOOK_RESTRICTED" = 1 ]; then
+    note "FORGD_HOOK_SOURCE_RESTRICTED=1, and /hook reached the app: this runs inside the allowlist, or the allowlist is not enforced"
+  fi
   # Not an assertion: the app answers 401 with a JSON error body and an auth
   # front end typically answers with none, but a customer is free to front
   # this with a proxy that does either. Worth a line, not a failure.
@@ -589,4 +620,8 @@ if [ "$PASSED" -eq 0 ]; then
   exit 2
 fi
 
-say "verified — ${PASSED} assertion(s) passed"
+if [ -n "$NOT_ASSERTED" ]; then
+  say "verified — ${PASSED} assertion(s) passed; not asserted: ${NOT_ASSERTED}"
+else
+  say "verified — ${PASSED} assertion(s) passed"
+fi

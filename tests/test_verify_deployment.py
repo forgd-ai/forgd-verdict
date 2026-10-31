@@ -413,6 +413,57 @@ def test_the_verdict_server_is_still_probed_at_healthz(stub):
     assert "verdict.health" in r.stdout + r.stderr
 
 
+# --- FORGD_HOOK_SOURCE_RESTRICTED=1: /hook behind hook_source_ranges -----
+
+WAF_REFUSED_HOOK = {**HEALTHY_VERDICT, ("POST", "/hook"): (403, None, {})}
+
+
+def test_a_403_on_hook_fails_and_names_the_variable(stub):
+    r = run(stub(WAF_REFUSED_HOOK), stub(HEALTHY_COLLECTOR), stub(HEALTHY_DASHBOARD))
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert "FAIL [verdict.unsigned-post]" in out
+    assert "FORGD_HOOK_SOURCE_RESTRICTED=1" in out
+
+
+def test_restricted_hook_reports_a_403_as_not_asserted(stub):
+    """The WAF answered, so nothing was learned about the signature check."""
+    r = run(stub(WAF_REFUSED_HOOK), stub(HEALTHY_COLLECTOR), stub(HEALTHY_DASHBOARD),
+            FORGD_HOOK_SOURCE_RESTRICTED="1")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "NOT ASSERTED [verdict.unsigned-post]" in out
+    assert "PASS [verdict.unsigned-post]" not in out
+    assert "6 assertion(s) passed; not asserted: verdict.unsigned-post" in out
+
+
+@pytest.mark.parametrize("answer", [(200, {"action": "allow"}, {}),
+                                    (302, None, {"location": "https://login.microsoftonline.com/x"}),
+                                    (500, {"error": "boom"}, {})])
+def test_restricted_hook_still_fails_anything_but_401_or_403(stub, answer):
+    routes = {**HEALTHY_VERDICT, ("POST", "/hook"): answer}
+    r = run(stub(routes), FORGD_HOOK_SOURCE_RESTRICTED="1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "NOT ASSERTED" not in r.stdout + r.stderr
+
+
+def test_restricted_hook_passes_a_401_and_notes_the_allowlist_was_not_seen(stub):
+    r = run(stub(HEALTHY_VERDICT), stub(HEALTHY_COLLECTOR), stub(HEALTHY_DASHBOARD),
+            FORGD_HOOK_SOURCE_RESTRICTED="1")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "PASS [verdict.unsigned-post]" in out
+    assert "the allowlist is not enforced" in out
+    assert "7 assertion(s) passed" in out and "not asserted" not in out
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes", " 1"])
+def test_any_hook_restricted_value_but_1_is_a_usage_error(stub, value):
+    r = run(stub(HEALTHY_VERDICT), "", "", FORGD_HOOK_SOURCE_RESTRICTED=value)
+    assert r.returncode == 2
+    assert "FORGD_HOOK_SOURCE_RESTRICTED" in r.stderr
+
+
 # --- FORGD_DASHBOARD_IAP=1: the dashboard behind Identity-Aware Proxy -----
 
 GOOGLE = "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&redirect_uri=y"

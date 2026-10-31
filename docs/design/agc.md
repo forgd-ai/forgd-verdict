@@ -223,6 +223,11 @@ three endpoint policies:
   values to module variables because the WAF policy is an Azure resource;
   in `agc` mode the chart refuses `ingress.hook.sourceRanges` and
   `ingress.connector.sourceRanges` rather than drop them silently.
+- With `hook_source_ranges` set, `verify-deployment` run from outside them
+  gets the WAF's 403 on its unsigned `POST /hook`. Set
+  `FORGD_HOOK_SOURCE_RESTRICTED=1` and it reports that check as not
+  asserted; signature enforcement is then checked only from inside the
+  ranges.
 
 **Controller install.** The ALB Controller chart is pinned by OCI digest
 and installed the way oauth2-proxy is: a documented
