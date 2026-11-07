@@ -101,7 +101,7 @@ def test_a_padded_prompt_event_keeps_prompt_in_the_gitleaks_window(event):
 def test_the_hook_names_the_secret_in_a_padded_prompt(event):
     code, out = run(PADDED[event], _policy())
 
-    assert code == 0
+    assert code == 2
     body = json.loads(out)
     assert body["decision"] == "block"
     assert "GitLab" in body["reason"]

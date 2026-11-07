@@ -121,7 +121,7 @@ def test_the_hook_denies_an_oversize_prompt(case, tmp_path):
     code, out = run({"session_id": "s", "hook_event_name": "UserPromptSubmit",
                      "prompt": CASES[case]}, _policy(tmp_path))
 
-    assert code == 0
+    assert code == 2
     assert out, "the hook allowed"
     body = json.loads(out)
     assert body["decision"] == "block"

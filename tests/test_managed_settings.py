@@ -255,7 +255,7 @@ def test_the_fragment_command_is_not_hung_by_an_openssl_conf_fifo(tmp_path, name
     except subprocess.TimeoutExpired:
         pytest.fail(f"{name} {event}: the fragment's command hung on OPENSSL_CONF={fifo}")
     assert time.monotonic() - started < budget
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == (0 if event == "SessionEnd" else 2), done.stderr
     assert PROBE not in done.stdout + done.stderr
     if event != "SessionEnd":
         assert '"block"' in done.stdout or '"deny"' in done.stdout, done.stdout

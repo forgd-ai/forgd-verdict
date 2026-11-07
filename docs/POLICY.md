@@ -420,8 +420,9 @@ reach a verdict:
 
 With no policy file, meaning a `--policy` path that does not exist or no
 `--policy` at all, the hook scans on the built-in defaults. It
-warns on stderr and, because Claude Code does not show stderr on exit 0,
-in a top-level `systemMessage`: alone on a clean scan, merged into the
+warns on stderr and, because Claude Code does not show stderr on exit 0
+and reads it on exit 2 only when the JSON fails validation, in a top-level
+`systemMessage`: alone on a clean scan, merged into the
 block object on a deny. The message names the path, or says none was
 given, and says `hook.on_error` is `allow` on the defaults, so a scan that
 fails lets the prompt or tool call through.

@@ -16,7 +16,7 @@ import pytest
 from conftest import FAKE_AWS_KEY, FAKE_SSN, make_policy, managed_interpreter_argv
 
 from forgd_verdict.extract import hook_units
-from forgd_verdict.hook.cli import _block, _respond, run
+from forgd_verdict.hook.cli import _bare_block_out, _block, _respond, run
 from forgd_verdict.policy import Policy
 
 REPO = Path(__file__).resolve().parents[1]
@@ -98,22 +98,23 @@ def test_prompt_with_secret_denies_in_the_documented_shape(hook_policy):
     `hookSpecificOutput.permissionDecision` -- that is a PreToolUse concept
     and this event ignores it.
 
-    In the PreToolUse shape the hook returns valid JSON and exit 0, Claude
-    Code ignores it, and the prompt reaches the model with the key in it."""
+    In the PreToolUse shape the hook returns valid JSON, Claude Code ignores
+    it, and the prompt reaches the model with the key in it."""
     code, out = run(prompt_event(f"deploy using {FAKE_AWS_KEY}"), hook_policy)
-    assert code == 0
+    assert code == 2
     payload = json.loads(out)
     assert payload["decision"] == "block"
     assert "AWS access key" in payload["reason"]
     # The PreToolUse shape must NOT be what carries the block here.
-    assert "hookSpecificOutput" not in payload
+    assert "permissionDecision" not in payload["hookSpecificOutput"]
+    assert payload["hookSpecificOutput"]["suppressOriginalPrompt"] is True
     assert FAKE_AWS_KEY not in out
 
 
 @pytest.mark.parametrize("card", [4539148803436467, 4539148803436467.0], ids=["int", "float"])
 def test_a_card_number_held_as_a_json_number_denies(card, hook_policy):
     code, out = run(tool_event("mcp__db__insert", {"card": card}), hook_policy)
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "4539148803436467" not in out
 
@@ -282,9 +283,56 @@ def policy_file(tmp_path) -> Path:
 def test_cli_deny_stdout_starts_and_ends_as_json(policy_file):
     """The contract keys on stdout starting with { and ending with }."""
     result = _cli(prompt_event(f"key {FAKE_AWS_KEY}"), policy_file)
-    assert result.returncode == 0
+    assert result.returncode == 2
     assert result.stdout.startswith("{") and result.stdout.endswith("}")
     assert json.loads(result.stdout)["decision"] == "block"  # UserPromptSubmit shape
+
+
+def test_cli_deny_exits_2_with_the_reason_on_stderr(policy_file):
+    """Exit 2 blocks even when Claude Code cannot validate the JSON, and then
+    stderr is the reason the user sees."""
+    result = _cli(prompt_event(f"key {FAKE_AWS_KEY}"), policy_file)
+    assert result.returncode == 2
+    reason = json.loads(result.stdout)["reason"]
+    assert reason in result.stderr
+    assert FAKE_AWS_KEY not in result.stdout + result.stderr
+
+
+def test_cli_tool_deny_exits_2_with_the_reason_on_stderr(policy_file):
+    result = _cli({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                   "tool_input": {"command": f"echo {FAKE_AWS_KEY}"}}, policy_file)
+    assert result.returncode == 2
+    reason = json.loads(result.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason in result.stderr
+    assert FAKE_AWS_KEY not in result.stdout + result.stderr
+
+
+def test_a_blocked_prompt_is_not_echoed_in_the_block_message(policy_file):
+    result = _cli(prompt_event(f"key {FAKE_AWS_KEY}"), policy_file)
+    specific = json.loads(result.stdout)["hookSpecificOutput"]
+    assert specific == {"hookEventName": "UserPromptSubmit", "suppressOriginalPrompt": True}
+
+
+def test_only_user_prompt_submit_carries_suppress_original_prompt():
+    """The docs give the field on UserPromptSubmit only."""
+    for event in ("UserPromptExpansion", "PostToolUse", "PreToolUse"):
+        assert "suppressOriginalPrompt" not in json.dumps(_block(event, "because"))
+
+
+@pytest.mark.parametrize("raw", [
+    json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "x"}),
+    None, "", "{not json", json.dumps([1]), json.dumps({"prompt": "x"}),
+])
+def test_a_bare_block_suppresses_the_prompt_unless_the_event_is_another(raw):
+    """A scan error, the watchdog or unparseable stdin blocks with stderr
+    alone; the block message would still echo the prompt."""
+    out = json.loads(_bare_block_out(raw))
+    assert out["hookSpecificOutput"]["suppressOriginalPrompt"] is True
+
+
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse", "UserPromptExpansion"])
+def test_a_bare_block_on_another_event_writes_nothing(event):
+    assert _bare_block_out(json.dumps({"hook_event_name": event})) == ""
 
 
 def test_cli_allow_writes_nothing_to_stdout(policy_file):
@@ -375,7 +423,7 @@ def test_a_prompt_with_a_secret_is_denied_under_the_documented_field_name():
          "--spool", os.environ["FORGD_VERDICT_SPOOL"]],
         input=payload, capture_output=True, text=True, timeout=60,
     )
-    assert out.returncode == 0, out.stderr
+    assert out.returncode == 2, out.stderr
     payload = json.loads(out.stdout)
     assert payload["decision"] == "block"
     # And the privacy invariant holds in the one string a user sees.
@@ -392,7 +440,9 @@ def test_a_prompt_with_a_secret_is_denied_under_the_documented_field_name():
 
 def test_the_two_events_block_in_different_shapes(hook_policy):
     prompt = _block("UserPromptSubmit", "because")
-    assert prompt == {"decision": "block", "reason": "because"}
+    assert prompt == {"decision": "block", "reason": "because",
+                      "hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                             "suppressOriginalPrompt": True}}
 
     tool = _block("PreToolUse", "because")
     assert tool["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -404,7 +454,11 @@ def test_the_two_events_block_in_different_shapes(hook_policy):
 def test_prompt_and_post_tool_events_block_at_the_top_level_only(event):
     # PostToolUse continues to use top-level `decision` and `reason`;
     # `permissionDecision` belongs to PreToolUse.
-    assert _block(event, "because") == {"decision": "block", "reason": "because"}
+    expected = {"decision": "block", "reason": "because"}
+    if event == "UserPromptSubmit":
+        expected["hookSpecificOutput"] = {"hookEventName": event,
+                                          "suppressOriginalPrompt": True}
+    assert _block(event, "because") == expected
 
 
 def test_pre_tool_use_blocks_in_hook_specific_output_only():
@@ -425,7 +479,7 @@ def test_a_post_tool_use_deny_is_top_level(hook_policy):
                "tool_input": {"command": "cat creds"},
                "tool_response": {"stdout": f"key {FAKE_AWS_KEY}"}}
     code, out = run(payload, policy)
-    assert code == 0
+    assert code == 2
     body = json.loads(out)
     assert body["decision"] == "block"
     assert "hookSpecificOutput" not in body
@@ -465,7 +519,7 @@ def test_the_hook_warns_drops_an_unknown_event_and_scans_the_rest(tmp_path, capl
     policy = Policy(raw=_deep_merge(policy.raw, {
         "detectors": {"gitleaks": {"enabled": False, "severity": "block"}}}))
     code, out = run(tool_event("Bash", {"command": f"echo {FAKE_AWS_KEY}"}), policy)
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
@@ -616,7 +670,7 @@ def test_an_expansion_blocks_in_the_prompt_shape():
 
 def test_cli_expansion_deny_stdout_is_exactly_the_documented_shape(policy_file):
     result = _cli(expansion_event(f"/deploy {FAKE_AWS_KEY}", ""), policy_file)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 2, result.stderr
     out = json.loads(result.stdout)
     assert set(out) == {"decision", "reason"}, out
     assert out["decision"] == "block" and out["reason"]
@@ -712,7 +766,7 @@ def test_the_service_decides_when_it_is_reachable():
     svc = _Scanner()
     try:
         code, out = run(PROMPT, _remote_policy(svc.url))
-        assert code == 0
+        assert code == 2
         assert json.loads(out)["reason"] == "blocked by the scan service"
     finally:
         svc.close()
@@ -727,7 +781,7 @@ def test_a_failing_service_falls_back_to_a_local_scan(capsys):
         code, out = run(PROMPT, _remote_policy(svc.url))
     finally:
         svc.close()
-    assert code == 0
+    assert code == 2
     # Still denied, by the local detectors, with the local wording.
     assert json.loads(out)["decision"] == "block"
     # Reached and refused is reported apart from unreachable: the fix for
@@ -737,7 +791,7 @@ def test_a_failing_service_falls_back_to_a_local_scan(capsys):
 
 def test_an_unreachable_service_falls_back(capsys):
     code, out = run(PROMPT, _remote_policy("http://127.0.0.1:9/scan"))
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["decision"] == "block"
     assert "scanning locally" in capsys.readouterr().err
 
@@ -754,7 +808,7 @@ def test_a_service_slower_than_the_local_budget_still_decides():
         code, out = run(PROMPT, _remote_policy(svc.url))
     finally:
         svc.close()
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["reason"] == "blocked by the scan service"
 
 
@@ -764,7 +818,7 @@ def test_the_remote_timeout_is_its_own_setting(capsys):
         code, out = run(PROMPT, _remote_policy(svc.url, scan_timeout_ms=100))
     finally:
         svc.close()
-    assert code == 0
+    assert code == 2
     # Timed out, fell back, still denied by the local detectors.
     assert json.loads(out)["decision"] == "block"
     assert "scanning locally" in capsys.readouterr().err
@@ -798,7 +852,7 @@ def test_no_endpoint_configured_is_unchanged():
     pol = Policy(raw=_deep_merge(load_policy("policy.yaml").raw,
                                  {"hook": {"spool_enabled": False}}))
     code, out = run(PROMPT, pol)
-    assert code == 0 and json.loads(out)["decision"] == "block"
+    assert code == 2 and json.loads(out)["decision"] == "block"
 
 
 @pytest.mark.parametrize("action", ["error", "banana", "ALLOW", ""])
@@ -808,7 +862,7 @@ def test_an_unrecognised_remote_verdict_falls_back_to_the_local_scan(action, cap
     svc = _Scanner(mode=f"action:{action}")
     try:
         code, out = run(PROMPT, _remote_policy(svc.url))
-        assert code == 0
+        assert code == 2
         assert json.loads(out)["decision"] == "block"
         assert "scanning locally" in capsys.readouterr().err
     finally:
@@ -820,7 +874,7 @@ def test_a_redirect_from_the_scan_service_is_not_followed(capsys):
     svc = _Scanner(f"redirect:{target.url}")
     try:
         code, out = run(PROMPT, _remote_policy(svc.url))
-        assert code == 0
+        assert code == 2
         assert json.loads(out)["decision"] == "block"
         assert "answered 302" in capsys.readouterr().err
     finally:
@@ -835,7 +889,7 @@ def test_a_redirect_from_the_scan_service_is_not_followed(capsys):
 ])
 def test_a_scan_endpoint_that_is_not_https_is_not_used(endpoint, capsys):
     code, out = run(PROMPT, _remote_policy(endpoint))
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["decision"] == "block"
     assert "not an https:// URL" in capsys.readouterr().err
 
@@ -1052,7 +1106,7 @@ def test_a_malformed_device_salt_does_not_stop_the_scan(tmp_path, monkeypatch, c
         [sys.executable, "-I", "-m", "forgd_verdict.cli", "hook", "--policy", policy,
          "--spool", str(state / "spool")],
         input=json.dumps(PROMPT), capture_output=True, text=True, timeout=30)
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 2, done.stderr
     assert json.loads(done.stdout)["decision"] == "block"
     assert (state / "device-salt").read_bytes() == content
 
@@ -1106,7 +1160,7 @@ def test_a_fifo_in_place_of_the_device_salt_does_not_block_the_hook(tmp_path):
         [sys.executable, "-I", "-m", "forgd_verdict.cli", "hook", "--policy", policy,
          "--spool", str(state / "spool")],
         input=json.dumps(PROMPT), capture_output=True, text=True, timeout=20)
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 2, done.stderr
     assert json.loads(done.stdout)["decision"] == "block"
 
 
@@ -1158,7 +1212,7 @@ def test_an_expanded_slash_command_is_scanned_under_the_built_in_default(hook_po
     """The managed-settings fragment registers `UserPromptExpansion`, and a
     policy that sets no `hook.enabled_events` gets the built-in list."""
     code, out = run(expansion_event("/deploy", f"prod {FAKE_AWS_KEY}"), hook_policy)
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["decision"] == "block"
     assert FAKE_AWS_KEY not in out
 

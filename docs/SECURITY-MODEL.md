@@ -39,6 +39,11 @@ fails, times out or cannot start; the shipped managed-settings fragments
 do not set it. On Windows the watchdog cannot interrupt C code that holds
 the GIL; see [the hook's threat model](#the-claude-code-hooks-threat-model).
 
+**A blocked prompt stays in Claude Code's local files.** The block keeps
+the prompt from the model, and `suppressOriginalPrompt` keeps it out of the
+block message. Claude Code can still write the submitted text to the
+session transcript and the prompt history on the laptop.
+
 **The hook does not see what a slash command or MCP prompt expands to.**
 `UserPromptExpansion` carries `expansion_type`, `command_name`,
 `command_args`, `command_source` and the original `prompt`, and no

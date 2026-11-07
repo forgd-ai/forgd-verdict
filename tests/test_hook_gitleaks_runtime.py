@@ -71,7 +71,7 @@ def test_under_on_error_allow_the_session_is_told_t1_did_not_run(
 def test_under_on_error_block_it_is_blocked_as_unchecked(tmp_path, capsys, spooled, kind):
     code, out = cli.run(PROMPT, _policy(tmp_path, kind, "block"))
     err = capsys.readouterr().err
-    assert code == 0
+    assert code == 2
     body = json.loads(out)
     assert body["decision"] == "block"
     assert "could not be checked" in body["reason"]

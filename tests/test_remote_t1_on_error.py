@@ -74,7 +74,7 @@ REPLY = {"action": "allow", "detectors": [], "tiers_dropped": ["gitleaks"]}
 def test_a_remote_t1_that_did_not_run_blocks_under_on_error_block(monkeypatch, capsys):
     code, out = _run_with_reply(monkeypatch, REPLY, "block")
     err = capsys.readouterr().err
-    assert code == 0
+    assert code == 2
     body = json.loads(out)
     assert body["decision"] == "block"
     assert "could not be checked" in body["reason"]

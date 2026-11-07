@@ -193,7 +193,7 @@ def test_hook_spools_its_decision(tmp_path):
     policy = hook_policy(tmp_path)
     code, out = run({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
                      "user_input": f"key {FAKE_AWS_KEY}"}, policy)
-    assert code == 0 and json.loads(out)["decision"] == "block"
+    assert code == 2 and json.loads(out)["decision"] == "block"
     records = list(Spool.read(Spool(tmp_path / "spool").claim()[0]))
     assert len(records) == 1
     r = records[0]
@@ -249,7 +249,7 @@ def test_a_broken_spool_never_blocks_a_decision(tmp_path):
     policy = hook_policy(tmp_path, spool=str(blocked / "spool"))
     code, out = run({"hook_event_name": "UserPromptSubmit", "session_id": "s1",
                      "user_input": f"key {FAKE_AWS_KEY}"}, policy)
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["decision"] == "block"
 
 
