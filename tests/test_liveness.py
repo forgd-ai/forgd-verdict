@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 from conftest import ASGIClient
 
+from forgd_verdict.detectors import gitleaks
 from forgd_verdict.detectors.gitleaks import BASELINE_CONFIG, HEALTHZ_TIMEOUT_S, LIVEZ_TIMEOUT_S
 from forgd_verdict.intake.app import Intake
 from forgd_verdict.otel.app import Collector
@@ -187,15 +188,21 @@ async def test_a_hung_daemon_does_not_hold_the_event_loop(
         # Built with no daemon, then pointed at the hung one: building with
         # it configured would fail the startup reachability check.
         app.gitleaks_sockets = [str(sock)]
-        started = time.monotonic()
+        # A probe that cannot time out before the other route answers, so a
+        # slow runner cannot finish it first. Killing the daemon in `finally`
+        # releases the ping thread it holds.
+        monkeypatch.setattr(gitleaks, "LIVEZ_TIMEOUT_S", 60.0)
         probe = asyncio.create_task(_get(app, "/livez"))
         await asyncio.sleep(0.1)
 
         status, _ = await ASGIClient(app).get(OTHER_ROUTE[role])
         assert status in (401, 404)
         assert not probe.done()
+        probe.cancel()
+        monkeypatch.setattr(gitleaks, "LIVEZ_TIMEOUT_S", LIVEZ_TIMEOUT_S)
 
-        assert await probe == (503, {"status": "down", "gitleaksd": "down"})
+        started = time.monotonic()
+        assert await _get(app, "/livez") == (503, {"status": "down", "gitleaksd": "down"})
         assert time.monotonic() - started < LIVEZ_TIMEOUT_S * 3
 
         monkeypatch.setattr(module, "daemon_state", daemon_state)
