@@ -338,9 +338,13 @@ jobs:
           # real field rather than the legacy alias.
           # The contact line is set only by the CI policy, so a block on
           # the built-in defaults does not pass.
+          # A block exits 2.
+          rc=0
           out=$(echo '{"hook_event_name":"UserPromptSubmit","prompt":"key AKIAIOSFODNN7EXAMPLE"}' \
-            | forgd-verdict hook --policy tests/data/ci-hook-policy.yaml)
+            | forgd-verdict hook --policy tests/data/ci-hook-policy.yaml) || rc=$?
+          test "$rc" -eq 2
           echo "$out" | grep -q '"decision": "block"'
+          echo "$out" | grep -q '"suppressOriginalPrompt": true'
           echo "$out" | grep -q 'Contact the forgd-verdict CI policy owner.'
           forgd-verdict policy > /dev/null
 
@@ -391,8 +395,10 @@ jobs:
           # The core must have come from the sibling wheel, not an index.
           uv pip freeze --python /tmp/hookvenv/bin/python \
             | grep -q '^forgd-verdict @ file://'
+          rc=0
           out=$(echo '{"hook_event_name":"UserPromptSubmit","prompt":"key AKIAIOSFODNN7EXAMPLE"}' \
-            | /tmp/hookvenv/bin/forgd-verdict-hook --policy policy.yaml)
+            | /tmp/hookvenv/bin/forgd-verdict-hook --policy policy.yaml) || rc=$?
+          test "$rc" -eq 2
           echo "$out" | grep -q '"decision": "block"'
 
   pip-audit:
