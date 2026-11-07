@@ -64,7 +64,7 @@ def test_the_decision_is_flushed_before_the_spool_or_guard_starts(hook, monkeypa
 
     monkeypatch.setattr(hook_cli, "_spool", spool)
     monkeypatch.setattr(hook_cli, "MetadataGuard", guard)
-    assert call() == 0
+    assert call() == 2
     decision = json.loads(out.getvalue())
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert [name for name, _ in seen] == ["spool", "guard"]

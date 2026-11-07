@@ -82,7 +82,7 @@ def keyed_input(keys: int, segments: int, filler: str) -> dict:
 
 
 def hook_denies(code: int, out: str) -> bool:
-    return (code == 0 and bool(out)
+    return (code == 2 and bool(out)
             and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny")
 
 

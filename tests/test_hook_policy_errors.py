@@ -11,6 +11,11 @@ from conftest import FAKE_AWS_KEY, UNPARSEABLE_DEPTH, max_json_depth, nested_jso
 from forgd_verdict.hook import cli as hook_cli
 from forgd_verdict.hook.cli import EXIT_ERROR
 
+# What an exit-2 block with no reason payload writes to stdout on a
+# UserPromptSubmit or an event it cannot read.
+SUPPRESS = json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                              "suppressOriginalPrompt": True}})
+
 FAKE_SECRET = "sk-ant-api03-" + "Zq7Rk2Vm9Xw4Lp8Ny3Bt6Hc1Jd5Fg0Ss"  # gitleaks:allow
 
 
@@ -51,7 +56,7 @@ def test_found_but_broken_with_on_error_block_blocks(tmp_path, monkeypatch, caps
     path = _broken(tmp_path, "block")
     assert _main(monkeypatch, ["--policy", str(path)], _prompt("hello")) == 2
     captured = capsys.readouterr()
-    assert captured.out == ""
+    assert captured.out == SUPPRESS
     assert f"could not load policy {path}" in captured.err
 
 
@@ -126,7 +131,7 @@ def test_no_policy_on_a_clean_prompt_emits_only_a_system_message(no_policy, monk
 def test_no_policy_on_a_blocking_prompt_blocks_and_warns(no_policy, monkeypatch, capsys):
     argv, named = no_policy
     monkeypatch.setenv("FORGD_VERDICT_MODE", "enforce")
-    assert _main(monkeypatch, argv, _prompt(f"key {FAKE_AWS_KEY}")) == 0
+    assert _main(monkeypatch, argv, _prompt(f"key {FAKE_AWS_KEY}")) == 2
     body = _contract(capsys.readouterr().out)
     assert body["decision"] == "block"
     assert named in body["systemMessage"]
@@ -193,7 +198,7 @@ def test_a_malformed_payload_runs_under_on_error(shape, on_error, code, tmp_path
     path = _policy_file(tmp_path, on_error)
     assert hook_cli.main(["--policy", str(path)]) == code
     captured = capsys.readouterr()
-    assert captured.out == ""
+    assert captured.out == (SUPPRESS if code == 2 else "")
     assert "could not parse hook payload" in captured.err
     assert FAKE_SECRET not in captured.err
 
@@ -215,7 +220,7 @@ def test_a_malformed_payload_carrying_a_secret_blocks(shape, on_error, tmp_path,
     path = _policy_file(tmp_path, on_error)
     assert hook_cli.main(["--policy", str(path)]) == 2
     captured = capsys.readouterr()
-    assert captured.out == ""
+    assert captured.out == SUPPRESS
     assert "could not parse hook payload" in captured.err
     for value in (FAKE_SECRET, FAKE_AWS_KEY):
         assert value not in captured.err
@@ -234,7 +239,7 @@ def test_a_payload_holding_an_integer_over_the_digit_limit_is_scanned(on_error, 
     code = hook_cli.main(["--policy", str(path)])
     captured = capsys.readouterr()
     assert "could not parse" not in captured.err
-    assert code == 0
+    assert code == 2
     payload = json.loads(captured.out)
     assert payload["decision"] == "block"
     assert "AWS access key" in payload["reason"]
@@ -313,7 +318,7 @@ def _enforcing_file(tmp_path, project_overrides=False):
 
 
 def _assert_blocked(code, captured):
-    assert code == 0, captured.err
+    assert code == 2, captured.err
     body = _contract(captured.out)
     assert body["decision"] == "block"
     assert FAKE_AWS_KEY not in captured.out + captured.err

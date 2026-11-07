@@ -434,10 +434,9 @@ def hook_units(payload: dict[str, Any]) -> Units:
         return out.units()
 
     # What a tool returned, before the model sees it. The input was scanned
-    # at PreToolUse, so only the response is read here. An Agent SDK
-    # callback can act on a deny by replacing the output (`updatedToolOutput`);
-    # the command hook cannot un-run the tool, and whether it can replace
-    # the output is not documented.
+    # at PreToolUse, so only the response is read here. A block adds the
+    # reason next to the result and Claude still sees the output; only
+    # `updatedToolOutput` replaces it, and the hook does not send it.
     if event == "PostToolUse":
         tool_name = payload.get("tool_name")
         if not isinstance(tool_name, str):

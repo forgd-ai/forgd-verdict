@@ -4,7 +4,7 @@ The facts about Anthropic's protocols and the gitleaks CLI that forgd-verdict
 depends on. Inference hooks and the Claude Code hook contract are both
 subject to change, so re-check them against the sources below.
 
-**Last verified 2026-10-16**, against the pages below as published that day
+**Last verified 2026-11-06**, against the pages below as published that day
 and gitleaks 8.30.1. Each page is also served as Markdown with `.md`
 appended to its URL, which is the form to compare against: a summarised
 fetch has misreported field names.
@@ -74,20 +74,23 @@ Prompt and tool call frames share one circuit breaker.
 
 ## Claude Code hook output
 
-Adapter 2 answers with exit 0 and a JSON object on stdout. Claude Code
-parses stdout as JSON only if it starts with `{` and ends with `}`, so the
-hook writes no trailing newline. Exit 2 also blocks, but carries no
-structured reason.
+Adapter 2 blocks with exit 2, a JSON object on stdout and the reason on
+stderr. Claude Code parses stdout as JSON only if it starts with `{` and
+ends with `}`, so the hook writes no trailing newline. Exit 0 with JSON
+that fails Claude Code's schema validation is a non-blocking error and the
+prompt or call proceeds; exit 2 blocks whether the JSON validates or not,
+using the JSON's reason when it does and stderr when it does not.
 
-The block shape differs per event, and the wrong shape is a silent allow,
-not an error:
+The block shape differs per event. Under exit 0 the wrong shape would be
+a silent allow; under exit 2 it still blocks, without the structured
+reason:
 
 | Event | Block output |
 |---|---|
 | `PreToolUse` | `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "..."}}` |
-| `UserPromptSubmit` | `{"decision": "block", "reason": "..."}` at the top level. `permissionDecision` is ignored on this event. |
+| `UserPromptSubmit` | `{"decision": "block", "reason": "...", "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "suppressOriginalPrompt": true}}`. `permissionDecision` is ignored on this event. |
 | `UserPromptExpansion` | `{"decision": "block", "reason": "..."}` at the top level, as `UserPromptSubmit` |
-| `PostToolUse` | `{"decision": "block", "reason": "..."}` at the top level, as `UserPromptSubmit` |
+| `PostToolUse` | `{"decision": "block", "reason": "..."}` at the top level, as `UserPromptExpansion`. The reason is added next to the tool result and Claude still sees the output. |
 
 `hook.enabled_events` takes only these four events, plus `SessionEnd`,
 which the hook handles without the list. The services and
@@ -98,6 +101,11 @@ hook logs a warning naming it, drops it and scans the rest.
 It carries `expansion_type` (`slash_command` or `mcp_prompt`),
 `command_name`, `command_args`, `command_source` and the original
 `prompt`, and no expanded content.
+
+`suppressOriginalPrompt` keeps the submitted text out of the block
+message. Without it the message ends with `Original prompt:` and the text,
+and Claude Code writes the message to the session transcript. The text
+can still be in the transcript and the prompt history.
 
 `systemMessage` is a top-level field on every event. Nested inside
 `hookSpecificOutput` it is ignored.

@@ -570,7 +570,8 @@ spool="$(mktemp -d)/spool"
 #    --spool.
 echo '{"hook_event_name":"UserPromptSubmit","prompt":"key AKIAQYLPMN5HGZTHX4UQ"}' \
   | /usr/bin/env -i /opt/forgd/venv/bin/python -I -X forgd_verdict_hook -m forgd_verdict.cli hook --policy /etc/forgd/policy.yaml --spool "$spool"
-# expect: {"decision":"block","reason":"..."}
+# expect: exit 2, {"decision":"block","reason":"...","hookSpecificOutput":{...}}
+# on stdout and the reason again on stderr.
 #
 # UserPromptSubmit blocks on a top-level `decision`. PreToolUse is the event
 # that uses hookSpecificOutput.permissionDecision:
@@ -582,7 +583,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 #    from two parts so this file holds no literal one.
 printf '{"hook_event_name":"UserPromptSubmit","prompt":"token %s%s"}' 'glpat-' 'V9v0M48onQvilZzFz0tS' \
   | /usr/bin/env -i /opt/forgd/venv/bin/python -I -X forgd_verdict_hook -m forgd_verdict.cli hook --policy /etc/forgd/policy.yaml --spool "$spool"
-# expect: {"decision":"block","reason":"... a GitLab credential ..."}
+# expect: exit 2, {"decision":"block","reason":"... a GitLab credential ...",...}
 # A systemMessage that gitleaks (T1) did not run, or no output, means T1 is
 # off on this machine: see step 4 of "What has to land on the machine".
 ```
@@ -600,13 +601,13 @@ $spool = Join-Path $spoolDir.FullName 'spool'
 
 # 2. The hook itself, run as the managed settings run it, plus --spool.
 '{"hook_event_name":"UserPromptSubmit","prompt":"key AKIAQYLPMN5HGZTHX4UQ"}' | & 'C:\Program Files\forgd\venv\Scripts\python.exe' -I -X forgd_verdict_hook -m forgd_verdict.cli hook --policy C:\ProgramData\forgd\policy.yaml --spool $spool
-# expect: {"decision":"block","reason":"..."}
+# expect: exit 2, {"decision":"block","reason":"...","hookSpecificOutput":{...}}
 '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo AKIAQYLPMN5HGZTHX4UQ"}}' | & 'C:\Program Files\forgd\venv\Scripts\python.exe' -I -X forgd_verdict_hook -m forgd_verdict.cli hook --policy C:\ProgramData\forgd\policy.yaml --spool $spool
 # expect: {"hookSpecificOutput":{...,"permissionDecision":"deny",...}}
 
 # 3. T1, with the GitLab token assembled from two parts as above.
 ('{"hook_event_name":"UserPromptSubmit","prompt":"token ' + 'glpat-' + 'V9v0M48onQvilZzFz0tS' + '"}') | & 'C:\Program Files\forgd\venv\Scripts\python.exe' -I -X forgd_verdict_hook -m forgd_verdict.cli hook --policy C:\ProgramData\forgd\policy.yaml --spool $spool
-# expect: {"decision":"block","reason":"... a GitLab credential ..."}
+# expect: exit 2, {"decision":"block","reason":"... a GitLab credential ...",...}
 # A systemMessage that gitleaks (T1) did not run, or no output, means T1 is
 # off on this machine: see step 4 of "What has to land on the machine".
 

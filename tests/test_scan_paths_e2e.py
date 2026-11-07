@@ -82,7 +82,7 @@ def test_the_hook_denies_many_matched_keys_quickly(monkeypatch):
     start = time.perf_counter()
     code, out = run(event, policy)
     elapsed = time.perf_counter() - start
-    assert code == 0
+    assert code == 2
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "AKIA" not in out
     rewrites.assert_bounded(locators=3 * core.MAX_SCAN_FINDINGS)

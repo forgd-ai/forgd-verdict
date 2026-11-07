@@ -85,9 +85,11 @@ Claude Code applies them to `@` file mentions on a best-effort basis; see
 [deploy/MDM.md](../deploy/MDM.md#keeping-sensitive-files-out-of-claudes-reads).
 
 Reads the hook payload on stdin, runs the same core, and answers in the
-current hook output contract. Events block in different shapes, and the
-wrong one is not an error: it is valid JSON and exit 0, so the prompt or
-call proceeds:
+current hook output contract. A block exits 2 with the JSON below on
+stdout and the reason on stderr, so it holds even where Claude Code cannot
+validate the JSON. Events block in different shapes. Under exit 0 the
+wrong one would be a silent allow; under exit 2 it still blocks, with the
+reason taken from stderr:
 
 ```json
 // PreToolUse
@@ -98,6 +100,11 @@ call proceeds:
 // UserPromptSubmit, UserPromptExpansion and PostToolUse -- top-level.
 // `permissionDecision` is a PreToolUse concept and these events ignore it.
 {"decision": "block", "reason": "..."}
+
+// UserPromptSubmit also leaves the submitted text out of the block message.
+{"decision": "block", "reason": "...",
+ "hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                        "suppressOriginalPrompt": true}}
 ```
 
 `systemMessage`, used for warnings, is a universal top-level field, not

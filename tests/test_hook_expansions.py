@@ -50,7 +50,7 @@ def test_the_default_allows_every_expansion():
 def test_deny_by_command_source():
     policy = policy_with({"deny": [{"command_source": "plugin"}]})
     code, out = run(expansion(command_source="plugin"), policy)
-    assert code == 0
+    assert code == 2
     assert _reason(out) == ("forgd-verdict: /deploy is not permitted by policy "
                             "(expansion control)")
     assert run(expansion(command_source="project"), policy) == (0, "")
@@ -83,7 +83,7 @@ def test_default_deny_passes_an_allowlisted_command_and_still_scans_it():
     assert run(expansion("deploy", "to staging"), policy) == (0, "")
 
     code, out = run(expansion("deploy", f"prod {FAKE_AWS_KEY}"), policy)
-    assert code == 0
+    assert code == 2
     reason = _reason(out)
     assert "expansion control" not in reason
     assert FAKE_AWS_KEY not in out
@@ -104,7 +104,7 @@ def test_a_blocked_expansion_carries_no_content(tmp_path):
     )
     payload = expansion("deploy", f"args {MARKER}", prompt=f"/deploy {MARKER}")
     code, out = run(payload, policy)
-    assert code == 0
+    assert code == 2
     assert "expansion control" in _reason(out)
     assert MARKER not in out
 

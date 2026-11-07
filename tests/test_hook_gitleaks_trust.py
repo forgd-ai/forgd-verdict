@@ -75,7 +75,7 @@ def test_a_project_gitleaks_on_path_does_not_replace_the_configured_one(
     policy = _policy(tmp_path, gitleaks={"binary": REAL_GITLEAKS})
     _fake_gitleaks_on_path(tmp_path, monkeypatch)
     code, out, err = _hook(policy, monkeypatch, capsys)
-    assert code == 0, err
+    assert code == 2, err
     assert json.loads(out)["decision"] == "block"
 
 
@@ -143,7 +143,7 @@ def test_project_overrides_keep_the_path_lookup(tmp_path, monkeypatch, capsys, b
     gitleaks = {"binary": binary} if binary else {}
     policy = _policy(tmp_path, gitleaks=gitleaks, hook={"project_overrides": True})
     code, out, err = _hook(policy, monkeypatch, capsys)
-    assert code == 0, err
+    assert code == 2, err
     assert json.loads(out)["decision"] == "block"
     assert "trusted" not in err
 

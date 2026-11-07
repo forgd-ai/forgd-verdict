@@ -104,7 +104,7 @@ def test_a_hung_scan_under_on_error_block_blocks_before_the_deadline(tmp_path):
     done, took = _run(tmp_path, HANG_T0, "block")
     assert took < DEADLINE_MS / 1000 + SLACK_S
     assert done.returncode == 2, done.stderr
-    assert done.stdout == ""
+    assert json.loads(done.stdout)["hookSpecificOutput"]["suppressOriginalPrompt"] is True
     assert "did not finish" in done.stderr
     assert PROBE not in done.stdout + done.stderr
 
@@ -124,7 +124,7 @@ def test_a_scan_holding_the_gil_under_on_error_block_blocks_before_the_deadline(
     done, took = _run(tmp_path, HANG_GIL, "block")
     assert took < GIL_BUDGET_S
     assert done.returncode == 2, done.stderr
-    assert done.stdout == ""
+    assert json.loads(done.stdout)["hookSpecificOutput"]["suppressOriginalPrompt"] is True
     assert "did not finish" in done.stderr
     assert PROBE not in done.stdout + done.stderr
 
@@ -144,7 +144,7 @@ def test_a_scan_holding_the_gil_under_on_error_allow_says_so_in_the_session(tmp_
 def test_an_expiry_while_the_decision_is_written_leaves_the_decision(tmp_path):
     done, took = _run(tmp_path, ALARM_IN_DELIVER, "block")
     assert took < GIL_BUDGET_S
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 2, done.stderr
     assert json.loads(done.stdout)["decision"] == "block"
     assert "did not finish" not in done.stdout + done.stderr
 
@@ -164,7 +164,7 @@ def test_a_hung_policy_load_counts_against_the_deadline(tmp_path):
 
 def test_a_scan_that_finishes_in_time_is_unchanged(tmp_path):
     done, _took = _run(tmp_path, "", "block")
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 2, done.stderr
     body = json.loads(done.stdout)
     assert body["decision"] == "block"
     assert "did not finish" not in done.stdout + done.stderr

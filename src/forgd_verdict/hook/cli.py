@@ -4,16 +4,17 @@
 as the verdict server, and answers in Claude Code's current hook output
 contract.
 
-Output contract verified against code.claude.com/docs/en/hooks on 2026-09-17
+Output contract verified against code.claude.com/docs/en/hooks on 2026-11-06
 (note the page moved: docs.claude.com/en/docs/claude-code/hooks now 301s to
 code.claude.com/docs/en/hooks):
 
   * On exit 0, stdout that starts with `{` and ends with `}` is parsed as the
     hook's JSON output. Everything else on stdout goes to the debug log --
     except on UserPromptSubmit, where it is injected as context.
-  * A block is expressed DIFFERENTLY PER EVENT, and getting this wrong fails
-    open silently -- the hook runs, reports success, and the prompt or call
-    proceeds:
+  * A block is expressed DIFFERENTLY PER EVENT. Under exit 0 the wrong shape
+    fails open silently -- the hook runs, reports success, and the prompt or
+    call proceeds. Under exit 2 it still blocks, and the reason comes from
+    stderr:
       - PreToolUse:       `{"hookSpecificOutput": {"hookEventName": ...,
                             "permissionDecision": "deny",
                             "permissionDecisionReason": ...}}`
@@ -31,8 +32,16 @@ code.claude.com/docs/en/hooks):
   * `systemMessage` is a UNIVERSAL TOP-LEVEL field, not part of
     `hookSpecificOutput`. Nesting it there is the same class of silent
     failure: valid JSON, no warning, no message shown.
-  * Exit 2 also blocks, taking the message from stderr. We use the JSON form:
-    it carries a structured reason.
+  * Exit 0 with JSON that fails Claude Code's schema validation is a
+    non-blocking error, and the prompt or call proceeds. Exit 2 blocks
+    whether the JSON validates or not: a valid object's reason is used, and
+    otherwise stderr is. So a block exits 2 with the JSON on stdout and the
+    reason on stderr, and a field a Claude Code version does not know cannot
+    turn the block into an allow.
+  * A blocked UserPromptSubmit carries `hookSpecificOutput.
+    suppressOriginalPrompt: true`. Without it the block message ends with
+    `Original prompt:` and the submitted text, and Claude Code writes that
+    message to the session transcript.
 
 On allow we print NOTHING and exit 0. Emitting `permissionDecision: "allow"`
 would be wrong: for PreToolUse that auto-approves the call and bypasses the
@@ -102,6 +111,7 @@ from .trust import spool_root, user_name
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_BLOCK = 2
 
 # Without `--policy` the hook reads neither `$FORGD_VERDICT_POLICY` nor
 # `./policy.yaml`: both come from the project the hook runs in.
@@ -123,13 +133,18 @@ MAX_REMOTE_TIMEOUT_MS = 5000
 def _block(event: str | None, reason: str) -> dict[str, Any]:
     """The block payload for `event`, in its HOOK_BLOCK_SHAPES shape.
 
-    The wrong shape is not an error -- it is a silent allow. ValueError
+    Under exit 0 the wrong shape would be a silent allow; under exit 2 it
+    blocks without the structured reason. ValueError
     for an event with no documented shape; `load_policy` drops or refuses
     such an event in `hook.enabled_events`, so none reaches here.
     """
     shape = HOOK_BLOCK_SHAPES.get(event) if isinstance(event, str) else None
     if shape == "top":
-        return {"decision": "block", "reason": reason}
+        out: dict[str, Any] = {"decision": "block", "reason": reason}
+        if event == "UserPromptSubmit":
+            out["hookSpecificOutput"] = {"hookEventName": event,
+                                         "suppressOriginalPrompt": True}
+        return out
     if shape == "tool":
         return {
             "hookSpecificOutput": {
@@ -139,6 +154,48 @@ def _block(event: str | None, reason: str) -> dict[str, Any]:
             }
         }
     raise ValueError(f"no documented block shape for hook event {event!r}")
+
+
+def _blocked(event: str | None, reason: str) -> tuple[int, str]:
+    """(exit code, stdout) for a block. `main` writes `reason` to stderr too."""
+    return EXIT_BLOCK, json.dumps(_block(event, reason))
+
+
+def _block_reason(out: str) -> str:
+    """The reason in a `_block` payload on stdout, or "" if there is none."""
+    try:
+        payload = json.loads(out)
+    except (ValueError, RecursionError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    reason = payload.get("reason")
+    if reason is None:
+        specific = payload.get("hookSpecificOutput")
+        if isinstance(specific, dict):
+            reason = specific.get("permissionDecisionReason")
+    return reason if isinstance(reason, str) else ""
+
+
+def _bare_block_out(raw: str | None) -> str:
+    """Stdout for an exit-2 block that has no `_block` payload: a scan or
+    policy error, the watchdog, or stdin that does not parse.
+
+    `suppressOriginalPrompt` on a UserPromptSubmit, or when the event is
+    unknown; under exit 2 an object that does not fit the event still blocks.
+    """
+    event = None
+    if raw is not None:
+        try:
+            payload = json.loads(raw)
+        except (ValueError, RecursionError):
+            payload = None
+        if isinstance(payload, dict):
+            event = payload.get("hook_event_name")
+    if event is not None and event != "UserPromptSubmit":
+        return ""
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                              "suppressOriginalPrompt": True}})
 
 
 # What a warning on each event calls the thing it matched.
@@ -237,7 +294,7 @@ def evaluate(payload: dict[str, Any], policy: Policy) -> tuple[int, str, SpoolJo
                     dropped)
 
     if verdict.action == ACTION_DENY:
-        return EXIT_OK, json.dumps(_block(event, verdict.deny_reason)), spool
+        return (*_blocked(event, verdict.deny_reason), spool)
 
     warnings = [f for f in result.findings if f.severity == SEVERITY_WARN]
     if warnings:
@@ -304,7 +361,7 @@ def _refused_expansion(policy: Policy, payload: dict[str, Any],
         _spool(policy, payload, "UserPromptExpansion", verdict, ScanResult(),
                hook_salt(policy))
 
-    return EXIT_OK, json.dumps(_block("UserPromptExpansion", reason)), spool
+    return (*_blocked("UserPromptExpansion", reason), spool)
 
 
 def _remote_timeout_ms(policy: Policy) -> int:
@@ -500,12 +557,12 @@ def _respond(event: str | None, remote: dict[str, Any],
     """
     if remote.get("action") == ACTION_DENY:
         reason = remote.get("deny_reason") or "blocked by forgd-verdict"
-        return EXIT_OK, json.dumps(_block(event, reason))
+        return _blocked(event, reason)
     no_t1 = ("the scan service reported it did not run"
              if t1_dropped(remote.get("tiers_dropped") or []) else None)
     verdict, no_t1_message = _on_t1_not_run(policy, Verdict(action=ACTION_ALLOW), no_t1)
     if verdict.action == ACTION_DENY:
-        return EXIT_OK, json.dumps(_block(event, verdict.deny_reason))
+        return _blocked(event, verdict.deny_reason)
     out = ""
     detectors = [d for d in (remote.get("detectors") or []) if d]
     if detectors:
@@ -716,6 +773,9 @@ class _Watchdog:
         self._timer: threading.Timer | None = None
         self._decided: int | None = None
         self._fired = False
+        # Stdout for an exit 2 that writes none of its own; `_main` sets it
+        # from stdin once read.
+        self.block_out = _bare_block_out(None)
         self.on_error = str(DEFAULT_POLICY["hook"]["on_error"])
         self.deadline_ms = int(DEFAULT_POLICY["hook"]["watchdog_ms"])
         self._alarm = (hasattr(signal, "setitimer")
@@ -743,6 +803,8 @@ class _Watchdog:
     def deliver(self, code: int, out: str = "", err: str = "") -> int:
         """Write the decision and return `code`. Blocks for good if expiry
         got the lock first, since that ends the process."""
+        if code == EXIT_BLOCK and not out:
+            out = self.block_out
         with self._lock:
             if err:
                 sys.stderr.write(err + "\n")
@@ -789,6 +851,8 @@ class _Watchdog:
             if self.on_error == "block":
                 # Exit 2 blocks every blocking event and takes the message from stderr.
                 _emit(sys.stderr, 2, message + "this is blocked.\n")
+                if self.block_out:
+                    _emit(sys.stdout, 1, self.block_out)
                 code = 2
             else:
                 message += "this went through unscanned."
@@ -884,6 +948,7 @@ def _main(argv: list[str] | None, watchdog: _Watchdog) -> int:
         raw = buffer.read().decode("utf-8") if buffer is not None else sys.stdin.read()
     except UnicodeDecodeError:
         raw = None
+    watchdog.block_out = _bare_block_out(raw)
     path = policy_path(args.policy) if args.policy is not None else Path(NO_POLICY_PATH)
     if args.policy is not None:
         watchdog.on_error = _on_error_of(path)
@@ -936,7 +1001,9 @@ def _main(argv: list[str] | None, watchdog: _Watchdog) -> int:
     if no_policy is not None:
         out = _with_system_message(out, _no_policy_message(no_policy, policy))
 
-    watchdog.deliver(code, out=out)
+    # Claude Code takes an exit-2 block's message from stderr when it cannot
+    # validate the JSON on stdout.
+    watchdog.deliver(code, out=out, err=_block_reason(out) if code == EXIT_BLOCK else "")
 
     # The spool runs only once the decision is on stdout, and nothing it
     # raises reaches the exit code.

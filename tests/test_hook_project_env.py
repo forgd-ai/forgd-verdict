@@ -49,7 +49,7 @@ def test_the_hook_does_not_read_a_policy_named_by_the_environment(
     hostile = _write(tmp_path / "project" / "lax.yaml", _allows_everything(tmp_path))
     monkeypatch.setenv("FORGD_VERDICT_POLICY", hostile)
     code, out, err = _hook(monkeypatch, capsys, [], AWS_PROMPT)
-    assert code == 0, err
+    assert code == 2, err
     body = json.loads(out)
     assert body["decision"] == "block"
     assert "built-in defaults" in body["systemMessage"]
@@ -62,7 +62,7 @@ def test_the_hook_does_not_read_policy_yaml_from_the_project_directory(
     monkeypatch.chdir(project)
     monkeypatch.delenv("FORGD_VERDICT_POLICY", raising=False)
     code, out, err = _hook(monkeypatch, capsys, [], AWS_PROMPT)
-    assert code == 0, err
+    assert code == 2, err
     body = json.loads(out)
     assert body["decision"] == "block"
     assert "built-in defaults" in body["systemMessage"]
@@ -261,7 +261,7 @@ def test_the_project_locale_does_not_change_how_the_payload_is_read(tmp_path, ke
          "--spool", str(tmp_path / "spool")],
         input=payload, capture_output=True, timeout=60,
         env={**os.environ, "LC_ALL": LATIN1, "LANG": LATIN1, "LC_CTYPE": LATIN1})
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 2, done.stderr
     assert json.loads(done.stdout)["decision"] == "block"
 
 
@@ -286,7 +286,7 @@ def test_stdin_is_decoded_as_utf8_whatever_its_text_encoding(tmp_path, monkeypat
                           "prompt": "key AKIA​QYLPMN5HGZTHX4UQ"}, ensure_ascii=False)
     stdin = io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="latin-1")
     monkeypatch.setattr("sys.stdin", stdin)
-    assert cli.main(["--policy", _quiet_policy(tmp_path, spool_enabled=False)]) == 0
+    assert cli.main(["--policy", _quiet_policy(tmp_path, spool_enabled=False)]) == 2
     assert json.loads(capsys.readouterr().out)["decision"] == "block"
 
 
@@ -311,7 +311,7 @@ def test_server_overrides_do_not_reach_the_hook(tmp_path, monkeypatch, capsys, t
     monkeypatch.setenv(name, value)
     code, out, err = _hook(monkeypatch, capsys, ["--policy", _quiet_policy(tmp_path)],
                            AWS_PROMPT)
-    assert (code, json.loads(out)["decision"]) == (0, "block"), err
+    assert (code, json.loads(out)["decision"]) == (2, "block"), err
     (record,) = _spooled(trusted_home)
     assert record["findings_count"] >= 1
 

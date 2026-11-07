@@ -54,7 +54,7 @@ def _main(policy: str, monkeypatch, capsys) -> tuple[int, str, str]:
 
 
 def _ran_t1(code: int, out: str, err: str) -> None:
-    assert code == 0, err
+    assert code == 2, err
     assert json.loads(out)["decision"] == "block", out
     assert "did not run" not in out + err
 
