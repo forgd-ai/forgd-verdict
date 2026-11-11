@@ -37,7 +37,7 @@ What each module creates:
 | Module | Creates |
 |---|---|
 | `store-azure` | a storage account and a private container; writer, reader and, with `control_enabled`, control user-assigned identities, and their role assignments. With `control_enabled`, a `CanNotDelete` lock on the account as well |
-| `store-s3` | a versioned, encrypted bucket with public access blocked; writer, reader and optional control IAM roles. It takes each role's trust policy as an input. Neither role can delete an object |
+| `store-s3` | a versioned, encrypted bucket with public access blocked; writer, reader and optional control IAM roles. It takes each role's trust policy as an input. Neither role can delete an object or list its earlier versions, so recovering an overwritten object takes other credentials |
 | `store-gcs` | a versioned bucket with public access prevention, optionally encrypted with a KMS key you supply; writer, reader and optional control service accounts, and the bucket bindings for them and for any `writer_members` / `reader_members` |
 | `app-aca` | a Container Apps environment; verdict, collector and dashboard apps, intake and the findings connector when enabled, ingest as a Container Apps job; Easy Auth on the dashboard when `dashboard_auth_client_id` is set |
 | `app-ecs` | an ECS cluster; Fargate services for verdict, collector, dashboard and, when enabled, intake and the connector; an ALB with OIDC sign-in on the dashboard host only; ingest as a task on an EventBridge schedule; one execution role per service and a scheduler role |
