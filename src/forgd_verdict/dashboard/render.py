@@ -1862,6 +1862,9 @@ def render_events(records, source: str = "all", action: str = "all",
 
     rows = []
     opened = []
+    # The panel opens every record on the page carrying `open_id` as any of
+    # its ids, unless the org screen rewrites that id.
+    open_ready = bool(open_id) and (id_screen is None or id_screen(open_id) == open_id)
     for r in records[:limit]:
         # Each control reports in its own terms. An inline control allowed or
         # blocked; a post-hoc scan found something or did not. One shared
@@ -1905,9 +1908,9 @@ def render_events(records, source: str = "all", action: str = "all",
             # A screened id is not linked: the link would carry it.
             corr = (f'<a href="{events_href(open=raw, before=cursor or None)}" '
                     f'title="Open this record">{corr}</a>')
-            if raw == open_id:
-                opened.append(r)
-                selected_row = " aria-selected=true"
+        if open_ready and open_id in (r.request_id, r.session_id, r.reference_id):
+            opened.append(r)
+            selected_row = " aria-selected=true"
         if exclude_form is not None and r.request_id and r.findings and shown == raw:
             corr += exclude_form(r.request_id)
         rows.append(
@@ -2004,9 +2007,13 @@ def render_events(records, source: str = "all", action: str = "all",
 
     log = f'<div class="card" style="overflow-x:auto">{table}</div>{nav}'
     if opened:
+        here = "/events?" + urlencode(
+            {k: v for k, v in {**state, "before": cursor or None, "open": open_id}.items()
+             if v is not None})
         sheet = _record_sheet(
-            opened, id_screen, events_href(before=cursor or None),
-            _href("/events/detail", {**_state(window, selected), "id": open_id}))
+            opened, open_id, id_screen, events_href(before=cursor or None),
+            _href("/events/detail", {**_state(window, selected), "id": open_id,
+                                     "back": here}))
         log = f'<div class="with-sheet open"><div>{log}</div>{sheet}</div>'
     body = (
         '\n  <div class="hero">\n'
@@ -2096,9 +2103,10 @@ def _record_card(r, id_screen=None) -> str:
             f'<div class="card"><h2>Record</h2>{_record_facts(r, id_screen)}</div></div>')
 
 
-def _record_sheet(rs, id_screen, close_href: str, full_href: str) -> str:
-    """The records `rs`, which share an id, in a panel beside the event log:
-    each one's verdict, findings and facts, and a link to the record page."""
+def _record_sheet(rs, record_id: str, id_screen, close_href: str, full_href: str) -> str:
+    """The records `rs`, which carry `record_id`, in a panel beside the event
+    log: each one's verdict, findings and facts, and a link to the record
+    page."""
     from ..core import DESCRIPTIONS
 
     def findings(r) -> str:
@@ -2119,9 +2127,7 @@ def _record_sheet(rs, id_screen, close_href: str, full_href: str) -> str:
             + "</div>"
             for f in r.findings)
 
-    first = rs[0]
-    raw = first.request_id or first.session_id or first.reference_id or ""
-    shown = id_screen(raw) if id_screen is not None else raw
+    shown = id_screen(record_id) if id_screen is not None else record_id
     parts = []
     for r in rs:
         shadow = (f' <span class="act shadow">(shadow: decided {escape(r.shadow_action)})</span>'
@@ -2147,13 +2153,16 @@ def render_event_detail(records, record_id: str, window: str = "7d",
                         orgs: dict[str, str] | None = None, selected: str = "",
                         viewer: str = "", banners: str = "", id_screen=None,
                         branding: Branding | None = None, more: bool = False,
-                        read_to: str = "") -> str:
+                        read_to: str = "", back: str = "") -> str:
     """Every record carrying `record_id` as its request, session or
     reference id in the window, newest first: one request as each control
     saw it. `more` says there are more than `records`; `read_to` is where
-    the read stopped when it did not reach the start of the window."""
+    the read stopped when it did not reach the start of the window. `back`
+    is the event log view the page was opened from, already validated as a
+    path on the dashboard; without it the crumb opens the log in this window
+    and org."""
     backend = str((store_desc or {}).get("backend", "—"))
-    back = _href("/events", _state(window, selected))
+    back = escape(back, quote=True) if back else _href("/events", _state(window, selected))
     shown = id_screen(record_id) if id_screen is not None else record_id
     if records:
         cards = "".join(

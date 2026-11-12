@@ -182,7 +182,8 @@ async def test_the_record_page_finds_every_record_carrying_the_id(tmp_path):
     opened = re.search(r'href="(/events\?[^"]+)"[^>]*>req00001<', log).group(1)
     _, sheet = await client.get(unescape(opened))
     href = re.search(r'href="(/events/detail\?[^"]+)">Every control', sheet).group(1)
-    assert _query(href) == {"window": "all", "id": "req00001"}
+    assert _query(href) == {"window": "all", "id": "req00001",
+                            "back": "/events?window=all&open=req00001"}
     status, html = await client.get(unescape(href))
     assert status == 200
     assert "1 record(s) carry this id" in html
@@ -230,6 +231,30 @@ async def test_a_record_opens_beside_the_log(tmp_path):
     assert 'href="/events?window=all" aria-label="Close"' in sheet
     _, plain = await client.get("/events?window=all")
     assert "sheet" not in plain.split("</style>", 1)[1]
+
+
+async def test_the_panel_opens_every_record_on_the_page_carrying_the_id(tmp_path):
+    store = _store(tmp_path, [_rec(1, request=False, reference="fv_ref_1"),
+                              _rec(2, reference="fv_ref_1"), _rec(3)])
+    _, html = await ASGIClient(Dashboard(store)).get("/events?window=all&open=fv_ref_1")
+    body = html.split("</style>", 1)[1]
+    assert body.count("<tr aria-selected=true>") == 2
+    sheet = body.split('<aside class="card sheet"', 1)[1]
+    assert "req00002" in sheet and "req00003" not in sheet
+
+
+async def test_the_record_page_leads_back_to_the_view_it_was_opened_from(tmp_path):
+    client = ASGIClient(Dashboard(_store(tmp_path, [_rec(1, surface="claude-ai")])))
+    _, html = await client.get("/events?window=all&surface=claude-ai&open=req00001")
+    href = re.search(r'href="(/events/detail\?[^"]+)">Every control', html).group(1)
+    _, detail = await client.get(unescape(href))
+    back = re.search(r'<div class="crumbs"><a href="([^"]+)">Events', detail).group(1)
+    assert _query(unescape(back)) == {"window": "all", "surface": "claude-ai",
+                                      "open": "req00001"}
+    for hostile in ("//evil.example/events", "/policy?x=1", "https://evil.example/events",
+                    '/events?"><h1>x</h1>'):
+        _, detail = await client.get(f"/events/detail?window=all&id=req00001&back={quote(hostile)}")
+        assert re.search(r'<div class="crumbs"><a href="/events\?window=all">Events', detail)
 
 
 async def test_an_open_id_not_on_the_page_or_malformed_opens_nothing(tmp_path):

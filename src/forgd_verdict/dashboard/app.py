@@ -413,7 +413,11 @@ class Dashboard:
             if not render.RECORD_ID.fullmatch(record_id):
                 await self._json(send, 404, {"error": "not_found"})
                 return
-            await self._html(send, self._event_detail(window, record_id, view, who),
+            back = _query_param(qs, "back", "")
+            if not (LOCAL_TARGET.fullmatch(back) and back.split("?", 1)[0] == "/events"):
+                back = ""
+            await self._html(send, self._event_detail(window, record_id, view, who,
+                                                      back=back),
                              headers)
             return
         if path == "/policy":
@@ -699,7 +703,8 @@ class Dashboard:
         )
 
     def _event_detail(self, window: str, record_id: str,
-                      view: ViewScope | None = None, viewer: str = "") -> str:
+                      view: ViewScope | None = None, viewer: str = "",
+                      back: str = "") -> str:
         """The records in the window that carry `record_id` as a request,
         session or reference id. Read through `event_page`, so the viewer's
         scope applies as it does to the log."""
@@ -719,7 +724,7 @@ class Dashboard:
             read_to=page.before.label if page.before else "",
             generated_at=utcnow(), orgs=self._visible_orgs(view.allowed),
             selected=view.selected, viewer=viewer, banners=self._banners(),
-            id_screen=_org_screen(), branding=self.branding)
+            id_screen=_org_screen(), branding=self.branding, back=back)
 
     def _summary_json(self, window: str,
                       scoped: frozenset[str] | None = None) -> dict[str, Any]:
