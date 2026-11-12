@@ -8,6 +8,8 @@ grant any.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import yaml
 from conftest import ASGIClient
@@ -75,7 +77,8 @@ async def test_a_granted_viewer_reads_the_clients_partition(tmp_path):
     assert status == 200
     assert "dev-session-1" in html and "org-session-1" not in html
     # The picker lists orgs only.
-    assert 'href="/events?org=developer"' not in html
+    picker = re.search(r'<nav class="orgs">.*?</nav>', html, re.S)
+    assert picker is None or "org=developer" not in picker.group(0)
 
 
 async def test_an_ungranted_viewer_cannot_read_it(tmp_path):

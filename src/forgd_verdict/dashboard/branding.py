@@ -10,7 +10,7 @@ Errors never quote a value, a file's contents or a `data:` payload.
         name: Acme
         logo: data:image/png;base64,...      # or an absolute path; PNG, SVG or WebP
         favicon: /etc/acme/mark.svg
-        mode: dark
+        mode: auto                           # auto, light or dark
         theme:                               # any of THEME_TOKENS
           --bg-card: "#0C1F3A"
           --warn-text: "#E0A090"
@@ -26,9 +26,15 @@ The theme covers two kinds of token. A `:root` token of tokens.css is
 rewritten in place in that block, in the copy inlined into every page and the
 one served at /assets/tokens.css. A slot (SLOT_DEFAULTS) is a colour the page
 CSS, the admin controls and the charts use directly: templates carry it as a
-`<@--name@>` marker and `Branding.fill` writes the value in its place. A
-marker starts with `<`, which `html.escape` always encodes, so rendered data
-can never contain one.
+`<@--name@>` marker and `Branding.fill` writes `var(--name)` in its place,
+which `Branding.scheme_css` defines. A marker starts with `<`, which
+`html.escape` always encodes, so rendered data can never contain one.
+
+`mode` picks the colour scheme a viewer sees until they choose one with the
+theme control. `dark` is the token set above; `light` is
+LIGHT_TOKENS over it; `auto` is dark, and light under the viewer's
+`prefers-color-scheme: light`. A `theme` applies to the dark scheme, so with
+a theme set and no `mode` the mode is `dark`; without either it is `auto`.
 """
 
 from __future__ import annotations
@@ -53,7 +59,7 @@ MAX_NAME_CHARS = 32
 MAX_FOOTER_TEXT_CHARS = 200
 MAX_LINK_CHARS = 2048
 MAX_IMAGE_BYTES = 256 * 1024
-MODES = ("dark",)
+MODES = ("auto", "light", "dark")
 CHART_PALETTE_SIZE = 2
 
 TOKENS_CSS = (Path(__file__).with_name("assets") / "tokens.css").read_text(encoding="utf-8")
@@ -129,6 +135,54 @@ SLOT_DEFAULTS: Mapping[str, str] = MappingProxyType({
     "--chart-ramp-5": "#7A8CA6",
     "--chart-ramp-6": "#A3B1C6",
 })
+
+# The light scheme: `:root` tokens and slots that differ from the dark set.
+# The ramp runs light to dark, so a matrix cell's ink flips with it:
+# `--matrix-ink-on-dark` is the ink for ramp steps 0-2 in both schemes.
+LIGHT_TOKENS: Mapping[str, str] = MappingProxyType({
+    "--bg-deep": "#F5F6F8",
+    "--bg-primary": "#FFFFFF",
+    "--bg-card": "#FFFFFF",
+    "--bg-card-hover": "#F7F8FA",
+    "--bg-elevated": "#EEF0F4",
+    "--accent-primary": "#4B5563",
+    "--accent-primary-light": "#1D4ED8",
+    "--accent-primary-dim": "#6B7280",
+    "--accent-primary-glow": "rgba(75, 85, 99, 0.06)",
+    "--accent-primary-glow-strong": "rgba(75, 85, 99, 0.12)",
+    "--text-primary": "#111827",
+    "--text-secondary": "#4B5563",
+    "--text-dim": "#6B7280",
+    "--border-subtle": "rgba(17, 24, 39, 0.08)",
+    "--border-medium": "rgba(17, 24, 39, 0.14)",
+    "--border-strong": "rgba(17, 24, 39, 0.26)",
+    "--border-orange": "rgba(180, 83, 9, 0.45)",
+    "--cat-terracotta": "#C2410C",
+    "--cat-steel": "#2563EB",
+    "--comp-pill-bg": "rgba(17, 24, 39, 0.05)",
+    "--warn-text": "#92400E",
+    "--warn-mark": "#D97706",
+    "--warn-wire": "rgba(217,119,6,.6)",
+    "--warn-edge": "rgba(217,119,6,.55)",
+    "--ok-text": "#1D4ED8",
+    "--ok-wire": "rgba(37,99,235,.45)",
+    "--ok-edge": "rgba(37,99,235,.4)",
+    "--ok-edge-strong": "rgba(37,99,235,.5)",
+    "--core-glow": "#2563EB",
+    "--halo-ok": "#22C55E",
+    "--halo-warn": "#F97316",
+    "--halo-alert": "#EF4444",
+    "--matrix-ink-on-dark": "#111827",
+    "--matrix-ink-on-light": "#FFFFFF",
+    "--chart-ramp-0": "#E6ECF4",
+    "--chart-ramp-1": "#D0DAE7",
+    "--chart-ramp-2": "#B3C2D6",
+    "--chart-ramp-3": "#5D7698",
+    "--chart-ramp-4": "#4C6588",
+    "--chart-ramp-5": "#3C5476",
+    "--chart-ramp-6": "#2C4262",
+})
+LIGHT_SHADOW = "0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.07)"
 
 # The two chart series. Set by `chart_palette`; without it, these `:root`
 # tokens.
@@ -210,7 +264,7 @@ class Branding:
     name: str = DEFAULT_NAME
     logo: Asset | None = None
     favicon: Asset | None = None
-    mode: str = "dark"
+    mode: str = "auto"
     theme: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     footer: Footer | None = None
     chart_palette: tuple[str, ...] | None = None
@@ -234,9 +288,44 @@ class Branding:
         return _ROOT_BLOCK.sub(lambda block: _ROOT_DECL.sub(declaration, block[0]),
                                TOKENS_CSS, count=1)
 
+    @cached_property
+    def scheme_css(self) -> str:
+        """The slots and chart series as custom properties, and the light
+        scheme's values when `mode` uses it."""
+        dark = {**SLOT_DEFAULTS, **{k: v for k, v in self.theme.items()
+                                    if k in SLOT_DEFAULTS}}
+        series = self.chart_palette or tuple(f"var({k})" for k in CHART_SERIES_DEFAULTS)
+        dark.update(zip(CHART_SERIES, series, strict=True))
+
+        def block(values: Mapping[str, str], scheme: str, shadow: str = "") -> str:
+            decls = "".join(f"{k}:{v};" for k, v in values.items())
+            return f":root{{color-scheme:{scheme};{decls}{shadow}}}"
+
+        def block_for(selector: str, values: Mapping[str, str], scheme: str,
+                      shadow: str = "") -> str:
+            return block(values, scheme, shadow).replace(":root", selector, 1)
+
+        light_shadow = f"--shadow-card:{LIGHT_SHADOW};"
+        # A theme is written for the dark scheme, so in the light one each
+        # themed token LIGHT_TOKENS does not set goes back to its default.
+        defaults = {**root_tokens(TOKENS_CSS), **SLOT_DEFAULTS}
+        light_values = {**{k: defaults[k] for k in self.theme if k in defaults},
+                        **LIGHT_TOKENS}
+        css = block(dark, "dark")
+        # The viewer's choice (THEME_COOKIE), as `data-theme` on <html>,
+        # overrides the mode.
+        unchosen = ":root:not([data-theme=dark])"
+        if self.mode == "light":
+            css += block_for(unchosen, light_values, "light", light_shadow)
+        elif self.mode == "auto":
+            css += ("@media (prefers-color-scheme: light){"
+                    + block_for(unchosen, light_values, "light", light_shadow) + "}")
+        css += block_for(":root[data-theme=light]", light_values, "light", light_shadow)
+        return css
+
     def fill(self, html: str) -> str:
-        """`html` with every `<@--name@>` marker replaced by its colour."""
-        return _MARKER.sub(lambda m: self.colours[m[1]], html)
+        """`html` with every `<@--name@>` marker replaced by `var(--name)`."""
+        return _MARKER.sub(lambda m: f"var({m[1]})", html)
 
     @classmethod
     def from_policy(cls, raw: Mapping[str, Any] | None) -> Branding:
@@ -246,12 +335,13 @@ class Branding:
         if not isinstance(raw, Mapping):
             raise BrandingError(ROOT_KEY, "must be a mapping")
         _known(raw, _KEYS, ROOT_KEY)
+        theme = _theme(raw.get("theme"), f"{ROOT_KEY}.theme")
         return cls(
             name=_name(raw.get("name"), f"{ROOT_KEY}.name"),
             logo=_image(raw.get("logo"), f"{ROOT_KEY}.logo", "logo"),
             favicon=_image(raw.get("favicon"), f"{ROOT_KEY}.favicon", "favicon"),
-            mode=_mode(raw.get("mode"), f"{ROOT_KEY}.mode"),
-            theme=_theme(raw.get("theme"), f"{ROOT_KEY}.theme"),
+            mode=_mode(raw.get("mode"), f"{ROOT_KEY}.mode", themed=bool(theme)),
+            theme=theme,
             footer=_footer(raw.get("footer"), f"{ROOT_KEY}.footer"),
             chart_palette=_palette(raw.get("chart_palette"), f"{ROOT_KEY}.chart_palette"),
         )
@@ -302,9 +392,9 @@ def _name(value: Any, key: str) -> str:
     return value
 
 
-def _mode(value: Any, key: str) -> str:
+def _mode(value: Any, key: str, themed: bool = False) -> str:
     if value is None:
-        return "dark"
+        return "dark" if themed else "auto"
     if value not in MODES:
         raise BrandingError(key, f"must be one of {', '.join(MODES)}")
     return value

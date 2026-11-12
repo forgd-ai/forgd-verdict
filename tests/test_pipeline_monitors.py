@@ -181,7 +181,7 @@ def test_the_overview_shows_the_pipeline_with_cursor_health(tmp_path):
                     json.dumps({"last_run_started_at": _ts(old)}).encode())
     dash = Dashboard(store, cursor_readers=[
         CursorReader("compliance", "Primary", "compliance-org.json", 30, None)])
-    html = dash._page("all")
+    html = dash._page("all", page="delivery")
     assert "Delivery lag" in html and "Records per source per" in html
     assert "Cursor health" in html and "Primary" in html and "broken" in html
 

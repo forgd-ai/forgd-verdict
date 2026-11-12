@@ -191,10 +191,10 @@ async def test_the_overview_never_says_late_for_a_team_workspace(mixed):
                      compliance=plan, org_labels={ENT: "Enterprise", TEAM: "Team"})
     client = ASGIClient(dash)
     _, team_page = await client.get(f"/?org={TEAM}")
-    assert "late: Compliance scan" not in team_page
+    assert "Late: Compliance scan" not in team_page
     assert "not applicable" in team_page
     _, ent_page = await client.get(f"/?org={ENT}")
-    assert "late: Compliance scan" in ent_page
+    assert "Late: Compliance scan" in ent_page
 
 
 async def test_a_team_only_deployment_never_shows_a_late_compliance_scan(
@@ -209,7 +209,7 @@ async def test_a_team_only_deployment_never_shows_a_late_compliance_scan(
                      scan_state_keys=policy.compliance_state_keys(),
                      compliance=compliance_plan(policy))
     _, page = await ASGIClient(dash).get("/")
-    assert "late: Compliance scan" not in page
+    assert "Late: Compliance scan" not in page
 
 
 async def test_create_app_builds_the_plan(tmp_path, monkeypatch):
@@ -228,4 +228,4 @@ async def test_create_app_builds_the_plan(tmp_path, monkeypatch):
     dash = create_app(str(tmp_path / "findings"))
     assert dash.compliance.orgs and dash.compliance.orgs[0].partition == TEAM
     _, page = await ASGIClient(dash).get("/")
-    assert "late: Compliance scan" not in page
+    assert "Late: Compliance scan" not in page

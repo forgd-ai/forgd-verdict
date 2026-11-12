@@ -79,7 +79,7 @@ async def test_the_least_recently_used_entry_is_evicted_first(tmp_path, small_ca
         await client.get(f"/?org={_org()}")
         await client.get("/?window=all")
     await client.get(f"/?org={_org()}")
-    assert any(k[0] == "page" and k[1] == "all" for k in dash._cache)
+    assert any(k[0] == "page" and k[2] == "all" for k in dash._cache)
 
 
 @pytest.mark.parametrize("org", [

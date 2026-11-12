@@ -51,6 +51,14 @@ def seeded_store(tmp_path):
     return store
 
 
+def _colours(html: str, attr: str = "fill") -> set[str]:
+    """The colours `attr` takes in `html`, each `var(--name)` resolved
+    through the default branding's dark scheme."""
+    colours = Branding().colours
+    found = re.findall(rf'{attr}:var\((--[a-z0-9-]+)\)', Branding().fill(html))
+    return {colours[name] for name in found}
+
+
 async def test_page_renders_with_data(tmp_path):
     client = ASGIClient(Dashboard(seeded_store(tmp_path)))
     scope = {"type": "http", "method": "GET", "path": "/", "headers": [],
@@ -69,13 +77,15 @@ async def test_page_renders_with_data(tmp_path):
     assert status == 200
     assert "<!DOCTYPE html>" in html
     assert "<footer>" not in html          # unbranded: no footer
-    assert "Findings" in html
+    assert "<h1>Overview" in html
     # Normalization guarantee: the adapter-3 underscore form never
     # reaches the page as a separate surface.
     assert "claude_code" not in html
     assert "claude-code" in html
-    assert len(re.findall(r"<td><code>claude-[a-z]+</code></td>", html)) == 2
     assert "regex:aws-access-key" in html
+    _, coverage = await client.get("/coverage?window=all")
+    assert len(re.findall(r"<td><a href=\"[^\"]+\"><code>claude-[a-z]+</code></a></td>",
+                          coverage)) == 2
 
 
 async def test_page_renders_with_an_empty_store(tmp_path):
@@ -83,8 +93,8 @@ async def test_page_renders_with_an_empty_store(tmp_path):
     dash = Dashboard(LocalFileStore(tmp_path / "empty", instance="t"))
     html = dash._page("7d")
     assert "<!DOCTYPE html>" in html
-    assert "Audit scan has not run" in html
     assert "No requests recorded" in html or "No data yet" in html
+    assert "Audit scan has not run" in dash._page("7d", page="coverage")
 
 
 async def test_json_api(tmp_path):
@@ -230,8 +240,7 @@ def test_only_the_two_series_colours_are_used():
     """A third series colour needs the palette validator re-run, so the
     two-series chart uses exactly the two series colours."""
     colours = Branding().colours
-    svg = Branding().fill(grouped_bars([("2026-09-17", 10, 2)]))
-    used = set(re.findall(r"fill=\"(#[0-9A-Fa-f]{6})\"", svg))
+    used = _colours(grouped_bars([("2026-09-17", 10, 2)]))
     assert used == {colours["--chart-alert"], colours["--chart-primary"]}, used
 
 
@@ -266,11 +275,13 @@ async def test_headline_does_not_sum_requests_and_sessions(tmp_path):
 async def test_surface_table_shows_whether_an_inline_control_saw_it(tmp_path):
     """The coverage answer: a surface seen only post-hoc is one the
     inference hook never evaluated."""
-    html = Dashboard(seeded_store(tmp_path))._page("all")
+    html = Dashboard(seeded_store(tmp_path))._page("all", page="coverage")
     assert ">Inline</th>" in html
     # The table pill, specifically: the coverage status line above the matrix
     # uses the same phrase, so count the pill rather than the string.
     assert html.count('<span class="pill cov-no">audit only</span>') == 1
+    # Each count links to the records behind it.
+    assert 'href="/events?window=all&amp;surface=claude-code&amp;source=compliance_scan"' in html
 
 
 def test_surface_row_tracks_each_control_point():
@@ -302,8 +313,7 @@ def test_surface_row_tracks_each_control_point():
 async def test_events_page_renders(tmp_path):
     dash = Dashboard(seeded_store(tmp_path))
     html = dash._events("all")
-    assert "Every evaluated request" in html
-    assert "Event log" in html
+    assert "<h1>Events</h1>" in html
     # one row per evaluated request, newest first
     # The full timestamps: the page also prints the current time, and at
     # 20:10 UTC a bare "10:01" matched that first.
@@ -377,16 +387,24 @@ async def test_events_page_handles_an_empty_store(tmp_path):
     assert "No events in this window" in dash._events("7d")
 
 
-async def test_nav_links_both_pages(tmp_path):
+async def test_the_rail_links_every_page_and_marks_the_current_one(tmp_path):
     dash = Dashboard(seeded_store(tmp_path))
-    for html, current in ((dash._page("all"), "/"), (dash._events("all"), "/events")):
-        assert 'href="/events"' in html and 'href="/"' in html
-        assert f'href="{current}" aria-current=page' in html
+    pages = [(dash._page("all", page=p), path) for path, p in
+             (("/", "overview"), ("/coverage", "coverage"), ("/detectors", "detectors"),
+              ("/delivery", "delivery"))]
+    pages.append((dash._events("all"), "/events"))
+    for html, current in pages:
+        rail = html.split('<nav class="rail"')[1].split("</nav>")[0]
+        for path in ("/", "/coverage", "/detectors", "/delivery", "/events", "/policy"):
+            # The rail carries the window to the next page.
+            assert f'href="{path}?window=all"' in rail, (current, path)
+        assert f'href="{current}?window=all" aria-current=page' in rail
+        assert rail.count("aria-current") == 1
 
 
 async def test_coverage_matrix_names_surfaces_with_no_inline_check(tmp_path):
     """The headline finding, stated rather than left to be inferred."""
-    html = Dashboard(seeded_store(tmp_path))._page("all")
+    html = Dashboard(seeded_store(tmp_path))._page("all", page="coverage")
     assert "<h2>Control points</h2>" in html
     # A status line, not a paragraph: the page states the gap without
     # explaining the product to the reader.
@@ -424,7 +442,8 @@ def test_sequential_ramp_is_monotonic_in_lightness():
         sp = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
         return 0.2104542553 * lp + 0.7936177850 * mp - 0.0040720468 * sp
 
-    for ramp in ([Branding().fill(h) for h in SEQ], LAB_RAMP):
+    colours = Branding().colours
+    for ramp in ([colours[h[2:-2]] for h in SEQ], LAB_RAMP):
         ls = [L(h) for h in ramp]
         assert all(b > a for a, b in zip(ls, ls[1:], strict=False)), ls
 
@@ -453,7 +472,7 @@ async def test_slowest_frame_explains_itself(tmp_path):
     assert s.slowest["body_bytes"] == 158401
     assert s.slowest["cache_hit"] is False
 
-    html = dash._page("all")
+    html = dash._page("all", page="delivery")
     assert "155 KB" in html          # 158401 bytes
     assert "139 msgs" in html
     assert "cold, full scan" in html
@@ -481,15 +500,14 @@ async def test_exactly_one_logo_and_one_meta_line(tmp_path):
         assert 'sizes="32x16"' in html
         assert html.count('class="top-meta"') == 1
         assert html.count("</header>") == 1
-        # Two wraps by design: one aligns the header, one the content.
-        assert html.count('<div class="wrap">') == 2
+        assert html.count('<div class="wrap">') == 1
 
 
 async def test_ui_separates_prevention_from_detection(tmp_path):
     """A post-hoc scan cannot block. Presenting its findings in a shared
     allow/deny column implies it declined to."""
     dash = Dashboard(seeded_store(tmp_path))
-    html = dash._page("all")
+    html = dash._page("all") + dash._page("all", page="coverage")
     assert "Would deny (inline)" in html
     assert "Detected in audit" in html
     assert "Live vs audit" in html
@@ -629,8 +647,8 @@ def test_detector_bars_are_coloured_by_severity():
                         {f"n{i}" for i in range(47)}),
         ],
     )
-    html = render(summary)
-    fills = set(re.findall(r'<path d="[^"]+" fill="(#[0-9A-Fa-f]{6})"', html))
+    html = render(summary, page="detectors")
+    fills = _colours(html.split("<h2>By family</h2>")[1].split("</svg>")[0])
     assert Branding().colours["--chart-alert"] in fills  # block
     assert Branding().colours["--chart-primary"] in fills  # warn
     # Status colour never travels alone.
@@ -656,8 +674,8 @@ def test_hbar_still_takes_a_single_hue():
     there."""
     from forgd_verdict.dashboard import charts
 
-    html = Branding().fill(charts.hbar([("a", 3), ("b", 1)], charts.STEEL))
-    assert set(re.findall(r'fill="(#[0-9A-Fa-f]{6})"', html)) == {
+    html = charts.hbar([("a", 3), ("b", 1)], charts.STEEL)
+    assert _colours(html) - {Branding().colours["--border-medium"]} == {
         Branding().colours["--chart-primary"]}
 
 
@@ -670,7 +688,8 @@ def test_the_matrix_says_which_controls_can_block():
     from forgd_verdict.store.query import Summary, SurfaceRow
 
     row = SurfaceRow("claude-ai", requests=147, live=9, post_hoc=138)
-    html = render(Summary(surfaces=[row], generated_at="2026-09-17T23:00:00Z"))
+    html = render(Summary(surfaces=[row], generated_at="2026-09-17T23:00:00Z"),
+                  page="coverage")
     assert 'colspan="2">Blocks before inference' in html
     # Two of the four can only report: the compliance scan and OTel both
     # arrive after inference. Not a literal span -- see the test below,
@@ -686,7 +705,8 @@ def test_every_control_point_column_sits_under_a_band():
     from forgd_verdict.store.query import Summary, SurfaceRow
 
     row = SurfaceRow("claude-code", requests=1, otel=1)
-    html = render(Summary(surfaces=[row], generated_at="2026-09-19T00:00:00Z"))
+    html = render(Summary(surfaces=[row], generated_at="2026-09-19T00:00:00Z"),
+                  page="coverage")
     spans = [int(n) for n in re.findall(r'colspan="(\d+)">(?:Blocks|Detects)', html)]
     assert sum(spans) == 4, spans
 
@@ -1065,7 +1085,7 @@ def test_the_header_stops_being_one_fixed_row_on_a_phone():
     from forgd_verdict.dashboard.render import PAGE_CSS
 
     mobile = PAGE_CSS.split("@media(max-width:720px){")[1]
-    assert "header.top .wrap{flex-wrap:wrap" in mobile, mobile[:400]
+    assert "header.top .bar{flex-wrap:wrap" in mobile, mobile[:400]
     assert "header.top{position:static}" in mobile, mobile[:400]
 
 
@@ -1163,13 +1183,13 @@ def test_the_agent_check_column_appears_only_when_there_are_agent_checks():
     from forgd_verdict.store.query import Summary, SurfaceRow
 
     without = render(Summary(surfaces=[SurfaceRow("claude-ai", requests=9, live=9)],
-                             generated_at="2026-09-23T00:00:00Z"))
-    assert "Agent check" not in without.split('<div class="eyebrow">Coverage</div>')[1][:4000]
+                             generated_at="2026-09-23T00:00:00Z"), page="coverage")
+    assert "Agent check" not in without.split("<h2>Control points</h2>")[1][:4000]
     with_agent = render(Summary(
         surfaces=[SurfaceRow("claude-ai", requests=9, live=9),
                   SurfaceRow("agent:support-bot", requests=4, agent=4)],
-        generated_at="2026-09-23T00:00:00Z"))
-    matrix = with_agent.split('<div class="eyebrow">Coverage</div>')[1][:6000]
+        generated_at="2026-09-23T00:00:00Z"), page="coverage")
+    matrix = with_agent.split("<h2>Control points</h2>")[1][:6000]
     assert "Agent check" in matrix and "agent:support-bot" in matrix
 
 
@@ -1326,8 +1346,8 @@ def test_a_family_only_the_code_hook_saw_shows_its_per_laptop_values_beside_the_
                               salt_namespace=f"fleet:dev{n}",
                               findings=finding("regex:us-ssn", f"sha256:dev{n}"))
                 for n in range(3)]
-    html = render(build_summary(records, []))
-    section = html[html.index("<h2>Detectors</h2>"):]
+    html = render(build_summary(records, []), page="detectors")
+    section = html[html.index("<h2>By family</h2>"):]
     section = section[:section.index("</section>")]
     chart = section[section.index("<svg"):section.index("</svg>")]
     values = dict(re.findall(r'class="c-label">([^<]+)</text>.*?class="c-value">(.*?)</text>',

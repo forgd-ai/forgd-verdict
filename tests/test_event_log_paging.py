@@ -168,12 +168,12 @@ async def test_a_malformed_cursor_serves_the_first_page(tmp_path):
                                         request_id=f"req{n:05d}") for n in range(5)])
     client = ASGIClient(Dashboard(store))
     _, first = await client.get("/events?window=all")
-    want = re.findall(r"req\d{5}", first)
+    want = re.findall(r">(req\d{5})<", first)
     assert len(want) == 5
     for raw in MALFORMED:
         status, html = await client.get(f"/events?window=all&before={raw}")
         assert status == 200
-        assert re.findall(r"req\d{5}", html) == want
+        assert re.findall(r">(req\d{5})<", html) == want
         assert ">Newest</a>" not in html
 
 
@@ -271,7 +271,7 @@ async def test_the_older_links_walk_past_a_partition_whose_day_is_not_a_date(tmp
     seen, path = [], "/events?window=all"
     for _ in range(10):
         _, html = await client.get(path)
-        seen += re.findall(r"req\d{5}", html)
+        seen += re.findall(r">(req\d{5})<", html)
         m = re.search(r'href="(/events\?[^"]*before=[^"]*)"[^>]*>Older', html)
         if m is None:
             break

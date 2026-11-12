@@ -27,7 +27,8 @@ def _rec(n: int, *, source=SOURCE_INFERENCE_HOOK, action="allow", day="2026-09-1
 
 
 def _ids(html: str) -> list[str]:
-    return re.findall(r"req\d{5}", html)
+    """The record ids the log's rows show, in order."""
+    return re.findall(r">(req\d{5})<", html)
 
 
 def _older(html: str) -> str | None:
@@ -59,7 +60,7 @@ async def test_a_later_page_links_back_to_the_newest(tmp_path):
     store.write_verdicts([_rec(n) for n in range(250)])
     client = ASGIClient(Dashboard(store))
     _, html = await client.get("/events?window=all")
-    assert 'href="/events?window=all"' not in html
+    assert ">Newest</a>" not in html
     _, html = await client.get(_older(html))
     assert ">Newest</a>" in html
 
