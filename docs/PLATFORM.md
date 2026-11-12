@@ -1206,19 +1206,24 @@ write.
 > delivery failure.
 
 The pages are Overview, Coverage, Detectors, Delivery, Events and Policy,
-in a rail down the left, with the time window and org picker in the header.
+in a rail down the left under the logo, with the time window and org picker
+in the header. The overview shows each product surface's state and when it
+was last seen; the Delivery page draws the same surfaces as a diagram of
+what reaches the scan core.
 Each figure that counts records links to the event log filtered to those
 records: a coverage matrix cell to its surface and control, a headline tile
 to its control and verdict, a detector to its findings. The rows a figure
 opens are the records it counts, with two differences the log states: a
 Code hook tally row stands for the allows it counts, and a session scanned
 more than once has a row per scan where the summary pages count it once.
-Each row of the event
-log links to `/events/detail?id=<id>`, which shows every record in the window
-carrying that request, session or reference id, with each finding's detector,
-severity, position, value hash and, when sealed, its `unseal` command. That
-page reads through the viewer's org scope as the log does. A row whose id the
-org screen rewrites is not linked.
+Selecting a row's
+id in the event log opens that record in a panel beside the log
+(`/events?open=<id>`), with each finding's detector, severity, position,
+value hash and, when sealed, its `unseal` command. The panel shows records
+already on the page. Its link goes to `/events/detail?id=<id>`, which shows
+every record in the window carrying that request, session or reference id.
+That page reads through the viewer's org scope as the log does. A row whose
+id the org screen rewrites is not linked.
 
 The header's **Auto / Light / Dark** control sets the colour scheme for that
 browser. Auto follows the operating system's setting. The choice is a
@@ -1238,8 +1243,9 @@ each other and from the page background.
 
 ### Branding
 
-Unconfigured, the dashboard is neutral: the name "verdict" as text in the
-header, no favicon, no footer and a neutral palette. `dashboard.branding`
+Unconfigured, the dashboard is neutral: the name "verdict" in the header, a
+plain mark at the top of the rail, a neutral favicon, no footer and a
+neutral palette. `dashboard.branding`
 in `policy.yaml` sets the rest:
 
 ```yaml
@@ -1262,7 +1268,13 @@ page CSS, admin controls and charts use; `THEME_TOKENS` in
 `rgb()`/`rgba()`/`hsl()`/`hsla()` with numeric arguments. `theme` applies
 to the dark scheme. `mode` is the scheme a viewer sees before choosing one:
 `auto` follows their operating system, and is the default without a `theme`;
-with a `theme` and no `mode` it is `dark`. Images are checked
+with a `theme` and no `mode` it is `dark`.
+
+The logo sits at the top of the rail, at most 56 by 40 pixels. The rail
+keeps its colours in both schemes: `--rail-bg`, `--rail-ink`,
+`--rail-muted` and `--rail-active`, a dark navy by default. A logo drawn for
+a light background needs a light `--rail-bg` and a dark `--rail-ink` and
+`--rail-muted`. Images are checked
 by their bytes, and an SVG that can run script or load anything is refused.
 The Policy tab and `forgd-verdict policy` show an image as its type and size,
 never its contents.

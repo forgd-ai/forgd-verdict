@@ -9,6 +9,7 @@ Errors never quote a value, a file's contents or a `data:` payload.
       branding:
         name: Acme
         logo: data:image/png;base64,...      # or an absolute path; PNG, SVG or WebP
+                                             # shown at the top of the page rail
         favicon: /etc/acme/mark.svg
         mode: auto                           # auto, light or dark
         theme:                               # any of THEME_TOKENS
@@ -29,6 +30,11 @@ CSS, the admin controls and the charts use directly: templates carry it as a
 `<@--name@>` marker and `Branding.fill` writes `var(--name)` in its place,
 which `Branding.scheme_css` defines. A marker starts with `<`, which
 `html.escape` always encodes, so rendered data can never contain one.
+
+The page rail, which carries the logo, keeps its colours in both schemes:
+`--rail-bg`, `--rail-ink`, `--rail-muted` and `--rail-active` (RAIL_SLOTS)
+are themed once and are not reset in the light scheme. A logo drawn for a
+light background needs a light `--rail-bg`.
 
 `mode` picks the colour scheme a viewer sees until they choose one with the
 theme control. `dark` is the token set above; `light` is
@@ -106,7 +112,12 @@ THEME_TOKENS: frozenset[str] = frozenset({
     "--halo-ok", "--halo-warn", "--halo-alert",
     "--matrix-ink-on-dark", "--matrix-ink-on-light",
     *(f"--chart-ramp-{i}" for i in range(7)),
+    "--rail-bg", "--rail-ink", "--rail-muted", "--rail-active",
+    "--enforce-text", "--enforce-bg", "--enforce-edge",
 })
+
+# The rail's colours, the same in both schemes.
+RAIL_SLOTS = frozenset({"--rail-bg", "--rail-ink", "--rail-muted", "--rail-active"})
 
 SLOT_DEFAULTS: Mapping[str, str] = MappingProxyType({
     "--warn-text": "#FBBF24",
@@ -127,18 +138,25 @@ SLOT_DEFAULTS: Mapping[str, str] = MappingProxyType({
     "--matrix-ink-on-dark": "#F3F4F6",
     "--matrix-ink-on-light": "#0B0D11",
     # One hue, dark to light, lightness monotonic.
-    "--chart-ramp-0": "#1E2533",
-    "--chart-ramp-1": "#283244",
-    "--chart-ramp-2": "#344158",
-    "--chart-ramp-3": "#43546F",
-    "--chart-ramp-4": "#566A88",
-    "--chart-ramp-5": "#7A8CA6",
-    "--chart-ramp-6": "#A3B1C6",
+    "--chart-ramp-0": "#172A4A",
+    "--chart-ramp-1": "#1D3A6B",
+    "--chart-ramp-2": "#244C8E",
+    "--chart-ramp-3": "#2F62B5",
+    "--chart-ramp-4": "#4A80D6",
+    "--chart-ramp-5": "#7FA6E6",
+    "--chart-ramp-6": "#B5CCF2",
+    "--rail-bg": "#0A1628",
+    "--rail-ink": "#E9EEF5",
+    "--rail-muted": "#8FA0B4",
+    "--rail-active": "rgba(96,165,250,.18)",
+    "--enforce-text": "#4ADE80",
+    "--enforce-bg": "rgba(74,222,128,.12)",
+    "--enforce-edge": "rgba(74,222,128,.35)",
 })
 
 # The light scheme: `:root` tokens and slots that differ from the dark set.
 # The ramp runs light to dark, so a matrix cell's ink flips with it:
-# `--matrix-ink-on-dark` is the ink for ramp steps 0-2 in both schemes.
+# `--matrix-ink-on-dark` is the ink for ramp steps 0-3 in both schemes.
 LIGHT_TOKENS: Mapping[str, str] = MappingProxyType({
     "--bg-deep": "#F5F6F8",
     "--bg-primary": "#FFFFFF",
@@ -172,15 +190,18 @@ LIGHT_TOKENS: Mapping[str, str] = MappingProxyType({
     "--halo-ok": "#22C55E",
     "--halo-warn": "#F97316",
     "--halo-alert": "#EF4444",
+    "--enforce-text": "#15803D",
+    "--enforce-bg": "rgba(22,163,74,.10)",
+    "--enforce-edge": "rgba(22,163,74,.35)",
     "--matrix-ink-on-dark": "#111827",
     "--matrix-ink-on-light": "#FFFFFF",
-    "--chart-ramp-0": "#E6ECF4",
-    "--chart-ramp-1": "#D0DAE7",
-    "--chart-ramp-2": "#B3C2D6",
-    "--chart-ramp-3": "#5D7698",
-    "--chart-ramp-4": "#4C6588",
-    "--chart-ramp-5": "#3C5476",
-    "--chart-ramp-6": "#2C4262",
+    "--chart-ramp-0": "#E3ECFB",
+    "--chart-ramp-1": "#C7D9F7",
+    "--chart-ramp-2": "#A3C0F0",
+    "--chart-ramp-3": "#7EA5E8",
+    "--chart-ramp-4": "#356BC9",
+    "--chart-ramp-5": "#2556AE",
+    "--chart-ramp-6": "#1A428C",
 })
 LIGHT_SHADOW = "0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.07)"
 
@@ -309,7 +330,8 @@ class Branding:
         # A theme is written for the dark scheme, so in the light one each
         # themed token LIGHT_TOKENS does not set goes back to its default.
         defaults = {**root_tokens(TOKENS_CSS), **SLOT_DEFAULTS}
-        light_values = {**{k: defaults[k] for k in self.theme if k in defaults},
+        light_values = {**{k: defaults[k] for k in self.theme
+                           if k in defaults and k not in RAIL_SLOTS},
                         **LIGHT_TOKENS}
         css = block(dark, "dark")
         # The viewer's choice (THEME_COOKIE), as `data-theme` on <html>,

@@ -5,8 +5,9 @@ a logo and favicon come from `dashboard.branding`, so the CSP is
 `default-src 'none'` with no third-party origins. See
 `assets/fonts/README.md` for the fonts.
 
-Unbranded, the page is neutral: the name "verdict" as text in the header, no
-favicon, the default token set and no footer. `dashboard.branding` (see
+Unbranded, the page is neutral: the name "verdict" in the header, a plain
+mark atop the rail, the package's neutral favicon, the default token set and
+no footer. `dashboard.branding` (see
 branding.py) sets the name, logo, favicon, footer and colours. Every colour
 outside tokens.css is a `<@--name@>` marker that `Branding.fill` replaces in
 the finished page.
@@ -25,67 +26,87 @@ from urllib.parse import urlencode
 from ..models import DEVICE_ID, NO_CONTENT_READ
 from ..orgregistry import KIND_WORKSPACE, partition_kind
 from ..store.base import EVENT_TOOL_CALL, WRITER_INTAKE_TOKEN, is_fleet_partition, writer_class
-from ..store.query import Summary, families, family_device_values, family_severities
+from ..store.query import (
+    Summary,
+    families,
+    family_device_values,
+    family_severities,
+    normalize_surface,
+)
 from ..store.tally import weight
 from . import charts
 from .branding import DEFAULT_NAME, Branding, marker, png_size
-from .topology import core_health
+from .topology import SURFACE_LABELS, core_health
 
 ASSETS = Path(__file__).with_name("assets")
 
 PAGE_CSS = """
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg-deep);color:var(--text-primary);
- font-family:var(--font-body);-webkit-font-smoothing:antialiased;
+ font:400 14px/1.5 var(--font-body);-webkit-font-smoothing:antialiased;
  scroll-behavior:smooth}
 a{color:var(--accent-primary-light);text-decoration:none}
 a:hover{text-decoration:underline}
-.wrap{max-width:1180px;margin:0 auto;padding:0 32px}
-header.top{border-bottom:1px solid var(--border-subtle);background:var(--bg-primary);
- position:sticky;top:0;z-index:10}
-header.top .bar{display:flex;align-items:center;gap:20px;height:60px;padding:0 24px}
-/* The rail: one destination per question the dashboard answers. */
-/* The rail's surface is painted on the shell, so it runs the full height
+:focus-visible{outline:2px solid var(--brand-accent);outline-offset:2px;border-radius:6px}
+.wrap{max-width:1280px;margin:0 auto;padding:0 28px 56px}
+/* The shell: the rail down the left, the top bar and the page beside it. */
+/* The rail's colour is painted on the shell too, so it runs the full height
    of a page longer than the viewport. */
-.shell{display:grid;grid-template-columns:208px minmax(0,1fr);
- min-height:calc(100vh - 61px);
- background:linear-gradient(90deg,var(--bg-primary) 0 207px,
-  var(--border-subtle) 207px 208px,transparent 208px)}
-nav.rail{position:sticky;top:61px;align-self:start;height:calc(100vh - 61px);
- padding:16px 12px;display:flex;flex-direction:column;gap:2px}
-nav.rail a{display:flex;align-items:center;gap:10px;padding:8px 12px;
- border-radius:var(--radius-md);color:var(--text-secondary);font-size:14px;
- font-weight:500;transition:background var(--transition-snap),color var(--transition-snap)}
-nav.rail a:hover{background:var(--bg-card-hover);color:var(--text-primary);
- text-decoration:none}
-nav.rail a[aria-current=page]{background:var(--brand-accent-bg-strong);
- color:var(--text-primary)}
-nav.rail svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;
+.shell{display:grid;grid-template-columns:88px minmax(0,1fr);
+ grid-template-rows:60px auto;min-height:100vh;
+ background:linear-gradient(90deg,<@--rail-bg@> 88px,transparent 88px)}
+/* The rail, in its own colours in both schemes (branding.RAIL_SLOTS). */
+nav.rail{grid-row:1/3;position:sticky;top:0;height:100vh;overflow-y:auto;
+ background:<@--rail-bg@>;color:<@--rail-ink@>;display:flex;flex-direction:column;
+ align-items:center;gap:4px;padding:14px 0 16px}
+nav.rail .mark{display:grid;place-items:center;width:64px;min-height:40px;
+ margin:0 0 16px;padding:0}
+nav.rail .mark:hover{background:none}
+nav.rail .mark img{max-width:56px;max-height:40px;width:auto;height:auto;display:block}
+nav.rail .mark svg{width:28px;height:28px;stroke:<@--rail-ink@>;stroke-width:1.2}
+nav.rail a{width:76px;display:flex;flex-direction:column;align-items:center;gap:4px;
+ padding:4px 0 6px;color:<@--rail-muted@>;font-size:11.5px;font-weight:500;
+ border-radius:14px;text-decoration:none}
+nav.rail a .ic{width:56px;height:32px;border-radius:16px;display:grid;place-items:center;
+ transition:background var(--transition-snap)}
+nav.rail a:hover{color:<@--rail-ink@>}
+nav.rail a:hover .ic{background:rgba(255,255,255,.07)}
+nav.rail a[aria-current=page]{color:<@--rail-ink@>}
+nav.rail a[aria-current=page] .ic{background:<@--rail-active@>}
+nav.rail svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;
  stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}
-/* The time window, beside the brand: it applies to every page that reads
-   records. */
-nav.range{display:flex;gap:2px;padding:3px;border:1px solid var(--border-subtle);
- border-radius:var(--radius-md);background:var(--bg-deep)}
+header.top{grid-column:2;position:sticky;top:0;z-index:10;display:flex;
+ align-items:center;gap:16px;padding:0 24px;min-width:0;
+ background:var(--bg-primary);border-bottom:1px solid var(--border-subtle)}
+header.top .product{display:flex;flex-direction:column;line-height:1.15;min-width:0}
+header.top .product span{font:500 10px var(--font-mono);letter-spacing:.14em;
+ text-transform:uppercase;color:var(--text-dim)}
+header.top .product b{font-size:15px;font-weight:600;color:var(--text-primary);
+ white-space:nowrap}
+main{grid-column:2;min-width:0}
+/* The time window: it applies to every page that reads records. */
+nav.range{display:inline-flex;gap:2px;padding:3px;border-radius:10px;
+ background:var(--bg-elevated)}
 nav.range a{font-size:13px;font-weight:500;color:var(--text-secondary);
- padding:4px 10px;border-radius:var(--radius-sm)}
+ padding:5px 12px;border-radius:8px;white-space:nowrap}
 nav.range a:hover{color:var(--text-primary);text-decoration:none}
+nav.range a[aria-current=true]{background:var(--bg-card);color:var(--text-primary);
+ box-shadow:var(--shadow-card)}
 /* The theme control. Which choice is current is read from `data-theme` on
    <html>, set per request after the page cache, so a cached page serves
    every viewer. */
-nav.theme{display:flex;gap:2px;padding:3px;border:1px solid var(--border-subtle);
- border-radius:var(--radius-md);background:var(--bg-deep)}
-nav.theme a{font-size:12px;font-weight:500;color:var(--text-dim);padding:3px 9px;
- border-radius:var(--radius-sm)}
+nav.theme{display:inline-flex;gap:2px;padding:3px;border-radius:10px;
+ background:var(--bg-elevated)}
+nav.theme a{font-size:12px;font-weight:500;color:var(--text-dim);padding:4px 10px;
+ border-radius:8px}
 nav.theme a:hover{color:var(--text-primary);text-decoration:none}
 :root:not([data-theme]) nav.theme a.t-auto,
 :root[data-theme=light] nav.theme a.t-light,
 :root[data-theme=dark] nav.theme a.t-dark{background:var(--bg-card);
  color:var(--text-primary);box-shadow:var(--shadow-card)}
-nav.range a[aria-current=true]{background:var(--bg-card);color:var(--text-primary);
- box-shadow:var(--shadow-card)}
-/* The org picker. Visually subordinate to the tabs: the tabs change what
-   you are looking at, this changes whose data it is, and confusing the two
-   is how someone reads one org's numbers as another's. */
+/* The org picker. Visually subordinate to the window: it changes whose
+   data it is, and confusing the two is how someone reads one org's
+   numbers as another's. */
 nav.orgs{display:flex;gap:2px;padding-left:16px;
  border-left:1px solid var(--border-subtle)}
 nav.orgs a{font-size:13px;color:var(--text-dim);
@@ -95,41 +116,74 @@ nav.orgs a:hover{color:var(--text-secondary);text-decoration:none;
  border-color:var(--border-subtle)}
 nav.orgs a[aria-current=true]{color:var(--text-primary);
  background:var(--bg-elevated);border-color:var(--border-medium)}
-header.top img{height:26px;width:auto;display:block}
 .top-meta{margin-left:auto;font-size:12px;
  color:var(--text-dim);text-align:right;line-height:1.5}
-.eyebrow{font-size:13px;font-weight:600;color:var(--text-dim);margin-bottom:6px}
-h1{font-size:30px;font-weight:800;letter-spacing:-.02em;margin:0 0 12px;
- display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.eyebrow{font:500 10.5px var(--font-mono);letter-spacing:.12em;text-transform:uppercase;
+ color:var(--text-dim);margin-bottom:6px}
+h1{font-size:22px;font-weight:600;letter-spacing:-.01em;margin:0 0 6px;line-height:1.25;
+ display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 /* overflow-wrap:anywhere because these headings carry VALUES, not prose:
    the policy tab titles its source with the path it loaded
    (/run/forgd/policy/policy.yaml) and a path offers no break opportunity,
    so it ran 29px past a 280px column. Not scoped to a breakpoint -- a long
    path overflows a narrow column at any viewport width. */
-h2{font-size:22px;font-weight:700;letter-spacing:-.01em;margin:0 0 8px;
- overflow-wrap:anywhere}
-p.lede{color:var(--text-secondary);font-size:15px;line-height:1.65;max-width:72ch;margin:0}
-section{padding:40px 0;border-top:1px solid var(--border-subtle)}
-section:first-of-type{border-top:none}
-.hero{padding:36px 0 28px}
+h2{font-size:15px;font-weight:600;margin:0 0 10px;overflow-wrap:anywhere}
+p.lede{color:var(--text-secondary);font-size:14px;line-height:1.6;max-width:72ch;margin:0}
+section{padding:24px 0 0}
+.hero{padding:24px 0 4px}
 /* min() on every auto-fit minimum. `minmax(200px,1fr)` does NOT shrink
    below 200px -- auto-fit removes empty tracks, it does not shrink a
    populated one -- so on a narrow screen the track keeps its floor and the
    grid pushes the page wider than the viewport instead of wrapping. */
-.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));
- gap:16px;margin:28px 0 0}
-.stat-card{background:var(--bg-card);border:1px solid var(--border-subtle);
- border-radius:var(--radius-lg);padding:20px 22px;box-shadow:var(--shadow-card);
+.stat-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+ gap:12px;margin:16px 0 0}
+@media(max-width:1000px){.stat-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.stat-row{grid-template-columns:minmax(0,1fr)}}
+.stat-card{position:relative;display:flex;flex-direction:column;gap:4px;min-width:0;
+ background:var(--bg-card);border:1px solid var(--border-subtle);
+ border-radius:14px;padding:14px 16px;box-shadow:var(--shadow-card);
  transition:border-color var(--transition-smooth),background var(--transition-smooth)}
-.stat-card:hover{border-color:var(--border-medium);background:var(--bg-card-hover)}
-a.stat-card{display:block;color:inherit}
-a.stat-card:hover{text-decoration:none;border-color:var(--border-strong)}
-.stat-go{margin-top:12px;font-size:12px;font-weight:500;color:var(--accent-primary-light)}
-.stat-label{font-size:13px;font-weight:500;color:var(--text-secondary);margin-bottom:10px}
-.stat-value{font-size:32px;font-weight:800;letter-spacing:-.02em;line-height:1}
-.stat-sub{margin-top:8px;font-size:12px;color:var(--text-secondary)}
+a.stat-card{color:inherit}
+a.stat-card:hover{text-decoration:none;border-color:var(--border-strong);
+ background:var(--bg-card-hover)}
+.stat-label{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;
+ color:var(--text-secondary)}
+.stat-label svg{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;
+ stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;color:var(--text-dim)}
+.stat-go{margin-left:auto;font-size:12px;font-weight:500;color:var(--text-dim);
+ white-space:nowrap;transition:color var(--transition-snap)}
+a.stat-card:hover .stat-go{color:var(--accent-primary-light)}
+.stat-value{font-size:26px;font-weight:600;letter-spacing:-.01em;line-height:1.2;
+ font-variant-numeric:tabular-nums;color:var(--text-primary)}
+.stat-value small{font-size:14px;font-weight:500;color:var(--text-dim)}
+.stat-sub{font-size:12px;color:var(--text-secondary);line-height:1.45}
+/* The surfaces strip on the overview: one chip per product surface. */
+.surfaces{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));
+ gap:8px;margin-top:4px}
+.srf{display:flex;align-items:center;gap:10px;padding:10px 12px;min-width:0;
+ border:1px solid var(--border-subtle);border-radius:10px;color:inherit;
+ background:var(--bg-primary)}
+a.srf:hover{text-decoration:none;border-color:var(--border-strong)}
+.srf-ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;flex:none;
+ background:var(--bg-elevated);color:var(--text-secondary)}
+.srf-ic svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.4;
+ stroke-linecap:round;stroke-linejoin:round}
+.srf-name{display:block;font-size:13px;font-weight:500;color:var(--text-primary);white-space:nowrap;
+ overflow:hidden;text-overflow:ellipsis}
+.srf-detail{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim)}
+.srf-detail::before{content:"";width:7px;height:7px;border-radius:50%;flex:none;
+ background:var(--text-dim)}
+.srf.tpx-live .srf-detail::before{background:<@--ok-text@>}
+.srf.tpx-idle .srf-detail::before{background:var(--accent-primary-dim)}
+.srf.tpx-late .srf-detail{color:<@--warn-text@>}
+.srf.tpx-late .srf-detail::before{background:<@--warn-mark@>}
+.srf.tpx-off,.srf.tpx-na{opacity:.55}
+.card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;
+ flex-wrap:wrap;margin-bottom:6px}
+.card-head h2{margin:0}
+.card-head a{font-size:12.5px;font-weight:500}
 .card{background:var(--bg-card);border:1px solid var(--border-subtle);
- border-radius:var(--radius-lg);padding:24px;box-shadow:var(--shadow-card)}
+ border-radius:14px;padding:16px 18px 18px;box-shadow:var(--shadow-card);min-width:0}
 /* Only cards that HOLD A TABLE scroll. Applying overflow-x to every card
    would make each one a scroll container, and `.chart` sets
    `overflow:visible` on purpose so its value labels can sit outside the SVG
@@ -138,7 +192,7 @@ a.stat-card:hover{text-decoration:none;border-color:var(--border-strong)}
    rules is a single stacked column at desktop width, so the surface table
    was still wider than its card at 1024px with no mobile rule in reach. */
 .card:has(table){overflow-x:auto}
-.card-grid{display:grid;gap:16px;margin-top:24px}
+.card-grid{display:grid;gap:16px;margin-top:16px}
 /* A card that hugs its content, for the matrix: the table is
    width:auto with fixed cells, so a full-width card left most of
    the row empty.
@@ -163,12 +217,20 @@ a.stat-card:hover{text-decoration:none;border-color:var(--border-strong)}
    of the other track. */
 .section-row{display:grid;align-items:start;
  grid-template-columns:max-content minmax(0,1fr);
- gap:40px 32px;padding:40px 0;border-top:1px solid var(--border-subtle)}
+ gap:24px 24px;padding:24px 0 0}
 .section-row > section{padding:0;border-top:none}
 .section-row > section:nth-child(2){grid-row:2}
 .section-row > section:nth-child(3){grid-column:2;grid-row:1/span 2}
 .section-row.pair > section:nth-child(2){grid-column:2;grid-row:1}
-.section-row.pair .aside{grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr))}
+/* Matrix and figures side by side: two cards, tops aligned, equal height. */
+.section-row.pair{align-items:stretch}
+.section-row.pair > section{display:flex;flex-direction:column}
+.section-row.pair > section > .card{flex:1}
+.card.figures{display:flex;flex-direction:column;padding:4px 18px}
+.figure{display:flex;flex-direction:column;gap:4px;flex:1;justify-content:center;
+ padding:14px 0;border-bottom:1px solid var(--border-subtle)}
+.figure:last-of-type{border-bottom:0}
+.card.figures .status{margin:0 0 12px}
 /* minmax(0,1fr), never a bare 1fr. `1fr` is `minmax(auto,1fr)`, and that
    `auto` minimum is the item's MIN-CONTENT -- so the fixed-width coverage
    matrix held this track at 629px on a 390px screen and every sibling
@@ -182,10 +244,10 @@ a.stat-card:hover{text-decoration:none;border-color:var(--border-strong)}
  gap:12px;align-content:start}
 /* The asides keep the page's heading scale rather than shrinking to a
    label: they are sections that happen to sit in a column. */
-.aside{margin-top:24px}
+.aside{margin-top:12px}
 .aside .status{grid-column:1/-1;margin:2px 0 0}
 .card-grid.cols-2{grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr));
- align-items:start}
+ align-items:stretch}
 /* A table of identifiers needs more room than a bar chart of the same
    data. auto-fit cannot express that, so this pair is explicit and
    collapses to one column when there is not room for both. */
@@ -267,7 +329,7 @@ a.stat-card:hover{text-decoration:none;border-color:var(--border-strong)}
 .tpx-label{fill:var(--text-primary);font:500 12.5px var(--font-body)}
 .tpx-sub{fill:var(--text-dim);font:400 10px var(--font-mono)}
 .tpx-late .tpx-sub{fill:<@--warn-text@>}
-.tpx-halo{fill:none;stroke-width:3;filter:url(#tpxHaloBlur);pointer-events:none}
+.tpx-halo{display:none}
 .tpx-core rect{fill:var(--bg-elevated);stroke:var(--border-strong);
  stroke-width:1.5}
 /* The border carries the same signal. It is not decoration: the box's
@@ -292,24 +354,32 @@ text.c-label{fill:var(--text-secondary);font:500 13px var(--font-body)}
 text.c-value{fill:var(--text-primary);font:600 13px var(--font-mono)}
 tspan.c-note{fill:var(--text-dim);font-weight:400}
 text.c-axis{fill:var(--text-dim);font:400 10px var(--font-mono)}
-.legend{display:flex;gap:18px;margin-top:14px;font-size:12px;
+.legend{display:flex;gap:18px;margin-top:10px;font-size:12px;
  color:var(--text-secondary)}
+.legend b{color:var(--text-primary);font-weight:600;font-variant-numeric:tabular-nums}
 .legend-item{display:flex;align-items:center;gap:7px}
 .swatch{width:10px;height:10px;border-radius:2px;display:inline-block}
 table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
-th{text-align:left;font-size:12px;font-weight:600;color:var(--text-secondary);
- padding:8px 10px;border-bottom:1px solid var(--border-medium);white-space:nowrap}
+th{text-align:left;font-size:12px;font-weight:500;color:var(--text-dim);
+ padding:10px 12px;border-bottom:1px solid var(--border-medium);white-space:nowrap}
 th.num{text-align:right}
-td{padding:9px 10px;border-bottom:1px solid var(--border-subtle);
- color:var(--text-secondary)}
-tbody tr{height:40px}
+td{padding:6px 12px;border-bottom:1px solid var(--border-subtle);
+ color:var(--text-secondary);vertical-align:middle}
+tbody tr{height:44px}
+tbody tr:last-child td{border-bottom:0}
+td.strong{color:var(--text-primary);font-weight:500}
 tbody tr:hover td{background:var(--bg-card-hover)}
-td.num{font-family:var(--font-mono);color:var(--text-primary);text-align:right;
+td.num{color:var(--text-primary);text-align:right;
  font-variant-numeric:tabular-nums;white-space:nowrap}
 td.num a{color:inherit;text-decoration:underline dotted var(--border-strong);
  text-underline-offset:3px}
 td.num a:hover{color:var(--accent-primary-light)}
 td code,td.mono{white-space:nowrap}
+/* An identifier in a table is a chip, so a monospace name reads as an id
+   beside the body text. */
+td code,dd code,.id{font:500 12px var(--font-mono);color:var(--text-primary);
+ background:var(--comp-pill-bg);border-radius:6px;padding:2px 6px}
+td a code,dd a code{color:var(--accent-primary-light)}
 td.mono{font-family:var(--font-mono);font-size:11px;color:var(--text-dim)}
 .det-what{display:block;margin-top:3px;font-size:11px;color:var(--text-dim)}
 code,.mono{font-family:var(--font-mono);font-size:12px}
@@ -340,7 +410,7 @@ table.matrix th.mx-col{font-size:12px;color:var(--text-secondary);
 table.matrix th.mx-row{text-align:right;padding:0 14px 0 0;font-size:13px;
  font-weight:500;color:var(--text-secondary);border:none;white-space:nowrap}
 table.matrix td.mx-cell{width:104px;height:40px;text-align:center;
- border-radius:var(--radius-sm);font-family:var(--font-mono);font-size:13px;
+ border-radius:6px;font-size:13px;font-variant-numeric:tabular-nums;
  border:none;padding:0}
 table.matrix td.mx-none{background:transparent;
  border:1px dashed var(--border-medium);color:var(--text-dim)}
@@ -366,18 +436,29 @@ table.matrix tbody tr{height:auto}
 .status-warn{color:<@--warn-text@>}
 .status-warn::before{color:<@--warn-mark@>}
 td .status{margin:0;display:inline-flex}
-.mode{font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;align-self:center;
- border:1px solid var(--border-medium);color:var(--accent-primary);
- font-weight:400;line-height:1;white-space:nowrap}
-.mode.shadow{border-color:var(--border-orange);color:<@--warn-text@>}
+/* Whether the inline controls apply their verdicts: a word and an icon, and
+   a colour for each state. */
+.mode{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+ padding:4px 11px 4px 9px;border-radius:999px;align-self:center;line-height:1.2;
+ white-space:nowrap;border:1px solid var(--border-medium);color:var(--text-secondary)}
+.mode svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;
+ stroke-linecap:round;stroke-linejoin:round}
+.mode.enforcing{color:<@--enforce-text@>;background:<@--enforce-bg@>;
+ border-color:<@--enforce-edge@>}
+.mode.shadow{color:<@--warn-text@>;background:var(--cat-terracotta-bg);
+ border-color:var(--border-orange)}
+.mode.shadow::before{content:"!";display:inline-grid;place-items:center;width:14px;
+ height:14px;border-radius:50%;border:1.6px solid currentColor;font:700 9px/1 var(--font-body);
+ box-sizing:border-box}
 .pill.cov-no{color:<@--warn-text@>;border-color:<@--warn-edge@>}
 table.log{font-size:12px}
-table.log td{padding:7px 9px;vertical-align:middle}
+table.log td{padding:7px 9px;vertical-align:middle;white-space:nowrap}
+table.log td:has(.det){white-space:normal;min-width:200px}
 table.log td.ts{font-family:var(--font-mono);color:var(--text-dim);white-space:nowrap}
-.det{display:inline-block;font-family:var(--font-mono);font-size:10px;
- padding:2px 6px;margin:1px 3px 1px 0;border-radius:var(--radius-sm);
- border:1px solid var(--border-medium);color:var(--accent-primary-light)}
-.det.block{border-color:var(--border-orange);color:<@--warn-text@>}
+.det{display:inline-block;white-space:nowrap;font-family:var(--font-mono);font-size:11px;
+ padding:2px 6px;margin:1px 3px 1px 0;border-radius:6px;
+ background:var(--comp-pill-bg);color:var(--text-primary)}
+.det.block{background:var(--cat-terracotta-bg);color:<@--warn-text@>}
 .act{font-size:12px;font-weight:600}
 .act.deny{color:<@--warn-text@>}
 .act.allow{color:var(--text-dim)}
@@ -413,6 +494,25 @@ table.log td.ts{font-family:var(--font-mono);color:var(--text-dim);white-space:n
 .filters button:hover{border-color:var(--border-strong)}
 .filters a[aria-current=true]{border-color:var(--border-strong);
  color:var(--text-primary);background:var(--bg-elevated)}
+/* The event log with a record open beside it. */
+.with-sheet{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:start}
+.with-sheet.open{grid-template-columns:minmax(0,1fr) minmax(min(360px,100%),440px)}
+@media(max-width:1180px){.with-sheet.open{grid-template-columns:minmax(0,1fr)}}
+.sheet{position:sticky;top:76px;max-height:calc(100vh - 92px);overflow-y:auto;padding:0}
+.sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;
+ padding:16px 18px 8px}
+.sheet-head h2{margin:0;font-size:16px}
+.sheet-head .close{font-size:18px;line-height:1;color:var(--text-dim);padding:2px 6px;
+ border-radius:6px}
+.sheet-head .close:hover{background:var(--bg-elevated);text-decoration:none}
+.sheet-sec{padding:12px 18px;border-top:1px solid var(--border-subtle)}
+.sheet-sec h3{margin:0 0 8px;font:600 11px var(--font-body);letter-spacing:.06em;
+ text-transform:uppercase;color:var(--text-dim)}
+.sheet .finding{display:flex;flex-direction:column;gap:3px;padding:8px 0;
+ border-bottom:1px solid var(--border-subtle)}
+.sheet .finding:last-child{border-bottom:0}
+.sheet .finding .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+tr[aria-selected=true] td{background:var(--brand-accent-bg)}
 /* The event detail page. */
 dl.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px 28px;
  margin:0;font-size:13px}
@@ -420,23 +520,25 @@ dl.kv dt{color:var(--text-dim)}
 dl.kv dd{margin:0;color:var(--text-primary);overflow-wrap:anywhere}
 .crumbs{font-size:13px;color:var(--text-dim);margin-bottom:8px}
 .see-all{display:inline-block;margin-top:14px;font-size:13px;font-weight:500}
-footer{border-top:1px solid var(--border-subtle);margin-top:48px;padding:28px 0 40px;
+footer{border-top:1px solid var(--border-subtle);margin-top:40px;padding:20px 0 0;
  font-size:13px;color:var(--accent-primary)}
 footer b{color:var(--text-primary);font-weight:700}
 @media(max-width:900px){
- .shell{grid-template-columns:minmax(0,1fr);background:none}
- nav.rail{position:static;height:auto;flex-direction:row;flex-wrap:wrap;
-  background:var(--bg-primary);border-bottom:1px solid var(--border-subtle);
-  padding:8px 12px}
+ .shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto;
+  background:none}
+ nav.rail{grid-row:auto;position:static;height:auto;flex-direction:row;
+  justify-content:space-around;overflow-x:auto;padding:6px 4px}
+ nav.rail a{width:60px;font-size:11px}
+ nav.rail a .ic{width:44px;height:28px}
+ nav.rail .mark{display:none}
+ header.top,main{grid-column:1}
 }
 @media(max-width:720px){
- .wrap{padding:0 20px}
- h1{font-size:26px}
+ .wrap{padding:0 16px 40px}
  /* The header was one 68px flex row that could not wrap: logo, tabs, org
     picker and the build/generated-at block. On a phone it ran to 670px and
     dragged the page with it. Let it become as many rows as it needs. */
- header.top{position:static}
- header.top .bar{flex-wrap:wrap;height:auto;gap:10px 14px;padding:14px 20px}
+ header.top{position:static;flex-wrap:wrap;gap:10px 14px;padding:14px 20px}
  nav.range{flex-wrap:wrap}
  nav.orgs{margin-left:0;padding-left:0;border-left:none;flex-wrap:wrap}
  .top-meta{margin-left:0;text-align:left;width:100%}
@@ -458,21 +560,29 @@ RANGES = (
 
 
 def _stat(label: str, value: str, sub: str = "", href: str | None = None,
-          go: str = "View records") -> str:
-    """A figure. With `href` (escaped) the tile links to what it counts."""
+          go: str = "View records", icon: str = "") -> str:
+    """A figure, under `icon` from _ICONS. With `href` (escaped) the whole
+    tile links to what it counts, and `go` names where it goes."""
     sub_html = f'<div class="stat-sub">{sub}</div>' if sub else ""
-    inner = (f'<div class="stat-label">{escape(label)}</div>'
+    glyph = (f'<svg viewBox="0 0 16 16" aria-hidden="true"><path d="{_ICONS[icon]}"/></svg>'
+             if icon else "")
+    go_html = f'<span class="stat-go">{escape(go)} &rarr;</span>' if href is not None else ""
+    inner = (f'<div class="stat-label">{glyph}{escape(label)}{go_html}</div>'
              f'<div class="stat-value">{value}</div>{sub_html}')
     if href is None:
         return f'<div class="stat-card">{inner}</div>'
-    return (f'<a class="stat-card" href="{href}">{inner}'
-            f'<div class="stat-go">{escape(go)} &rarr;</div></a>')
+    return f'<a class="stat-card" href="{href}">{inner}</a>'
+
+
+def surface_label(key: str) -> str:
+    """The name a surface is shown under: topology.SURFACE_LABELS, or the key."""
+    return SURFACE_LABELS.get(key, key)
 
 
 def _surfaces_cell(surfaces: set[str], limit: int = 2) -> str:
     """Two surface names plus a count. The full list wrapped over four lines
     and pushed the numeric columns out of alignment."""
-    ordered = sorted(surfaces)
+    ordered = sorted(surface_label(s) for s in surfaces)
     if len(ordered) <= limit:
         return escape(", ".join(ordered))
     shown = ", ".join(ordered[:limit])
@@ -623,6 +733,8 @@ _ICONS = {
     "search": "M7 3a4 4 0 100 8 4 4 0 000-8zM10 10l4 4",
     "pulse": "M2 8h3l2-4 2 8 2-4h3",
     "list": "M5 4h9M5 8h9M5 12h9M2 4h.5M2 8h.5M2 12h.5",
+    "deny": "M8 2a6 6 0 100 12A6 6 0 008 2zM3.8 3.8l8.4 8.4",
+    "hash": "M6.5 2l-1.5 12M11.5 2l-1.5 12M2.5 5.5h11M2 10.5h11",
 }
 
 
@@ -764,7 +876,7 @@ def _topology(points, surfaces=None, sink=None, health="ok",
             # broken.
             dur = 14.0 if periodic else _pulse_seconds(srf.requests)
             pulses.append(
-                f'<circle r="9" class="tpx-pulse" '
+                f'<circle r="5" class="tpx-pulse" '
                 f'style="offset-path:path(\'{d}\');--tpx-dur:{dur}s;'
                 f'--tpx-delay:{i * 0.55:.2f}s"/>'
             )
@@ -786,7 +898,7 @@ def _topology(points, surfaces=None, sink=None, health="ok",
         defs.append(f'<path id="tpwout" d="{d_out}" fill="none"/>')
         out_svg = (
             f'<use href="#tpwout" class="tpx-wire tpx-live"/>'
-            f'<circle r="9" class="tpx-pulse" style="offset-path:path('
+            f'<circle r="5" class="tpx-pulse" style="offset-path:path('
             f"'{d_out}');--tpx-dur:1.8s;--tpx-delay:0s\"/>"
             f'<g class="tpx-node tpx-live">'
             f'<rect x="{width - 172}" y="{core_y - 22}" width="156" height="44" rx="9"/>'
@@ -858,6 +970,7 @@ def _topology(points, surfaces=None, sink=None, health="ok",
         '<div class="topology">'
         f'<div class="{head_cls}">{escape(head)}</div>'
         f'<div class="tpx-wrap"><svg class="tpx" viewBox="0 0 {width} {height}" '
+        f'style="max-width:{width}px" '
         f'role="img" aria-label="{escape(head)}">'
         f'<defs>{"".join(defs)}</defs>'
         f'{"".join(wires)}{out_svg}{core}{"".join(nodes)}{"".join(pulses)}'
@@ -896,6 +1009,38 @@ def render(summary: Summary, window: str = "7d", store_desc: dict | None = None,
                    orgs, selected, viewer, banners, branding, window=window)
 
 
+def _surface_strip(surfaces, link, empty_store: bool = False,
+                   recorded: frozenset[str] = frozenset()) -> str:
+    """One chip per product surface: its state, in a word and a dot, and
+    when it was last seen. A surface in `recorded`, the surfaces the store
+    has records for, links to them."""
+    rows = [s for s in surfaces or () if s.state != "off"] or list(surfaces or ())
+    late = [s for s in surfaces or () if s.state == "late"]
+    if empty_store:
+        head = ('<p class="status status-warn">The store has no partitions &mdash; '
+                "check the store path</p>")
+    elif late:
+        head = ('<p class="status status-warn">Late: '
+                + escape(", ".join(s.label for s in late)) + "</p>")
+    elif rows:
+        head = '<p class="status status-ok">All active surfaces delivering</p>'
+    else:
+        head = '<p class="status status-warn">No traffic recorded yet</p>'
+    chips = "".join(
+        _maybe_link(
+            f'<span class="srf-ic"><svg viewBox="0 0 16 16" aria-hidden="true">'
+            f'<path d="{_ICONS.get(srf.icon, _ICONS["chat"])}"/></svg></span>'
+            f'<span style="min-width:0"><span class="srf-name">{escape(srf.label)}</span>'
+            f'<span class="srf-detail">{escape(srf.detail)}</span></span>',
+            link(surface=srf.surface) if srf.surface in recorded else None,
+            f"srf tpx-{srf.state}")
+        for srf in rows)
+    return (f'<div class="card" style="margin-top:16px"><div class="card-head"><h2>Surfaces</h2>'
+            f"{head}</div>"
+            + (f'<div class="surfaces">{chips}</div>' if chips else "")
+            + "</div>")
+
+
 def _overview_body(summary: Summary, link, *, points, surfaces, sink, empty_store,
                    branding, window, selected) -> str:
     stats = "".join([
@@ -905,13 +1050,14 @@ def _overview_body(summary: Summary, link, *, points, surfaces, sink, empty_stor
                  f"{summary.tool_call_would_deny:,} would deny"
                  if summary.tool_call_checks else ""),
               href=link(source="inference_hook", kind="prompt")
-              if summary.live_requests else None),
+              if summary.live_requests else None, icon="chat"),
         _stat("Sessions audited",
               f"{summary.scanned_sessions + summary.managed_sessions:,}",
               "Compliance API" + (f" &middot; {summary.managed_sessions:,} managed agents"
                                   if summary.managed_sessions else ""),
               href=link(kind="audit")
-              if summary.scanned_sessions + summary.managed_sessions else None),
+              if summary.scanned_sessions + summary.managed_sessions else None,
+              icon="clock"),
         # The can/cannot-block wording sits on the headline tiles rather
         # than in a duplicate tile further down: it is the distinction the
         # two numbers turn on, and it belongs where they are read.
@@ -919,52 +1065,51 @@ def _overview_body(summary: Summary, link, *, points, surfaces, sink, empty_stor
         _stat("Detected in audit", f"{summary.detections:,}",
               f"{summary.detection_rate * 100:.1f}% of scanned sessions "
               "&middot; cannot block",
-              href=link(kind="detected") if summary.detections else None),
+              href=link(kind="detected") if summary.detections else None, icon="search"),
         _stat("Distinct values found", f"{summary.distinct_values:,}",
               f"{summary.total_findings:,} occurrences"
               + (f" &middot; {summary.device_salted_values:,} more from laptops, counted "
                  "once per laptop" if summary.device_salted_values else ""),
-              href=_href("/detectors", _state(window, selected)), go="By detector"),
-        _stat("Round trip p95", f"{summary.latency.get('p95', 0):.0f}<span "
-              f'style="font-size:16px;color:var(--text-dim)"> ms</span>',
+              href=_href("/detectors", _state(window, selected)), go="By detector",
+              icon="hash"),
+        _stat("Round trip p95", f"{summary.latency.get('p95', 0):.0f}<small> ms</small>",
               f"p50 {summary.latency.get('p50', 0):.0f} ms · "
               f"p99 {summary.latency.get('p99', 0):.0f} ms",
-              href=_href("/delivery", _state(window, selected)), go="Delivery"),
+              href=_href("/delivery", _state(window, selected)), go="Delivery",
+              icon="pulse"),
     ])
-    topology = _topology(points or [], surfaces, sink,
-                         core_health(points or []), empty_store=empty_store,
-                         name=branding.name)
     gaps = [r.surface for r in summary.surfaces if not r.inline_coverage]
     coverage = (
         f'<p class="status status-warn">{len(gaps)} surface(s) audit only &mdash; '
-        + ", ".join(_maybe_link(f"<code>{escape(g)}</code>", link(surface=g)) for g in gaps)
+        + ", ".join(_maybe_link(escape(surface_label(g)), link(surface=g)) for g in gaps)
         + "</p>" if gaps else
         '<p class="status status-ok">Inline coverage complete</p>' if summary.surfaces
         else '<p class="status status-warn">No traffic recorded yet</p>')
     return f"""
   <div class="hero">
     <h1>Overview {_mode_badge(summary)}</h1>
-    {topology}
     <div class="stat-row">{stats}</div>
     {_excluded_note(summary)}
+    {_surface_strip(surfaces, link, empty_store,
+                    frozenset(r.surface for r in summary.surfaces))}
   </div>
   <section>
     <div class="card-grid cols-2" style="margin-top:0">
-      <div class="card"><h2>Coverage</h2>{coverage}
-        {charts.hbar([(r.surface, r.requests) for r in summary.surfaces], charts.STEEL,
-                     empty_message="No requests recorded yet")}
-        <a class="see-all" href="{_href('/coverage', _state(window, selected))}">Control
-          points by surface &rarr;</a></div>
-      <div class="card"><h2>Top detectors</h2>
-        {_detector_table(summary, link, limit=5, compact=True)}
-        <a class="see-all" href="{_href('/detectors', _state(window, selected))}">All
-          detectors &rarr;</a></div>
+      <div class="card"><div class="card-head"><h2>Requests by surface</h2>
+        <a href="{_href('/coverage', _state(window, selected))}">Control points &rarr;</a></div>
+        {coverage}
+        {charts.hbar([(surface_label(r.surface), r.requests) for r in summary.surfaces],
+                     charts.STEEL, width=560, label_width=130,
+                     empty_message="No requests recorded yet")}</div>
+      <div class="card"><div class="card-head"><h2>Top detectors</h2>
+        <a href="{_href('/detectors', _state(window, selected))}">All detectors &rarr;</a></div>
+        {_detector_table(summary, link, limit=5, compact=True)}</div>
     </div>
   </section>
   <section>
-    <h2>Per day</h2>
-    <div class="card">{charts.grouped_bars(summary.daily,
-        empty_message="Not enough history yet")}</div>
+    <div class="card"><div class="card-head"><h2>Per day</h2></div>
+      {charts.grouped_bars(summary.daily, width=1180, height=220,
+                           empty_message="Not enough history yet")}</div>
   </section>
 """
 
@@ -1021,12 +1166,17 @@ def _detectors_body(summary: Summary, link, **_) -> str:
 """
 
 
-def _delivery_body(summary: Summary, link, **_) -> str:
+def _delivery_body(summary: Summary, link, *, points, surfaces, sink, empty_store,
+                   branding, **_) -> str:
+    topology = _topology(points or [], surfaces, sink,
+                         core_health(points or []), empty_store=empty_store,
+                         name=branding.name)
     return f"""
   <div class="hero">
     <h1>Delivery</h1>
     <p class="lede">What inspection costs on the request path, and whether each
     reader is still delivering.</p>
+    {topology}
   </div>
   <section>
     {_round_trip_aside(summary)}
@@ -1035,8 +1185,13 @@ def _delivery_body(summary: Summary, link, **_) -> str:
 """
 
 
-def _maybe_link(inner: str, href: str | None) -> str:
-    return f'<a href="{href}">{inner}</a>' if href else inner
+def _maybe_link(inner: str, href: str | None, cls: str = "") -> str:
+    """`inner` in a link to `href`, or in a span when there is none; either
+    carries `cls`."""
+    attr = f' class="{cls}"' if cls else ""
+    if href:
+        return f'<a{attr} href="{href}">{inner}</a>'
+    return f"<span{attr}>{inner}</span>" if cls else inner
 
 
 def _linked(n: int, href: str | None) -> str:
@@ -1055,10 +1210,10 @@ def _surface_table(summary: Summary, link=None) -> str:
         return link(**filters) if link is not None else None
 
     def name(surface):
-        return _maybe_link(f"<code>{escape(surface)}</code>", to(surface=surface))
+        return _maybe_link(escape(surface_label(surface)), to(surface=surface))
 
     rows = "".join(
-        f"<tr><td>{name(r.surface)}</td>"
+        f'<tr><td class="strong">{name(r.surface)}</td>'
         f'<td class="num">'
         f'{_linked(r.live, to(surface=r.surface, source=LIVE, kind="prompt"))}</td>'
         f'<td class="num">{_linked(r.post_hoc, to(surface=r.surface, source=AUDIT))}</td>'
@@ -1172,8 +1327,6 @@ def event_match(surface: str = "", kind: str = ""):
     """The event log's `match` for a surface and a kind; None for neither."""
     if not surface and not kind:
         return None
-    from ..store.query import normalize_surface
-
     return lambda r: ((not surface or normalize_surface(r.surface) == surface)
                       and _of_kind(r, kind))
 
@@ -1229,9 +1382,10 @@ def _org_picker(orgs: dict[str, str], selected: str, path: str,
 
 
 def _favicon(branding: Branding) -> str:
+    """The configured favicon, or the package's neutral one."""
     icon = branding.favicon
     if icon is None:
-        return ""
+        return '<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">\n'
     href = f"/assets/brand/{icon.filename}"
     size = png_size(icon.data) if icon.content_type == "image/png" else None
     sizes = f' sizes="{size[0]}x{size[1]}"' if size else ""
@@ -1239,12 +1393,21 @@ def _favicon(branding: Branding) -> str:
             f'<link rel="apple-touch-icon" href="{href}">\n')
 
 
-def _brand_mark(branding: Branding) -> str:
+def _brand_mark(branding: Branding, home: str = "/") -> str:
+    """The top of the rail: the configured logo, or a neutral glyph."""
     if branding.logo is not None:
-        return (f'<img src="/assets/brand/{branding.logo.filename}" '
+        mark = (f'<img src="/assets/brand/{branding.logo.filename}" '
                 f'alt="{escape(branding.name)}">')
-    return ('<span style="font-family:var(--font-mono);font-size:14px;font-weight:500;'
-            f'letter-spacing:.06em;color:var(--text-primary)">{escape(branding.name)}</span>')
+    else:
+        mark = (f'<svg viewBox="0 0 16 16" role="img" aria-label="{escape(branding.name)}">'
+                f'<path d="{_ICONS["shield"]}"/></svg>')
+    return f'<a class="mark" href="{home}">{mark}</a>'
+
+
+def _product(branding: Branding) -> str:
+    """The product name in the top bar."""
+    return (f'<div class="product"><span>DLP verdicts</span>'
+            f"<b>{escape(branding.name)}</b></div>")
 
 
 def _footer(branding: Branding) -> str:
@@ -1281,7 +1444,8 @@ def _chrome(title: str, path: str, meta: str, backend: str, body: str,
     rail = "".join(
         f'<a href="{_href(href, state)}"'
         f'{" aria-current=page" if href == path else ""}>'
-        f'<svg viewBox="0 0 16 16" aria-hidden="true"><path d="{_ICONS[icon]}"/></svg>'
+        f'<span class="ic"><svg viewBox="0 0 16 16" aria-hidden="true">'
+        f'<path d="{_ICONS[icon]}"/></svg></span>'
         f"{escape(label)}</a>"
         for href, label, icon in NAV
     )
@@ -1301,8 +1465,11 @@ def _chrome(title: str, path: str, meta: str, backend: str, body: str,
         + f"<title>forgd-verdict &mdash; {escape(title)}</title>\n"
         f"<style>{branding.tokens_css}\n{branding.scheme_css}\n{PAGE_CSS}</style></head>\n"
         f'<body data-palette="{escape(palette, quote=True)}">\n'
-        '<header class="top"><div class="bar">\n'
-        f"  {_brand_mark(branding)}\n"
+        '<div class="shell">\n'
+        f'<nav class="rail" aria-label="Pages">{_brand_mark(branding, _href("/", state))}'
+        f"{rail}</nav>\n"
+        '<header class="top">\n'
+        f"  {_product(branding)}\n"
         f"  {ranges}\n"
         f"  {picker}\n"
         # Who the page was built for. Not decoration: with auth in front,
@@ -1314,8 +1481,7 @@ def _chrome(title: str, path: str, meta: str, backend: str, body: str,
         + f"generated {escape(meta)} &middot; store: {escape(backend)}"
         + "</span>\n"
         f'  <nav class="theme" aria-label="Colour theme">{themes}</nav>\n'
-        "</div></header>\n"
-        f'<div class="shell"><nav class="rail" aria-label="Pages">{rail}</nav>\n'
+        "</header>\n"
         f'<main><div class="wrap">{banners}{body}\n'
         + _footer(branding)
         + "</div></main></div></body></html>"
@@ -1357,12 +1523,12 @@ def _would_deny_tile(summary: Summary, link=None) -> str:
              if summary.token_deny_rate is not None else "")
     if summary.deny_rate is None:
         return _stat("Would deny (inline)", "&mdash;",
-                     "no adapter data" + (f" &middot; {token}" if token else ""))
+                     "no adapter data" + (f" &middot; {token}" if token else ""), icon="deny")
     return _stat("Would deny (inline)", f"{summary.adapter_would_deny:,}",
                  f"{summary.deny_rate * 100:.1f}% of live evaluations &middot; can block"
                  + (f" &middot; {token}" if token else ""),
                  href=link(source="inference_hook", kind="prompt", action="deny")
-                 if link is not None and summary.adapter_would_deny else None)
+                 if link is not None and summary.adapter_would_deny else None, icon="deny")
 
 
 def _mode_badge(summary: Summary) -> str:
@@ -1376,8 +1542,10 @@ def _mode_badge(summary: Summary) -> str:
     if not summary.live_requests:
         return ""
     if summary.shadow_frames:
-        return '<span class="mode shadow">shadow &middot; not blocking</span>'
-    return '<span class="mode">enforcing</span>'
+        return '<span class="mode shadow">Shadow &middot; not blocking</span>'
+    return ('<span class="mode enforcing"><svg viewBox="0 0 16 16" aria-hidden="true">'
+            f'<path d="{_ICONS["shield"]}"/><path d="M5.8 8.2l1.6 1.6 3-3.2"/></svg>'
+            "Enforcing</span>")
 
 
 def _reconciliation_aside(recon) -> str:
@@ -1386,21 +1554,25 @@ def _reconciliation_aside(recon) -> str:
     They answer the same question the matrix does -- which control saw
     what -- and the matrix card hugs its table, so there is room.
     """
+    def figure(label: str, value: str, sub: str) -> str:
+        return (f'<div class="figure"><div class="stat-label">{escape(label)}</div>'
+                f'<div class="stat-value">{value}</div><div class="stat-sub">{sub}</div></div>')
+
     return (
         "<section>"
         '<h2>Live vs audit</h2>'
-        '<div class="aside">'
-        + _stat("Code hook decisions", f"{recon.code_hook_decisions:,}",
-                f"{recon.code_hook_denied:,} blocked before running"
-                + (f" · {recon.code_hook_withheld:,} output withheld after"
-                   if recon.code_hook_withheld else ""))
-        + _stat("Values missed live", f"{recon.missed_count:,}",
-                "not seen inline")
-        + _stat("Denials joined",
-                f"{recon.joined_by_request_id + recon.joined_by_reference:,}",
-                f"of {recon.denial_activities:,} activity records"
-                + (f" · {recon.denials_tool_call:,} of tool calls"
-                   if recon.denials_tool_call else ""))
+        '<div class="card figures">'
+        + figure("Code hook decisions", f"{recon.code_hook_decisions:,}",
+                 f"{recon.code_hook_denied:,} blocked before running"
+                 + (f" · {recon.code_hook_withheld:,} output withheld after"
+                    if recon.code_hook_withheld else ""))
+        + figure("Values missed live", f"{recon.missed_count:,}",
+                 "not seen inline")
+        + figure("Denials joined",
+                 f"{recon.joined_by_request_id + recon.joined_by_reference:,}",
+                 f"of {recon.denial_activities:,} activity records"
+                 + (f" · {recon.denials_tool_call:,} of tool calls"
+                    if recon.denials_tool_call else ""))
         + _recon_note(recon)
         + "</div></section>"
     )
@@ -1496,7 +1668,7 @@ def _coverage_matrix(summary: Summary, aside: str = "", trailing: str = "",
 
     gaps = [r.surface for r in summary.surfaces if not r.inline_coverage]
     if gaps:
-        names = ", ".join(f"<code>{escape(g)}</code>" for g in gaps)
+        names = ", ".join(escape(surface_label(g)) for g in gaps)
         callout = (
             f'<p class="status status-warn">{len(gaps)} surface(s) '
             f"audit only &mdash; {names}</p>"
@@ -1531,15 +1703,16 @@ def _coverage_matrix(summary: Summary, aside: str = "", trailing: str = "",
             ("Detects after inference", len(cols) - blocking),
         ],
         href=cell_href if link is not None else None,
+        row_label=surface_label,
     )
     return (
         f'  <div class="section-row{"" if trailing else " pair"}">\n'
         "    <section>\n"
         "      <h2>Control points</h2>\n"
-        '      <p class="unit">Records per surface and control. Select a count to see '
+        '      <div class="card fit" style="overflow-x:auto">\n'
+        '        <p class="unit">Records per surface and control. Select a count to see '
         "them.</p>\n"
-        f"      {callout}\n"
-        f'      <div class="card fit" style="overflow-x:auto">{table}</div>\n'
+        f"        {callout}{table}</div>\n"
         "    </section>\n"
         f"    {aside}\n"
         f"    {trailing}\n"
@@ -1657,14 +1830,15 @@ def render_events(records, source: str = "all", action: str = "all",
                  detector: str = "", paged: bool = False,
                  show_allows: bool = False, older_label: str = "",
                  approximate: str | None = None, surface: str = "",
-                 kind: str = "") -> str:
+                 kind: str = "", open_id: str = "", cursor: str = "") -> str:
     """One row per evaluated request. `older` is the cursor for the next
     page when the window holds older events than this one shows, and
     `older_label` where this page reads back to, `approximate` the day
     whose rows on this page are in storage order rather than time order,
     `paged`
-    whether this is a later page, and `show_allows` whether the Code hook's
-    allow rows are shown.
+    whether this is a later page, `show_allows` whether the Code hook's
+    allow rows are shown, `open_id` the id of the records on this page
+    shown in a panel beside the log, and `cursor` this page's own `before`.
 
     The overview answers "how much". This answers "what happened at 20:44".
     Findings appear as detector pills. A matched value appears only sealed,
@@ -1687,6 +1861,10 @@ def render_events(records, source: str = "all", action: str = "all",
         return escape("/events?" + urlencode(query), quote=True)
 
     rows = []
+    opened = []
+    # The panel opens every record on the page carrying `open_id` as any of
+    # its ids, unless the org screen rewrites that id.
+    open_ready = bool(open_id) and (id_screen is None or id_screen(open_id) == open_id)
     for r in records[:limit]:
         # Each control reports in its own terms. An inline control allowed or
         # blocked; a post-hoc scan found something or did not. One shared
@@ -1725,16 +1903,21 @@ def render_events(records, source: str = "all", action: str = "all",
         raw = r.request_id or r.session_id or r.reference_id or ""
         shown = id_screen(raw) if id_screen is not None else raw
         corr = escape(_correlation(shown))
+        selected_row = ""
         if raw and shown == raw and RECORD_ID.fullmatch(raw):
             # A screened id is not linked: the link would carry it.
-            corr = (f'<a href="{_href("/events/detail", {**_state(window, selected), "id": raw})}"'
-                    f' title="Open this record">{corr}</a>')
+            corr = (f'<a href="{events_href(open=raw, before=cursor or None)}" '
+                    f'title="Open this record">{corr}</a>')
+        if open_ready and open_id in (r.request_id, r.session_id, r.reference_id):
+            opened.append(r)
+            selected_row = " aria-selected=true"
         if exclude_form is not None and r.request_id and r.findings and shown == raw:
             corr += exclude_form(r.request_id)
         rows.append(
-            f'<tr><td class="ts">{ts}</td>'
-            f"<td><code>{escape(_source_label(r.source))}</code></td>"
-            f"<td><code>{escape(r.surface or '-')}</code>"
+            f'<tr{selected_row}><td class="ts">{ts}</td>'
+            f"<td>{escape(_source_label(r.source))}</td>"
+            f'<td class="strong">'
+            f'{escape(surface_label(normalize_surface(r.surface)) if r.surface else "-")}'
             f"{_writer_cell(r, deny_form, events_href)}</td>"
             f'<td class="num">{_bytes_cell(r.body_bytes)}</td>'
             f'<td class="num">{msgs}</td>'
@@ -1822,6 +2005,16 @@ def render_events(records, source: str = "all", action: str = "all",
            if narrowed else "")
     )
 
+    log = f'<div class="card" style="overflow-x:auto">{table}</div>{nav}'
+    if opened:
+        here = "/events?" + urlencode(
+            {k: v for k, v in {**state, "before": cursor or None, "open": open_id}.items()
+             if v is not None})
+        sheet = _record_sheet(
+            opened, open_id, id_screen, events_href(before=cursor or None),
+            _href("/events/detail", {**_state(window, selected), "id": open_id,
+                                     "back": here}))
+        log = f'<div class="with-sheet open"><div>{log}</div>{sheet}</div>'
     body = (
         '\n  <div class="hero">\n'
         "    <h1>Events</h1>\n"
@@ -1831,7 +2024,7 @@ def render_events(records, source: str = "all", action: str = "all",
         f"    {controls}\n"
         f"    {box}\n"
         "  </div>\n"
-        f'  <section><div class="card" style="overflow-x:auto">{table}</div>{nav}</section>\n'
+        f"  <section>{log}</section>\n"
     )
     return _chrome("events", "/events", generated_at, backend, body,
                    orgs, selected, viewer, banners, branding, window=window or "7d")
@@ -1841,11 +2034,8 @@ def _when(ts: str | None) -> str:
     return escape((ts or "").replace("T", " ").rstrip("Z")) or "&mdash;"
 
 
-def _record_card(r, id_screen=None) -> str:
-    """One record: what the control saw and decided, and every finding with
-    its detector, position and value hash."""
-    from ..core import DESCRIPTIONS
-
+def _record_facts(r, id_screen=None) -> str:
+    """A record's facts as a `dl.kv`: what the control saw and decided."""
     def screened(value):
         if not value:
             return "&mdash;"
@@ -1860,7 +2050,7 @@ def _record_card(r, id_screen=None) -> str:
         ("Observed", _when(r.observed_at)),
         ("Session updated", _when(r.session_updated_at)) if r.session_updated_at else None,
         ("Control", escape(_source_label(r.source))),
-        ("Surface", f"<code>{escape(r.surface or '-')}</code>"),
+        ("Surface", escape(surface_label(normalize_surface(r.surface)) if r.surface else "-")),
         ("Verdict", f'<span class="act">{escape(r.disposition)}</span>{shadow}'),
         ("Event", escape(r.event)) if r.event else None,
         ("Request id", screened(r.request_id)),
@@ -1879,7 +2069,16 @@ def _record_card(r, id_screen=None) -> str:
         ("Deleted", _when(r.deleted_at)) if r.deleted_at else None,
         ("Build", f"<code>{escape(r.build)}</code>") if r.build else None,
     ]
-    kv = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in filter(None, facts))
+    return ('<dl class="kv">'
+            + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in filter(None, facts))
+            + "</dl>")
+
+
+def _record_card(r, id_screen=None) -> str:
+    """One record: its facts, and every finding with its detector, position
+    and value hash."""
+    from ..core import DESCRIPTIONS
+
     if r.findings:
         rows = "".join(
             f"<tr><td><code>{escape(f.detector)}</code>"
@@ -1901,7 +2100,52 @@ def _record_card(r, id_screen=None) -> str:
         findings = '<p class="status status-ok">No findings</p>'
     return (f'<div class="card-grid wide-first" style="margin-top:16px">'
             f'<div class="card"><h2>Findings</h2>{findings}</div>'
-            f'<div class="card"><h2>Record</h2><dl class="kv">{kv}</dl></div></div>')
+            f'<div class="card"><h2>Record</h2>{_record_facts(r, id_screen)}</div></div>')
+
+
+def _record_sheet(rs, record_id: str, id_screen, close_href: str, full_href: str) -> str:
+    """The records `rs`, which carry `record_id`, in a panel beside the event
+    log: each one's verdict, findings and facts, and a link to the record
+    page."""
+    from ..core import DESCRIPTIONS
+
+    def findings(r) -> str:
+        if not r.findings:
+            return '<p class="status status-ok" style="margin:0">No findings</p>'
+        return "".join(
+            '<div class="finding"><div class="row">'
+            f"<code class=\"id\">{escape(f.detector)}</code>"
+            f'<span class="pill {"block" if f.severity == "block" else "warn"}">'
+            f"{escape(f.severity)}</span></div>"
+            + (f'<span class="det-what">{escape(DESCRIPTIONS[f.detector])}</span>'
+               if f.detector in DESCRIPTIONS else "")
+            + f'<span class="det-what">at <code class="id">{escape(f.locator)}</code>'
+            + (f" &middot; tool {escape(f.tool_name)}" if f.tool_name else "")
+            + f' &middot; hash <span title="{escape(f.excerpt_hash, quote=True)}">'
+            f"{escape(f.excerpt_hash[:12])}</span></span>"
+            + _sealed_commands([f])
+            + "</div>"
+            for f in r.findings)
+
+    shown = id_screen(record_id) if id_screen is not None else record_id
+    parts = []
+    for r in rs:
+        shadow = (f' <span class="act shadow">(shadow: decided {escape(r.shadow_action)})</span>'
+                  if r.shadow_action and r.shadow_action != r.action else "")
+        parts.append(
+            f'<div class="sheet-sec"><h3>{escape(_source_label(r.source))} &middot; '
+            f"{_when(r.observed_at)}</h3>"
+            f'<p style="margin:0 0 8px"><span class="act">{escape(r.disposition)}</span>'
+            f"{shadow}</p>{findings(r)}</div>"
+            f'<div class="sheet-sec"><h3>Record</h3>{_record_facts(r, id_screen)}</div>')
+    return (
+        '<aside class="card sheet" aria-label="Record">'
+        '<div class="sheet-head"><div><div class="eyebrow">Record</div>'
+        f"<h2><code class=\"id\">{escape(_correlation(shown))}</code></h2></div>"
+        f'<a class="close" href="{close_href}" aria-label="Close">&times;</a></div>'
+        + "".join(parts)
+        + f'<div class="sheet-sec"><a href="{full_href}">Every control that saw this '
+        "record &rarr;</a></div></aside>")
 
 
 def render_event_detail(records, record_id: str, window: str = "7d",
@@ -1909,13 +2153,16 @@ def render_event_detail(records, record_id: str, window: str = "7d",
                         orgs: dict[str, str] | None = None, selected: str = "",
                         viewer: str = "", banners: str = "", id_screen=None,
                         branding: Branding | None = None, more: bool = False,
-                        read_to: str = "") -> str:
+                        read_to: str = "", back: str = "") -> str:
     """Every record carrying `record_id` as its request, session or
     reference id in the window, newest first: one request as each control
     saw it. `more` says there are more than `records`; `read_to` is where
-    the read stopped when it did not reach the start of the window."""
+    the read stopped when it did not reach the start of the window. `back`
+    is the event log view the page was opened from, already validated as a
+    path on the dashboard; without it the crumb opens the log in this window
+    and org."""
     backend = str((store_desc or {}).get("backend", "—"))
-    back = _href("/events", _state(window, selected))
+    back = escape(back, quote=True) if back else _href("/events", _state(window, selected))
     shown = id_screen(record_id) if id_screen is not None else record_id
     if records:
         cards = "".join(

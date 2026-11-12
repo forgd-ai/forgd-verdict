@@ -22,6 +22,10 @@ from forgd_verdict.store.base import (
 )
 
 ORG_A, ORG_B = "org_aaaaaaaaaa", "org_bbbbbbbbbb"
+# A linked headline tile: its href, label and value.
+TILE = (r'<a class="stat-card" href="(/events[^"]+)"><div class="stat-label">'
+        r'(?:<svg[^>]*><path[^>]*/></svg>)?([^<]+)<span class="stat-go">[^<]*</span></div>'
+        r'<div class="stat-value">([\d,]+)</div>')
 
 
 def _rec(n: int, *, source=SOURCE_INFERENCE_HOOK, surface="claude-ai", action="allow",
@@ -113,8 +117,7 @@ async def test_a_session_scanned_twice_is_one_count_and_two_rows_and_the_log_say
     ])
     client = ASGIClient(Dashboard(store))
     _, html = await client.get("/?window=all")
-    href = re.search(r'<a class="stat-card" href="([^"]+)"><div class="stat-label">'
-                     r"Sessions audited", html).group(1)
+    href = next(h for h, label, _ in re.findall(TILE, html) if label == "Sessions audited")
     _, page = await client.get(unescape(href))
     assert _ids(page) == ["clls_x", "clls_x"]
     assert "counts once on the summary pages" in page
@@ -125,8 +128,7 @@ async def test_a_session_scanned_twice_is_one_count_and_two_rows_and_the_log_say
 async def test_the_headline_tiles_open_exactly_the_records_they_count(tmp_path):
     client = ASGIClient(Dashboard(_store(tmp_path, _counted(0))))
     _, html = await client.get("/?window=all")
-    tiles = re.findall(r'<a class="stat-card" href="(/events[^"]+)"><div class="stat-label">'
-                       r'([^<]+)</div><div class="stat-value">([\d,]+)</div>', html)
+    tiles = re.findall(TILE, html)
     assert {label for _, label, _ in tiles} == {
         "Prompts evaluated live", "Sessions audited", "Would deny (inline)",
         "Detected in audit"}
@@ -137,9 +139,7 @@ async def test_the_headline_tiles_open_exactly_the_records_they_count(tmp_path):
 
 async def test_a_tile_with_nothing_to_count_has_no_link(tmp_path):
     _, html = await ASGIClient(Dashboard(_store(tmp_path, [_rec(1)]))).get("/?window=all")
-    labels = re.findall(r'<a class="stat-card" href="/events[^"]+"><div class="stat-label">'
-                        r"([^<]+)</div>", html)
-    assert labels == ["Prompts evaluated live"]
+    assert [label for _, label, _ in re.findall(TILE, html)] == ["Prompts evaluated live"]
 
 
 async def test_a_value_the_log_would_drop_is_not_linked(tmp_path):
@@ -153,7 +153,9 @@ async def test_a_value_the_log_would_drop_is_not_linked(tmp_path):
     assert "custom:has space" in detectors and "has+space" not in detectors
     _, log = await client.get("/events?window=all")
     # A record known only by its reference id still opens.
-    assert "/events/detail?window=all&amp;id=fv_ref_only" in log
+    assert "/events?window=all&amp;open=fv_ref_only" in log
+    _, sheet = await client.get("/events?window=all&open=fv_ref_only")
+    assert "/events/detail?window=all&amp;id=fv_ref_only" in sheet
 
 
 async def test_the_surface_filter_narrows_and_a_hostile_value_is_dropped(tmp_path):
@@ -177,8 +179,11 @@ async def test_the_record_page_finds_every_record_carrying_the_id(tmp_path):
     ])
     client = ASGIClient(Dashboard(store))
     _, log = await client.get("/events?window=all")
-    href = re.search(r'href="(/events/detail\?[^"]+)"[^>]*>req00001<', log).group(1)
-    assert _query(href) == {"window": "all", "id": "req00001"}
+    opened = re.search(r'href="(/events\?[^"]+)"[^>]*>req00001<', log).group(1)
+    _, sheet = await client.get(unescape(opened))
+    href = re.search(r'href="(/events/detail\?[^"]+)">Every control', sheet).group(1)
+    assert _query(href) == {"window": "all", "id": "req00001",
+                            "back": "/events?window=all&open=req00001"}
     status, html = await client.get(unescape(href))
     assert status == 200
     assert "1 record(s) carry this id" in html
@@ -215,12 +220,65 @@ async def test_the_record_page_reads_only_the_viewers_orgs(tmp_path):
     assert "No record with this id" in other and "req00002</code></h1>" in other
 
 
+async def test_a_record_opens_beside_the_log(tmp_path):
+    store = _store(tmp_path, [_rec(1, action="deny", detector="regex:aws-access-key"),
+                              _rec(2)])
+    client = ASGIClient(Dashboard(store))
+    _, html = await client.get("/events?window=all&open=req00001")
+    sheet = html.split('<aside class="card sheet"', 1)[1]
+    assert "regex:aws-access-key" in sheet and "req00002" not in sheet
+    assert html.split("</style>", 1)[1].count("<tr aria-selected=true>") == 1
+    assert 'href="/events?window=all" aria-label="Close"' in sheet
+    _, plain = await client.get("/events?window=all")
+    assert "sheet" not in plain.split("</style>", 1)[1]
+
+
+async def test_the_panel_opens_every_record_on_the_page_carrying_the_id(tmp_path):
+    store = _store(tmp_path, [_rec(1, request=False, reference="fv_ref_1"),
+                              _rec(2, reference="fv_ref_1"), _rec(3)])
+    _, html = await ASGIClient(Dashboard(store)).get("/events?window=all&open=fv_ref_1")
+    body = html.split("</style>", 1)[1]
+    assert body.count("<tr aria-selected=true>") == 2
+    sheet = body.split('<aside class="card sheet"', 1)[1]
+    assert "req00002" in sheet and "req00003" not in sheet
+
+
+async def test_the_record_page_leads_back_to_the_view_it_was_opened_from(tmp_path):
+    client = ASGIClient(Dashboard(_store(tmp_path, [_rec(1, surface="claude-ai")])))
+    _, html = await client.get("/events?window=all&surface=claude-ai&open=req00001")
+    href = re.search(r'href="(/events/detail\?[^"]+)">Every control', html).group(1)
+    _, detail = await client.get(unescape(href))
+    back = re.search(r'<div class="crumbs"><a href="([^"]+)">Events', detail).group(1)
+    assert _query(unescape(back)) == {"window": "all", "surface": "claude-ai",
+                                      "open": "req00001"}
+    for hostile in ("//evil.example/events", "/policy?x=1", "https://evil.example/events",
+                    '/events?"><h1>x</h1>'):
+        _, detail = await client.get(f"/events/detail?window=all&id=req00001&back={quote(hostile)}")
+        assert re.search(r'<div class="crumbs"><a href="/events\?window=all">Events', detail)
+
+
+async def test_an_open_id_not_on_the_page_or_malformed_opens_nothing(tmp_path):
+    client = ASGIClient(Dashboard(_store(tmp_path, [_rec(1)])))
+    for value in ("req09999", quote('x"><h1>injected</h1>')):
+        status, html = await client.get(f"/events?window=all&open={value}")
+        body = html.split("</style>", 1)[1]
+        assert status == 200 and "<aside" not in body and "injected" not in body
+
+
+def test_a_screened_id_opens_no_panel():
+    def screen(value):
+        return "[withheld]" if value == "req00002" else value
+
+    html = render_events([_rec(2)], id_screen=screen, window="all", open_id="req00002")
+    assert "<aside" not in html.split("</style>", 1)[1] and "req00002" not in html
+
+
 def test_a_screened_id_is_not_linked():
     def screen(value):
         return "[withheld]" if value == "req00002" else value
 
     html = render_events([_rec(1), _rec(2)], id_screen=screen, window="all")
-    assert "/events/detail?window=all&amp;id=req00001" in html
+    assert "/events?window=all&amp;open=req00001" in html
     assert "req00002" not in html
 
 

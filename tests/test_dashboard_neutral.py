@@ -3,6 +3,7 @@ only when they are configured."""
 
 from __future__ import annotations
 
+import base64
 import re
 import subprocess
 from pathlib import Path
@@ -91,10 +92,11 @@ async def test_unbranded_pages_carry_no_logo_favicon_footer_or_marker(neutral):
     for name, text in neutral.items():
         assert "<@" not in text, name
         if name.endswith(".html"):
-            assert "<img " not in text and 'rel="icon"' not in text, name
+            assert "<img " not in text, name
+            assert '<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">' in text, name
             assert "<footer>" not in text, name
             assert "/assets/brand/" not in text, name
-            assert ">verdict</span>" in text, name
+            assert "<b>verdict</b>" in text, name
 
 
 def test_no_brand_files_ship_in_the_package():
@@ -172,3 +174,15 @@ async def test_rendered_data_cannot_carry_a_colour_marker(tmp_path):
         request_id="<@--bg-card@>", surface="<@--warn-text@>", action="allow")])
     html = Dashboard(store)._events("all")
     assert "&lt;@--bg-card@&gt;" in html and "&lt;@--warn-text@&gt;" in html
+
+
+async def test_the_neutral_favicon_is_served_and_a_configured_one_replaces_it(tmp_path):
+    store = LocalFileStore(tmp_path / "s", instance="t")
+    status, ctype, body = await _get_typed(Dashboard(store), "/assets/favicon.svg")
+    assert status == 200 and ctype.startswith("image/svg+xml") and body.startswith(b"<svg")
+    from forgd_verdict.dashboard import render
+
+    branded = Branding.from_policy(
+        {"favicon": "data:image/png;base64," + base64.b64encode(PNG).decode()})
+    page = render._chrome("t", "/", "", "", "", branding=branded)
+    assert "/assets/favicon.svg" not in page and f"/assets/brand/{branded.favicon.filename}" in page

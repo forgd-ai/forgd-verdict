@@ -195,7 +195,7 @@ def _render(sink=None, now=WORKDAY):
         _row("claude-for-m365", SOURCE_OTEL_COLLECT, "2026-09-21T09:00:00Z", n=240),
     ]
     s = Summary(surfaces=rows, generated_at="2026-09-21T15:00:00Z")
-    return render(s, surfaces=surface_states(s, ALL_ON, now=now), sink=sink)
+    return render(s, surfaces=surface_states(s, ALL_ON, now=now), sink=sink, page="delivery")
 
 
 def test_the_outbound_arm_appears_only_when_a_sink_is_configured():
@@ -267,7 +267,7 @@ def test_the_mobile_rules_are_still_there():
     from forgd_verdict.dashboard.render import PAGE_CSS
 
     block = PAGE_CSS.split("@media(max-width:720px){")[1].split("\n}")[0]
-    for rule in ("header.top{position:static}", "flex-wrap:wrap",
+    for rule in ("header.top{position:static;flex-wrap:wrap", "flex-wrap:wrap",
                  "table.log td.ts{white-space:normal}"):
         assert rule in block, f"mobile rule lost: {rule}"
 
@@ -475,7 +475,7 @@ def test_a_periodic_feed_is_drawn_differently_from_a_stream():
                    last_seen_by_source={SOURCE_COMPLIANCE_SCAN: "2026-09-21T12:00:00Z"}),
     ]
     s = Summary(surfaces=rows, generated_at="2026-09-21T15:00:00Z")
-    html = render(s, surfaces=surface_states(s, ALL_ON, now=WORKDAY))
+    html = render(s, surfaces=surface_states(s, ALL_ON, now=WORKDAY), page="delivery")
     assert "tpx-periodic" in html
     # And its pulse is slower than any live feed's.
     durs = sorted(float(d) for d in re.findall(r"--tpx-dur:([\d.]+)s", html))
