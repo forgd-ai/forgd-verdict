@@ -444,6 +444,9 @@ class Dashboard:
                 kind = ""
             before = EventCursor.decode(_query_param(qs, "before", ""))
             show_allows = _query_param(qs, "code_hook_allows", "") == "show"
+            open_id = _query_param(qs, "open", "")
+            if not render.RECORD_ID.fullmatch(open_id):
+                open_id = ""
             await self._html(
                 send,
                 self._events(
@@ -460,6 +463,7 @@ class Dashboard:
                     show_allows=show_allows,
                     surface=surface,
                     kind=kind,
+                    open_id=open_id,
                 ),
                 headers,
             )
@@ -641,7 +645,8 @@ class Dashboard:
                 view: ViewScope | None = None, viewer: str = "",
                 principal=None, *, client: str = "", device: str = "",
                 detector: str = "", before: EventCursor | None = None,
-                show_allows: bool = False, surface: str = "", kind: str = "") -> str:
+                show_allows: bool = False, surface: str = "", kind: str = "",
+                open_id: str = "") -> str:
         view = view or ViewScope(None, None, "all")
         scoped = view.scoped
         """Newest-first event list, filtered by control point and verdict.
@@ -689,6 +694,8 @@ class Dashboard:
             branding=self.branding,
             surface=surface,
             kind=kind,
+            open_id=open_id,
+            cursor=before.encode() if before is not None else "",
         )
 
     def _event_detail(self, window: str, record_id: str,

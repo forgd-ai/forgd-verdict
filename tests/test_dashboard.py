@@ -84,7 +84,7 @@ async def test_page_renders_with_data(tmp_path):
     assert "claude-code" in html
     assert "regex:aws-access-key" in html
     _, coverage = await client.get("/coverage?window=all")
-    assert len(re.findall(r"<td><a href=\"[^\"]+\"><code>claude-[a-z]+</code></a></td>",
+    assert len(re.findall(r'<td class="strong"><a href="[^"]+">(?:claude\.ai|Claude Code)</a></td>',
                           coverage)) == 2
 
 
@@ -1085,8 +1085,7 @@ def test_the_header_stops_being_one_fixed_row_on_a_phone():
     from forgd_verdict.dashboard.render import PAGE_CSS
 
     mobile = PAGE_CSS.split("@media(max-width:720px){")[1]
-    assert "header.top .bar{flex-wrap:wrap" in mobile, mobile[:400]
-    assert "header.top{position:static}" in mobile, mobile[:400]
+    assert "header.top{position:static;flex-wrap:wrap" in mobile, mobile[:400]
 
 
 def test_a_heading_carrying_a_path_can_break():

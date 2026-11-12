@@ -240,7 +240,7 @@ def test_a_long_name_is_shown_in_full_except_in_the_topology_core():
     assert ('class="tpx-core-t"><title>Acme Corporation &amp; Partners Ltd.</title>'
             "Acme Corpor…</text>") in svg
     page = render.render(Summary(generated_at="2026-09-20T12:00:00Z"), branding=branding)
-    assert ">Acme Corporation &amp; Partners Ltd.</span>" in page
+    assert "<b>Acme Corporation &amp; Partners Ltd.</b></div>" in page
     assert "<footer><b>Acme Corporation &amp; Partners Ltd.</b>" in page
     short = render._topology([], [surface], name="Acme Corp 12")
     assert 'class="tpx-core-t">Acme Corp 12</text>' in short and "<title>" not in short
@@ -334,3 +334,24 @@ def test_the_image_summary_reads_past_a_short_read(tmp_path, monkeypatch):
     monkeypatch.setattr(policy_mod.os, "read", lambda fd, n: real(fd, min(n, 7)))
     assert policy_mod.image_summary(str(logo)) == \
         f"<image/png, {len(PNG) + 4000:,} bytes, mounted file>"
+
+
+def test_the_logo_heads_the_rail():
+    from forgd_verdict.dashboard import render
+    from forgd_verdict.store.query import Summary
+
+    branded = Branding.from_policy({"name": "Acme", "logo": _uri("image/png", PNG)})
+    page = render.render(Summary(generated_at="2026-09-20T12:00:00Z"), branding=branded)
+    rail = page.split('<nav class="rail"', 1)[1].split("</nav>", 1)[0]
+    assert f'<img src="/assets/brand/{branded.logo.filename}" alt="Acme">' in rail
+    plain = render.render(Summary(generated_at="2026-09-20T12:00:00Z"))
+    rail = plain.split('<nav class="rail"', 1)[1].split("</nav>", 1)[0]
+    assert "<img " not in rail and 'aria-label="verdict"' in rail
+
+
+def test_a_themed_rail_keeps_its_colour_in_the_light_scheme():
+    themed = Branding.from_policy({"mode": "auto", "theme": {"--rail-bg": "#F4F1EA",
+                                                             "--bg-card": "#0C1F3A"}})
+    light = themed.scheme_css.split(":root[data-theme=light]", 1)[1]
+    assert "--rail-bg" not in light
+    assert "--rail-bg:#F4F1EA;" in themed.scheme_css

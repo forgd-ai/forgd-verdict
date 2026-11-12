@@ -94,7 +94,7 @@ async def test_unbranded_pages_carry_no_logo_favicon_footer_or_marker(neutral):
             assert "<img " not in text and 'rel="icon"' not in text, name
             assert "<footer>" not in text, name
             assert "/assets/brand/" not in text, name
-            assert ">verdict</span>" in text, name
+            assert "<b>verdict</b>" in text, name
 
 
 def test_no_brand_files_ship_in_the_package():

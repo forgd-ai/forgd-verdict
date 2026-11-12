@@ -141,7 +141,7 @@ def hbar(
     parts = [
         f'<svg viewBox="0 0 {width} {height}" width="100%" '
         f'preserveAspectRatio="xMinYMin meet" role="img" class="chart" '
-        f'style="height:auto;max-height:{height}px">'
+        f'style="height:auto;max-width:{width}px">'
     ]
     for i, (label, value) in enumerate(rows):
         y = i * (BAR_THICKNESS + BAR_GAP) + 4
@@ -198,8 +198,8 @@ def grouped_bars(
     """Two series over time.
 
     The only two-series view here, so it gets the validated warm/cool pair.
-    A legend is always rendered (identity is never colour-alone) and both
-    series are direct-labelled at their final value.
+    A legend is always rendered (identity is never colour-alone), with each
+    series' total.
 
     Grouped bars rather than lines: with a handful of days a line implies a
     continuity the data does not have. Per-bar <title> gives native hover.
@@ -208,18 +208,18 @@ def grouped_bars(
     if not days:
         return empty(empty_message, height=height)
 
-    pad_l, pad_r, pad_t, pad_b = 44, 56, 12, 28
+    pad_l, pad_r, pad_t, pad_b = 44, 12, 12, 28
     plot_w = width - pad_l - pad_r
     plot_h = height - pad_t - pad_b
     raw_top = max((max(a, b) for _, a, b in days), default=0) or 1
     top = _nice_ceiling(raw_top)
 
     slot = plot_w / len(days)
-    bar_w = min(16.0, max(4.0, (slot - 10) / 2))
+    bar_w = min(22.0, max(4.0, (slot - 10) / 2))
     parts = [
         f'<svg viewBox="0 0 {width} {height}" width="100%" '
         f'preserveAspectRatio="xMinYMin meet" role="img" class="chart" '
-        f'style="height:auto;max-height:{height}px">'
+        f'style="height:auto;max-width:{width}px">'
     ]
     # Recessive gridlines with axis values; no chart junk.
     for frac in (0, 0.5, 1.0):
@@ -250,20 +250,15 @@ def grouped_bars(
                 f'class="c-axis">{escape(day[5:])}</text>'
             )
 
-    # Direct labels on the final values, so the legend is not the only key.
-    last_day, last_a, last_b = days[-1]
-    for value, hue, dy in ((last_a, STEEL, -4), (last_b, TERRACOTTA, 12)):
-        y = pad_t + plot_h - (value / top) * plot_h
-        parts.append(
-            f'<text x="{width - pad_r + 6}" y="{max(pad_t + 8, y + dy):.1f}" '
-            f'class="c-value" style="fill:{hue}">{_fmt(value)}</text>'
-        )
     parts.append("</svg>")
 
+    # The legend carries each series' total over the window.
+    totals = (sum(a for _, a, _ in days), sum(b for _, _, b in days))
     legend = "".join(
         f'<span class="legend-item"><span class="swatch" style="background:{hue}"></span>'
-        f"{escape(label)}</span>"
-        for label, hue in zip(series_labels, (STEEL, TERRACOTTA), strict=True)
+        f"{escape(label)} <b>{_fmt(total)}</b></span>"
+        for label, hue, total in zip(series_labels, (STEEL, TERRACOTTA), totals,
+                                     strict=True)
     )
     return f'{"".join(parts)}<div class="legend">{legend}</div>'
 
@@ -306,6 +301,7 @@ def matrix(
     empty_message: str = "No data yet",
     groups: Sequence[tuple[str, int]] | None = None,
     href: Callable[[str, str], str | None] | None = None,
+    row_label: Callable[[str], str] = str,
 ) -> str:
     """Surfaces x control points.
 
@@ -323,6 +319,7 @@ def matrix(
 
     `href(row, col)` gives a non-zero cell's link, already escaped: the
     records behind its count. A cell it gives None is not linked.
+    `row_label(row)` is the name a row is shown under.
     """
     if not rows:
         return empty(empty_message)
@@ -354,20 +351,20 @@ def matrix(
             if n <= 0:
                 tds.append(
                     f'<td class="mx-cell mx-none{div}" title="'
-                    f'{escape(r)} — not seen by {escape(c)}">&mdash;</td>'
+                    f'{escape(row_label(r))} — not seen by {escape(c)}">&mdash;</td>'
                 )
             else:
                 fill = seq_step(n, top)
-                dark = fill in SEQ[:3]
+                dark = fill in SEQ[:4]
                 ink = "mx-on-dark" if dark else "mx-on-light"
                 target = href(r, c) if href is not None else None
                 value = (f'<a class="mx-link {ink}" href="{target}">{n}</a>'
                          if target else f'<span class="{ink}">{n}</span>')
                 tds.append(
                     f'<td class="mx-cell{div}" style="background:{fill}" '
-                    f'title="{escape(r)} — {escape(c)}: {n}">{value}</td>'
+                    f'title="{escape(row_label(r))} — {escape(c)}: {n}">{value}</td>'
                 )
-        body.append(f'<tr><th class="mx-row">{escape(r)}</th>{"".join(tds)}</tr>')
+        body.append(f'<tr><th class="mx-row">{escape(row_label(r))}</th>{"".join(tds)}</tr>')
     return (
         f'<table class="matrix"><thead>{group_row}<tr><th></th>'
         f'{head}</tr></thead><tbody>{"".join(body)}</tbody></table>'
