@@ -113,6 +113,7 @@ THEME_TOKENS: frozenset[str] = frozenset({
     "--matrix-ink-on-dark", "--matrix-ink-on-light",
     *(f"--chart-ramp-{i}" for i in range(7)),
     "--rail-bg", "--rail-ink", "--rail-muted", "--rail-active",
+    "--enforce-text", "--enforce-bg", "--enforce-edge",
 })
 
 # The rail's colours, the same in both schemes.
@@ -148,6 +149,9 @@ SLOT_DEFAULTS: Mapping[str, str] = MappingProxyType({
     "--rail-ink": "#E9EEF5",
     "--rail-muted": "#8FA0B4",
     "--rail-active": "rgba(96,165,250,.18)",
+    "--enforce-text": "#4ADE80",
+    "--enforce-bg": "rgba(74,222,128,.12)",
+    "--enforce-edge": "rgba(74,222,128,.35)",
 })
 
 # The light scheme: `:root` tokens and slots that differ from the dark set.
@@ -186,6 +190,9 @@ LIGHT_TOKENS: Mapping[str, str] = MappingProxyType({
     "--halo-ok": "#22C55E",
     "--halo-warn": "#F97316",
     "--halo-alert": "#EF4444",
+    "--enforce-text": "#15803D",
+    "--enforce-bg": "rgba(22,163,74,.10)",
+    "--enforce-edge": "rgba(22,163,74,.35)",
     "--matrix-ink-on-dark": "#111827",
     "--matrix-ink-on-light": "#FFFFFF",
     "--chart-ramp-0": "#E3ECFB",

@@ -743,11 +743,11 @@ def test_the_page_states_whether_verdicts_are_being_applied():
     row = SurfaceRow("claude-ai", requests=9, live=9)
     shadow = render(Summary(surfaces=[row], live_requests=9, shadow_frames=3,
                             generated_at="2026-09-18T09:00:00Z"))
-    assert "not blocking" in shadow
+    assert '<span class="mode shadow">Shadow &middot; not blocking</span>' in shadow
 
     live = render(Summary(surfaces=[row], live_requests=9, shadow_frames=0,
                           generated_at="2026-09-18T09:00:00Z"))
-    assert '<span class="mode">enforcing</span>' in live
+    assert re.search(r'<span class="mode enforcing"><svg[^>]*>.*?</svg>Enforcing</span>', live)
     assert "not blocking" not in live
 
     # With no inline traffic there is nothing to claim either way. Check for

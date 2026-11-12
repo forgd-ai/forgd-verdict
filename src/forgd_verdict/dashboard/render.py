@@ -5,8 +5,9 @@ a logo and favicon come from `dashboard.branding`, so the CSP is
 `default-src 'none'` with no third-party origins. See
 `assets/fonts/README.md` for the fonts.
 
-Unbranded, the page is neutral: the name "verdict" as text in the header, no
-favicon, the default token set and no footer. `dashboard.branding` (see
+Unbranded, the page is neutral: the name "verdict" in the header, a plain
+mark atop the rail, the package's neutral favicon, the default token set and
+no footer. `dashboard.branding` (see
 branding.py) sets the name, logo, favicon, footer and colours. Every colour
 outside tokens.css is a `<@--name@>` marker that `Branding.fill` replaces in
 the finished page.
@@ -221,7 +222,15 @@ a.srf:hover{text-decoration:none;border-color:var(--border-strong)}
 .section-row > section:nth-child(2){grid-row:2}
 .section-row > section:nth-child(3){grid-column:2;grid-row:1/span 2}
 .section-row.pair > section:nth-child(2){grid-column:2;grid-row:1}
-.section-row.pair .aside{grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr))}
+/* Matrix and figures side by side: two cards, tops aligned, equal height. */
+.section-row.pair{align-items:stretch}
+.section-row.pair > section{display:flex;flex-direction:column}
+.section-row.pair > section > .card{flex:1}
+.card.figures{display:flex;flex-direction:column;padding:4px 18px}
+.figure{display:flex;flex-direction:column;gap:4px;flex:1;justify-content:center;
+ padding:14px 0;border-bottom:1px solid var(--border-subtle)}
+.figure:last-of-type{border-bottom:0}
+.card.figures .status{margin:0 0 12px}
 /* minmax(0,1fr), never a bare 1fr. `1fr` is `minmax(auto,1fr)`, and that
    `auto` minimum is the item's MIN-CONTENT -- so the fixed-width coverage
    matrix held this track at 629px on a 390px screen and every sibling
@@ -427,10 +436,20 @@ table.matrix tbody tr{height:auto}
 .status-warn{color:<@--warn-text@>}
 .status-warn::before{color:<@--warn-mark@>}
 td .status{margin:0;display:inline-flex}
-.mode{font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;align-self:center;
- border:1px solid var(--border-medium);color:var(--accent-primary);
- font-weight:400;line-height:1;white-space:nowrap}
-.mode.shadow{border-color:var(--border-orange);color:<@--warn-text@>}
+/* Whether the inline controls apply their verdicts: a word and an icon, and
+   a colour for each state. */
+.mode{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+ padding:4px 11px 4px 9px;border-radius:999px;align-self:center;line-height:1.2;
+ white-space:nowrap;border:1px solid var(--border-medium);color:var(--text-secondary)}
+.mode svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;
+ stroke-linecap:round;stroke-linejoin:round}
+.mode.enforcing{color:<@--enforce-text@>;background:<@--enforce-bg@>;
+ border-color:<@--enforce-edge@>}
+.mode.shadow{color:<@--warn-text@>;background:var(--cat-terracotta-bg);
+ border-color:var(--border-orange)}
+.mode.shadow::before{content:"!";display:inline-grid;place-items:center;width:14px;
+ height:14px;border-radius:50%;border:1.6px solid currentColor;font:700 9px/1 var(--font-body);
+ box-sizing:border-box}
 .pill.cov-no{color:<@--warn-text@>;border-color:<@--warn-edge@>}
 table.log{font-size:12px}
 table.log td{padding:7px 9px;vertical-align:middle;white-space:nowrap}
@@ -1363,9 +1382,10 @@ def _org_picker(orgs: dict[str, str], selected: str, path: str,
 
 
 def _favicon(branding: Branding) -> str:
+    """The configured favicon, or the package's neutral one."""
     icon = branding.favicon
     if icon is None:
-        return ""
+        return '<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">\n'
     href = f"/assets/brand/{icon.filename}"
     size = png_size(icon.data) if icon.content_type == "image/png" else None
     sizes = f' sizes="{size[0]}x{size[1]}"' if size else ""
@@ -1522,8 +1542,10 @@ def _mode_badge(summary: Summary) -> str:
     if not summary.live_requests:
         return ""
     if summary.shadow_frames:
-        return '<span class="mode shadow">shadow &middot; not blocking</span>'
-    return '<span class="mode">enforcing</span>'
+        return '<span class="mode shadow">Shadow &middot; not blocking</span>'
+    return ('<span class="mode enforcing"><svg viewBox="0 0 16 16" aria-hidden="true">'
+            f'<path d="{_ICONS["shield"]}"/><path d="M5.8 8.2l1.6 1.6 3-3.2"/></svg>'
+            "Enforcing</span>")
 
 
 def _reconciliation_aside(recon) -> str:
@@ -1532,21 +1554,25 @@ def _reconciliation_aside(recon) -> str:
     They answer the same question the matrix does -- which control saw
     what -- and the matrix card hugs its table, so there is room.
     """
+    def figure(label: str, value: str, sub: str) -> str:
+        return (f'<div class="figure"><div class="stat-label">{escape(label)}</div>'
+                f'<div class="stat-value">{value}</div><div class="stat-sub">{sub}</div></div>')
+
     return (
         "<section>"
         '<h2>Live vs audit</h2>'
-        '<div class="aside">'
-        + _stat("Code hook decisions", f"{recon.code_hook_decisions:,}",
-                f"{recon.code_hook_denied:,} blocked before running"
-                + (f" · {recon.code_hook_withheld:,} output withheld after"
-                   if recon.code_hook_withheld else ""))
-        + _stat("Values missed live", f"{recon.missed_count:,}",
-                "not seen inline")
-        + _stat("Denials joined",
-                f"{recon.joined_by_request_id + recon.joined_by_reference:,}",
-                f"of {recon.denial_activities:,} activity records"
-                + (f" · {recon.denials_tool_call:,} of tool calls"
-                   if recon.denials_tool_call else ""))
+        '<div class="card figures">'
+        + figure("Code hook decisions", f"{recon.code_hook_decisions:,}",
+                 f"{recon.code_hook_denied:,} blocked before running"
+                 + (f" · {recon.code_hook_withheld:,} output withheld after"
+                    if recon.code_hook_withheld else ""))
+        + figure("Values missed live", f"{recon.missed_count:,}",
+                 "not seen inline")
+        + figure("Denials joined",
+                 f"{recon.joined_by_request_id + recon.joined_by_reference:,}",
+                 f"of {recon.denial_activities:,} activity records"
+                 + (f" · {recon.denials_tool_call:,} of tool calls"
+                    if recon.denials_tool_call else ""))
         + _recon_note(recon)
         + "</div></section>"
     )
@@ -1683,10 +1709,10 @@ def _coverage_matrix(summary: Summary, aside: str = "", trailing: str = "",
         f'  <div class="section-row{"" if trailing else " pair"}">\n'
         "    <section>\n"
         "      <h2>Control points</h2>\n"
-        '      <p class="unit">Records per surface and control. Select a count to see '
+        '      <div class="card fit" style="overflow-x:auto">\n'
+        '        <p class="unit">Records per surface and control. Select a count to see '
         "them.</p>\n"
-        f"      {callout}\n"
-        f'      <div class="card fit" style="overflow-x:auto">{table}</div>\n'
+        f"        {callout}{table}</div>\n"
         "    </section>\n"
         f"    {aside}\n"
         f"    {trailing}\n"

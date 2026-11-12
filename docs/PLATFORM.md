@@ -1244,8 +1244,8 @@ each other and from the page background.
 ### Branding
 
 Unconfigured, the dashboard is neutral: the name "verdict" in the header, a
-plain mark at the top of the rail, no favicon, no footer and a neutral
-palette. `dashboard.branding`
+plain mark at the top of the rail, a neutral favicon, no footer and a
+neutral palette. `dashboard.branding`
 in `policy.yaml` sets the rest:
 
 ```yaml
