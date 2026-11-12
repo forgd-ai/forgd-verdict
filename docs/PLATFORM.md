@@ -1205,6 +1205,22 @@ write.
 > header; an auth redirect turns every governed prompt or export into a
 > delivery failure.
 
+The pages are Overview, Coverage, Detectors, Delivery, Events and Policy,
+in a rail down the left, with the time window and org picker in the header.
+Each figure that counts records links to the event log filtered to those
+records: a coverage matrix cell to its surface and control, a headline tile
+to its control and verdict, a detector to its findings. Each row of the event
+log links to `/events/detail?id=<id>`, which shows every record in the window
+carrying that request, session or reference id, with each finding's detector,
+severity, position, value hash and, when sealed, its `unseal` command. That
+page reads through the viewer's org scope as the log does. A row whose id the
+org screen rewrites is not linked.
+
+The header's **Auto / Light / Dark** control sets the colour scheme for that
+browser. Auto follows the operating system's setting. The choice is a
+`fv_theme` cookie, set by `/theme`, which redirects back only to a path on the
+dashboard.
+
 The page loads no scripts: the CSP is `default-src 'none'` with no
 `script-src`. `tokens.css` and the webfonts ship in the package, and a logo
 and favicon, when configured, are served by the dashboard itself.
@@ -1230,6 +1246,7 @@ dashboard:
     favicon: /etc/acme/mark.png
     footer: {text: acme.example, link: https://acme.example}
     chart_palette: ["#C75B3A", "#4A7AB5"]   # alert series, primary series
+    mode: auto                          # auto, light or dark
     theme:
       "--bg-card": "#0C1F3A"
       "--warn-text": "#E0A090"
@@ -1238,7 +1255,10 @@ dashboard:
 `theme` takes the colour tokens of `tokens.css` and the colour slots the
 page CSS, admin controls and charts use; `THEME_TOKENS` in
 `dashboard/branding.py` lists them. Values are hex or
-`rgb()`/`rgba()`/`hsl()`/`hsla()` with numeric arguments. Images are checked
+`rgb()`/`rgba()`/`hsl()`/`hsla()` with numeric arguments. `theme` applies
+to the dark scheme. `mode` is the scheme a viewer sees before choosing one:
+`auto` follows their operating system, and is the default without a `theme`;
+with a `theme` and no `mode` it is `dark`. Images are checked
 by their bytes, and an SVG that can run script or load anything is refused.
 The Policy tab and `forgd-verdict policy` show an image as its type and size,
 never its contents.

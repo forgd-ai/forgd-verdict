@@ -39,7 +39,7 @@ def test_unset_is_neutral():
     for neutral in (Branding.from_policy(None), Branding()):
         assert neutral.name == "verdict"
         assert neutral.logo is None and neutral.favicon is None
-        assert neutral.mode == "dark" and dict(neutral.theme) == {}
+        assert neutral.mode == "auto" and dict(neutral.theme) == {}
         assert neutral.footer is None and neutral.chart_palette is None
     assert "forgd" not in Branding().name.lower()
 
@@ -97,7 +97,7 @@ def test_every_field_parses(tmp_path):
      "dashboard.branding.footer.link"),
     ({"footer": {"link": "https://x"}}, "dashboard.branding.footer.text"),
     ({"footer": "Acme"}, "dashboard.branding.footer"),
-    ({"mode": "light"}, "dashboard.branding.mode"),
+    ({"mode": "sepia"}, "dashboard.branding.mode"),
     ({"name": ""}, "dashboard.branding.name"),
     ({"name": "a\nb"}, "dashboard.branding.name"),
     ({"name": "x" * 33}, "dashboard.branding.name"),

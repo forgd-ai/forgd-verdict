@@ -4,8 +4,10 @@ No JS charting library and no build step: the dashboard is one Python
 container serving server-rendered HTML, so charts are SVG emitted directly.
 
 Colours come from the dashboard's branding (see branding.py): every colour
-here is a `<@--name@>` marker that `Branding.fill` replaces when the page is
-rendered. There are two series colours, `--chart-alert` and `--chart-primary`,
+here is a `<@--name@>` marker that `Branding.fill` replaces with a `var()`
+when the page is rendered. A `var()` resolves in a `style` declaration and
+not in an SVG presentation attribute, so colours are set through `style`.
+There are two series colours, `--chart-alert` and `--chart-primary`,
 from `dashboard.branding.chart_palette` or else the `--cat-terracotta` and
 `--cat-steel` tokens, and a seven-step sequential ramp, `--chart-ramp-0` to
 `--chart-ramp-6`, dark to light.
@@ -22,7 +24,7 @@ every mark, and a native per-mark hover tooltip via <title>.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from html import escape
 
 from .branding import marker
@@ -152,12 +154,12 @@ def hbar(
         # Track: shows the category exists even at a zero value.
         parts.append(
             f'<rect x="{label_width}" y="{y}" width="{plot_w}" height="{BAR_THICKNESS}" '
-            f'rx="{RADIUS}" fill="{GRID}" opacity="0.35"/>'
+            f'rx="{RADIUS}" style="fill:{GRID}" opacity="0.35"/>'
         )
         if w > 0:
             fill = hue if isinstance(hue, str) else hue.get(str(label), STEEL)
             parts.append(
-                f'<path d="{_hbar_path(label_width, y, w, BAR_THICKNESS)}" fill="{fill}">'
+                f'<path d="{_hbar_path(label_width, y, w, BAR_THICKNESS)}" style="fill:{fill}">'
                 f"<title>{escape(str(label))}: {escape(shown)}</title></path>"
             )
         note = (notes or {}).get(str(label))
@@ -224,7 +226,7 @@ def grouped_bars(
         y = pad_t + plot_h - frac * plot_h
         parts.append(
             f'<line x1="{pad_l}" y1="{y:.1f}" x2="{width - pad_r}" y2="{y:.1f}" '
-            f'stroke="{GRID}" stroke-width="1"/>'
+            f'style="stroke:{GRID}" stroke-width="1"/>'
         )
         parts.append(
             f'<text x="{pad_l - 8}" y="{y + 4:.1f}" text-anchor="end" '
@@ -238,7 +240,7 @@ def grouped_bars(
             x = x0 + j * (bar_w + 2)  # 2px surface gap between adjacent fills
             if h > 0:
                 parts.append(
-                    f'<path d="{_vbar_path(x, pad_t + plot_h - h, bar_w, h)}" fill="{hue}">'
+                    f'<path d="{_vbar_path(x, pad_t + plot_h - h, bar_w, h)}" style="fill:{hue}">'
                     f"<title>{escape(day)} — {escape(series_labels[j])}: {_fmt(value)}"
                     f"</title></path>"
                 )
@@ -254,7 +256,7 @@ def grouped_bars(
         y = pad_t + plot_h - (value / top) * plot_h
         parts.append(
             f'<text x="{width - pad_r + 6}" y="{max(pad_t + 8, y + dy):.1f}" '
-            f'class="c-value" fill="{hue}">{_fmt(value)}</text>'
+            f'class="c-value" style="fill:{hue}">{_fmt(value)}</text>'
         )
     parts.append("</svg>")
 
@@ -303,6 +305,7 @@ def matrix(
     cells: dict[tuple[str, str], int],
     empty_message: str = "No data yet",
     groups: Sequence[tuple[str, int]] | None = None,
+    href: Callable[[str, str], str] | None = None,
 ) -> str:
     """Surfaces x control points.
 
@@ -317,6 +320,9 @@ def matrix(
     the first two controls run before inference and can refuse a request,
     the third reads transcripts afterwards and can only report. Position and
     a label rather than colour, so it survives a printout.
+
+    `href(row, col)` gives a non-zero cell's link, already escaped: the
+    records behind its count.
     """
     if not rows:
         return empty(empty_message)
@@ -353,11 +359,12 @@ def matrix(
             else:
                 fill = seq_step(n, top)
                 dark = fill in SEQ[:3]
+                ink = "mx-on-dark" if dark else "mx-on-light"
+                value = (f'<a class="mx-link {ink}" href="{href(r, c)}">{n}</a>'
+                         if href is not None else f'<span class="{ink}">{n}</span>')
                 tds.append(
                     f'<td class="mx-cell{div}" style="background:{fill}" '
-                    f'title="{escape(r)} — {escape(c)}: {n}">'
-                    f'<span class="{"mx-on-dark" if dark else "mx-on-light"}">{n}</span>'
-                    "</td>"
+                    f'title="{escape(r)} — {escape(c)}: {n}">{value}</td>'
                 )
         body.append(f'<tr><th class="mx-row">{escape(r)}</th>{"".join(tds)}</tr>')
     return (

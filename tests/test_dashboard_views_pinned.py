@@ -222,6 +222,11 @@ CASES = [
     ("overview-entitled-all", "entitled", "/?window=all"),
     ("overview-entitled-org", "entitled", f"/?window=all&org={ORG_A}"),
     *[(f"overview-topology-{w}", "topology", f"/?window={w}") for w in ("24h", "7d", "all")],
+    *[(f"{page}-{w}", "open", f"/{page}?window={w}")
+      for page in ("coverage", "detectors", "delivery") for w in ("7d", "all")],
+    *[(f"{page}-entitled-org", "entitled", f"/{page}?window=all&org={ORG_A}")
+      for page in ("coverage", "detectors", "delivery")],
+    ("events-surface", "open", "/events?window=all&surface=claude-code"),
 ]
 
 
@@ -275,6 +280,9 @@ PAGES = [
     ("overview-all.html", "open", "/?window=all"),
     ("overview-topology-7d.html", "topology", "/?window=7d"),
     ("overview-topology-all.html", "topology", "/?window=all"),
+    ("coverage-all.html", "open", "/coverage?window=all"),
+    ("detectors-all.html", "open", "/detectors?window=all"),
+    ("delivery-all.html", "open", "/delivery?window=all"),
     ("events-all.html", "open", "/events?window=all"),
     ("policy.html", "open", "/policy"),
     ("overview-admin-all.html", "admin", "/?window=all"),

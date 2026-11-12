@@ -395,13 +395,26 @@ class Dashboard:
             await self._json(send, 403, {"error": "forbidden"})
             return
 
+        if path == "/theme":
+            await self._set_theme(send, _query_param(qs, "set", ""),
+                                  _query_param(qs, "next", "/"))
+            return
         if path == "/api/summary":
             await self._json(send, 200, self._summary_json(window, view.scoped))
             return
         who = getattr(principal, "name", "") or ""
         who = _org_screen()(who) if who else ""
-        if path == "/":
-            await self._html(send, self._page(window, view, who), headers)
+        if path in SUMMARY_PAGES:
+            await self._html(send, self._page(window, view, who, SUMMARY_PAGES[path]),
+                             headers)
+            return
+        if path == "/events/detail":
+            record_id = _query_param(qs, "id", "")
+            if not RECORD_ID.fullmatch(record_id):
+                await self._json(send, 404, {"error": "not_found"})
+                return
+            await self._html(send, self._event_detail(window, record_id, view, who),
+                             headers)
             return
         if path == "/policy":
             await self._html(send, self._policy(view, who, principal,
@@ -423,6 +436,9 @@ class Dashboard:
             detector = _query_param(qs, "detector", "")
             if not _DETECTOR_NAME.fullmatch(detector):
                 detector = ""
+            surface = _query_param(qs, "surface", "")
+            if not SURFACE_NAME.fullmatch(surface):
+                surface = ""
             before = EventCursor.decode(_query_param(qs, "before", ""))
             show_allows = _query_param(qs, "code_hook_allows", "") == "show"
             await self._html(
@@ -439,6 +455,7 @@ class Dashboard:
                     detector=detector,
                     before=before,
                     show_allows=show_allows,
+                    surface=surface,
                 ),
                 headers,
             )
@@ -475,7 +492,7 @@ class Dashboard:
     # -- rendering --------------------------------------------------------
 
     def _page(self, window: str, view: ViewScope | None = None,
-              viewer: str = "") -> str:
+              viewer: str = "", page: str = "overview") -> str:
         view = view or ViewScope(None, None, "all")
         scoped = view.scoped
         now = time.monotonic()
@@ -485,7 +502,7 @@ class Dashboard:
         # boundary, which is a worse bug than no cache at all. The page now
         # also names who it was built for, so without the viewer in the key
         # it would show one person's name to another.
-        key = ("page", window, _key_set(scoped), _key_set(view.allowed),
+        key = ("page", page, window, _key_set(scoped), _key_set(view.allowed),
                view.selected, viewer)
         hit = self._cache.get(key, now)
         if hit is not None:
@@ -528,7 +545,8 @@ class Dashboard:
                              viewer, points=points, surfaces=surfaces,
                              sink=self.sink_name,
                              empty_store=store_is_empty(self.store),
-                             banners=self._banners(), branding=self.branding)
+                             banners=self._banners(), branding=self.branding,
+                             page=page)
         self._cache.put(key, now, html)
         return html
 
@@ -619,7 +637,7 @@ class Dashboard:
                 view: ViewScope | None = None, viewer: str = "",
                 principal=None, *, client: str = "", device: str = "",
                 detector: str = "", before: EventCursor | None = None,
-                show_allows: bool = False) -> str:
+                show_allows: bool = False, surface: str = "") -> str:
         view = view or ViewScope(None, None, "all")
         scoped = view.scoped
         """Newest-first event list, filtered by control point and verdict.
@@ -629,9 +647,13 @@ class Dashboard:
         """
         desc = self.store.describe()
         since = effective_since(window_to_since(window), desc.get("reset_at"))
+        from ..store.query import normalize_surface
+
         page = event_page(self.store, since, scoped, source, action,
                           client=client, device=device, detector=detector, before=before,
-                          hide_code_hook_allows=not show_allows, fleets=self.fleets)
+                          hide_code_hook_allows=not show_allows, fleets=self.fleets,
+                          match=(lambda r: normalize_surface(r.surface) == surface)
+                          if surface else None)
         scope = None
         if self._admin_group(principal) is not None:
             scope = self._action_scope(principal, {
@@ -664,7 +686,28 @@ class Dashboard:
             deny_form=deny,
             id_screen=_org_screen(),
             branding=self.branding,
+            surface=surface,
         )
+
+    def _event_detail(self, window: str, record_id: str,
+                      view: ViewScope | None = None, viewer: str = "") -> str:
+        """The records in the window that carry `record_id` as a request,
+        session or reference id. Read through `event_page`, so the viewer's
+        scope applies as it does to the log."""
+        view = view or ViewScope(None, None, "all")
+        desc = self.store.describe()
+        since = effective_since(window_to_since(window), desc.get("reset_at"))
+        page = event_page(self.store, since, view.scoped, limit=DETAIL_RECORDS,
+                          fleets=self.fleets,
+                          match=lambda r: record_id in (r.request_id, r.session_id,
+                                                        r.reference_id))
+        from ..store.base import utcnow
+
+        return render.render_event_detail(
+            page.records[:DETAIL_RECORDS], record_id, window=window, store_desc=desc,
+            generated_at=utcnow(), orgs=self._visible_orgs(view.allowed),
+            selected=view.selected, viewer=viewer, banners=self._banners(),
+            id_screen=_org_screen(), branding=self.branding)
 
     def _summary_json(self, window: str,
                       scoped: frozenset[str] | None = None) -> dict[str, Any]:
@@ -1053,7 +1096,24 @@ class Dashboard:
         await self._send(send, 200, body, ctype, extra=[cache])
 
     async def _html(self, send: Callable, html: str, headers: dict[str, str]) -> None:
+        theme = _theme_choice(headers.get("cookie", ""))
+        if theme:
+            html = html.replace("<html", f'<html data-theme="{theme}"', 1)
         await self._send(send, 200, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    async def _set_theme(self, send: Callable, choice: str, target: str) -> None:
+        """Keep the viewer's colour theme in THEME_COOKIE and go back to
+        `target`, a path on this dashboard; `auto` clears it."""
+        if not LOCAL_TARGET.fullmatch(target):
+            target = "/"
+        if choice in ("light", "dark"):
+            cookie = f"{THEME_COOKIE}={choice}; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly"
+        else:
+            cookie = f"{THEME_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"
+        await self._send(send, 303, b"", "text/plain",
+                         extra=[(b"location", target.encode("ascii")),
+                                (b"set-cookie", cookie.encode("ascii")),
+                                (b"cache-control", b"no-store")])
 
     async def _json(self, send: Callable, status: int, payload: dict) -> None:
         await self._send(send, status, json.dumps(payload).encode("utf-8"),
@@ -1196,6 +1256,24 @@ async def _read_body(receive: Callable, max_bytes: int) -> tuple[bytes, bool]:
 
 # The Event Log's detector filter.
 _DETECTOR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}")
+SURFACE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,63}")
+RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,199}")
+SUMMARY_PAGES = {"/": "overview", "/coverage": "coverage", "/detectors": "detectors",
+                 "/delivery": "delivery"}
+DETAIL_RECORDS = 20
+THEME_COOKIE = "fv_theme"
+# A path on this dashboard and its query: one leading slash, so `//host` and
+# `/\\host`, which a browser follows off-site, are refused.
+LOCAL_TARGET = re.compile(r"/(?![/\\])[A-Za-z0-9/_.\-]{0,64}(?:\?[A-Za-z0-9_.\-=&%:+]{0,512})?")
+
+
+def _theme_choice(cookie: str) -> str:
+    """`light` or `dark` from THEME_COOKIE in a Cookie header, else ''."""
+    for part in cookie.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == THEME_COOKIE and value in ("light", "dark"):
+            return value
+    return ""
 
 
 def _key_set(orgs: frozenset[str] | None) -> tuple[str, ...] | None:
