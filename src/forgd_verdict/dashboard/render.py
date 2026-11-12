@@ -17,6 +17,7 @@ Charts live in charts.py.
 from __future__ import annotations
 
 import math
+import re
 from html import escape
 from pathlib import Path
 from urllib.parse import urlencode
@@ -903,12 +904,14 @@ def _overview_body(summary: Summary, link, *, points, surfaces, sink, empty_stor
               + (f" &middot; {summary.tool_call_checks:,} tool call checks, "
                  f"{summary.tool_call_would_deny:,} would deny"
                  if summary.tool_call_checks else ""),
-              href=link(source="inference_hook") if summary.live_requests else None),
+              href=link(source="inference_hook", kind="prompt")
+              if summary.live_requests else None),
         _stat("Sessions audited",
               f"{summary.scanned_sessions + summary.managed_sessions:,}",
               "Compliance API" + (f" &middot; {summary.managed_sessions:,} managed agents"
                                   if summary.managed_sessions else ""),
-              href=link(source="compliance_scan") if summary.scanned_sessions else None),
+              href=link(kind="audit")
+              if summary.scanned_sessions + summary.managed_sessions else None),
         # The can/cannot-block wording sits on the headline tiles rather
         # than in a duplicate tile further down: it is the distinction the
         # two numbers turn on, and it belongs where they are read.
@@ -916,8 +919,7 @@ def _overview_body(summary: Summary, link, *, points, surfaces, sink, empty_stor
         _stat("Detected in audit", f"{summary.detections:,}",
               f"{summary.detection_rate * 100:.1f}% of scanned sessions "
               "&middot; cannot block",
-              href=link(source="compliance_scan", action="deny")
-              if summary.detections else None),
+              href=link(kind="detected") if summary.detections else None),
         _stat("Distinct values found", f"{summary.distinct_values:,}",
               f"{summary.total_findings:,} occurrences"
               + (f" &middot; {summary.device_salted_values:,} more from laptops, counted "
@@ -935,7 +937,7 @@ def _overview_body(summary: Summary, link, *, points, surfaces, sink, empty_stor
     gaps = [r.surface for r in summary.surfaces if not r.inline_coverage]
     coverage = (
         f'<p class="status status-warn">{len(gaps)} surface(s) audit only &mdash; '
-        + ", ".join(f'<a href="{link(surface=g)}"><code>{escape(g)}</code></a>' for g in gaps)
+        + ", ".join(_maybe_link(f"<code>{escape(g)}</code>", link(surface=g)) for g in gaps)
         + "</p>" if gaps else
         '<p class="status status-ok">Inline coverage complete</p>' if summary.surfaces
         else '<p class="status status-warn">No traffic recorded yet</p>')
@@ -1033,6 +1035,10 @@ def _delivery_body(summary: Summary, link, **_) -> str:
 """
 
 
+def _maybe_link(inner: str, href: str | None) -> str:
+    return f'<a href="{href}">{inner}</a>' if href else inner
+
+
 def _linked(n: int, href: str | None) -> str:
     """`n`, linked to the records it counts when it is not zero."""
     return f'<a href="{href}">{n:,}</a>' if n and href else f"{n:,}"
@@ -1049,17 +1055,17 @@ def _surface_table(summary: Summary, link=None) -> str:
         return link(**filters) if link is not None else None
 
     def name(surface):
-        code = f"<code>{escape(surface)}</code>"
-        return f'<a href="{to(surface=surface)}">{code}</a>' if link is not None else code
+        return _maybe_link(f"<code>{escape(surface)}</code>", to(surface=surface))
 
     rows = "".join(
         f"<tr><td>{name(r.surface)}</td>"
-        f'<td class="num">{_linked(r.live, to(surface=r.surface, source=LIVE))}</td>'
+        f'<td class="num">'
+        f'{_linked(r.live, to(surface=r.surface, source=LIVE, kind="prompt"))}</td>'
         f'<td class="num">{_linked(r.post_hoc, to(surface=r.surface, source=AUDIT))}</td>'
         f"<td>{_coverage_pill(r)}</td>"
-        f'<td class="num">{_linked(r.would_deny, to(surface=r.surface, action="deny"))}</td>'
         f'<td class="num">'
-        f'{_linked(r.detections, to(surface=r.surface, source=AUDIT, action="deny"))}</td>'
+        f'{_linked(r.would_deny, to(surface=r.surface, kind="inline", action="deny"))}</td>'
+        f'<td class="num">{_linked(r.detections, to(surface=r.surface, kind="detected"))}</td>'
         f'<td class="num">{_latency_cell(r)}</td></tr>'
         for r in summary.surfaces
     )
@@ -1130,6 +1136,48 @@ NAV = (
 )
 
 
+# What the event log's filters and the record page accept. A link is built
+# only for a value that passes, so a link never opens a filter the route
+# drops.
+DETECTOR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}")
+SURFACE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,63}")
+RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,199}")
+
+# The event log's `kind` filter: which records a summary figure counts, where
+# a control point alone does not say. `prompt` is the inference hook's
+# prompts, without its tool-call checks; `inline` every inline evaluation but
+# those; `audit` the scanned sessions; `detected` the post-hoc records with a
+# blocking-severity finding.
+KINDS = {
+    "prompt": "Prompts",
+    "inline": "Inline evaluations",
+    "audit": "Audited sessions",
+    "detected": "Detected in audit",
+}
+
+
+def _of_kind(r, kind: str) -> bool:
+    if kind == "prompt":
+        return r.source == "inference_hook" and r.event != EVENT_TOOL_CALL
+    if kind == "inline":
+        return r.is_inline and r.event != EVENT_TOOL_CALL
+    if kind == "audit":
+        return r.source in ("compliance_scan", "managed_scan")
+    if kind == "detected":
+        return not r.is_inline and r.detected
+    return True
+
+
+def event_match(surface: str = "", kind: str = ""):
+    """The event log's `match` for a surface and a kind; None for neither."""
+    if not surface and not kind:
+        return None
+    from ..store.query import normalize_surface
+
+    return lambda r: ((not surface or normalize_surface(r.surface) == surface)
+                      and _of_kind(r, kind))
+
+
 def _state(window: str | None, selected: str) -> dict[str, str]:
     """The query that carries the window and the selected org to another
     page."""
@@ -1142,8 +1190,12 @@ def _href(path: str, query: dict[str, str]) -> str:
     return escape(path + ("?" + urlencode(query) if query else ""), quote=True)
 
 
-def events_link(window: str | None, selected: str = "", **filters: str) -> str:
-    """The event log filtered to `filters`, in this window and org."""
+def events_link(window: str | None, selected: str = "", **filters: str) -> str | None:
+    """The event log filtered to `filters`, in this window and org, or None
+    when the log would drop a surface or detector filter given."""
+    for key, valid in (("surface", SURFACE_NAME), ("detector", DETECTOR_NAME)):
+        if filters.get(key) and not valid.fullmatch(filters[key]):
+            return None
     return _href("/events", {**_state(window, selected),
                              **{k: v for k, v in filters.items() if v}})
 
@@ -1309,7 +1361,7 @@ def _would_deny_tile(summary: Summary, link=None) -> str:
     return _stat("Would deny (inline)", f"{summary.adapter_would_deny:,}",
                  f"{summary.deny_rate * 100:.1f}% of live evaluations &middot; can block"
                  + (f" &middot; {token}" if token else ""),
-                 href=link(source="inference_hook", action="deny")
+                 href=link(source="inference_hook", kind="prompt", action="deny")
                  if link is not None and summary.adapter_would_deny else None)
 
 
@@ -1467,7 +1519,8 @@ def _coverage_matrix(summary: Summary, aside: str = "", trailing: str = "",
     def cell_href(surface: str, col: str) -> str:
         # The Code hook count includes its allows, which the log hides by
         # default.
-        extra = {"code_hook_allows": "show"} if col == "Code hook" else {}
+        extra = ({"code_hook_allows": "show"} if col == "Code hook"
+                 else {"kind": "prompt"} if col == "Inference hook" else {})
         return link(surface=surface, source=MATRIX_SOURCES[col], **extra)
 
     table = charts.matrix(
@@ -1603,7 +1656,8 @@ def render_events(records, source: str = "all", action: str = "all",
                  deny_form=None, older: str | None = None, window: str = "",
                  detector: str = "", paged: bool = False,
                  show_allows: bool = False, older_label: str = "",
-                 approximate: str | None = None, surface: str = "") -> str:
+                 approximate: str | None = None, surface: str = "",
+                 kind: str = "") -> str:
     """One row per evaluated request. `older` is the cursor for the next
     page when the window holds older events than this one shows, and
     `older_label` where this page reads back to, `approximate` the day
@@ -1621,7 +1675,7 @@ def render_events(records, source: str = "all", action: str = "all",
     changes gets no Exclude form, whose value would carry the id.
     """
     backend = str((store_desc or {}).get("backend", "—"))
-    narrowed = {k: v for k, v in (("surface", surface), ("client", client),
+    narrowed = {k: v for k, v in (("kind", kind), ("surface", surface), ("client", client),
                                   ("device", device), ("detector", detector)) if v}
     state = {**({"org": selected} if selected and selected != "all" else {}),
              **({"window": window} if window else {}),
@@ -1668,10 +1722,10 @@ def render_events(records, source: str = "all", action: str = "all",
                 + escape(r.session_updated_at[:16].replace("T", " "))
                 + "</span>"
             )
-        raw = r.request_id or r.session_id or ""
+        raw = r.request_id or r.session_id or r.reference_id or ""
         shown = id_screen(raw) if id_screen is not None else raw
         corr = escape(_correlation(shown))
-        if raw and shown == raw:
+        if raw and shown == raw and RECORD_ID.fullmatch(raw):
             # A screened id is not linked: the link would carry it.
             corr = (f'<a href="{_href("/events/detail", {**_state(window, selected), "id": raw})}"'
                     f' title="Open this record">{corr}</a>')
@@ -1716,6 +1770,9 @@ def render_events(records, source: str = "all", action: str = "all",
                       + (f'<span class="note"> this page reads back to '
                          f"{escape(older_label)}</span>" if older_label else ""))
     nav = f'<div class="filters">{"".join(paging)}</div>' if paging else ""
+    if any(not r.is_inline for r in records[:limit]):
+        nav = ('<p class="note">A session scanned more than once has a row for each scan '
+               "here and counts once on the summary pages.</p>" + nav)
     if approximate:
         nav = (f'<p class="note">{escape(approximate)} holds more records than one page '
                f"reads, so the order within {escape(approximate)} is approximate on this "
@@ -1743,8 +1800,10 @@ def render_events(records, source: str = "all", action: str = "all",
         return f'<a href="{href}"{sel}>{escape(name)}</a>'
 
     def clear(key):
+        value = KINDS.get(narrowed[key], narrowed[key]) if key == "kind" else narrowed[key]
+        label = "Only" if key == "kind" else key.title()
         return (f'<a href="{events_href(**{key: None})}" aria-current=true>'
-                f"{escape(key.title())}: {escape(narrowed[key])} &times;</a>")
+                f"{escape(label)}: {escape(value)} &times;</a>")
 
     controls = (
         '<div class="filters">'
@@ -1849,10 +1908,12 @@ def render_event_detail(records, record_id: str, window: str = "7d",
                         store_desc: dict | None = None, generated_at: str = "",
                         orgs: dict[str, str] | None = None, selected: str = "",
                         viewer: str = "", banners: str = "", id_screen=None,
-                        branding: Branding | None = None) -> str:
+                        branding: Branding | None = None, more: bool = False,
+                        read_to: str = "") -> str:
     """Every record carrying `record_id` as its request, session or
     reference id in the window, newest first: one request as each control
-    saw it."""
+    saw it. `more` says there are more than `records`; `read_to` is where
+    the read stopped when it did not reach the start of the window."""
     backend = str((store_desc or {}).get("backend", "—"))
     back = _href("/events", _state(window, selected))
     shown = id_screen(record_id) if id_screen is not None else record_id
@@ -1861,13 +1922,17 @@ def render_event_detail(records, record_id: str, window: str = "7d",
             (f'<section><h2>{escape(_source_label(r.source))} &middot; '
              f"{_when(r.observed_at)}</h2>{_record_card(r, id_screen)}</section>")
             for r in records)
-        lede = (f"{len(records)} record(s) carry this id in this window. A matched value "
-                "is never stored; a sealed one opens only with <code>forgd-verdict "
-                "unseal</code> under your own cloud login.")
+        count = (f"The newest {len(records)} records carrying this id are shown; there are "
+                 "more." if more else f"{len(records)} record(s) carry this id in this window.")
+        lede = (f"{count} A matched value is never stored; a sealed one opens only with "
+                "<code>forgd-verdict unseal</code> under your own cloud login.")
     else:
         cards = ('<section><div class="card"><div class="empty-log">No record with this id '
                  "in this window. Try a longer window.</div></div></section>")
         lede = ""
+    if read_to and not more:
+        lede += (f" This page read back to {escape(read_to)}; an older record in the window "
+                 "may also carry this id.")
     body = (
         '\n  <div class="hero">\n'
         f'    <div class="crumbs"><a href="{back}">Events</a> &rsaquo; record</div>\n'

@@ -14,24 +14,27 @@ from forgd_verdict.dashboard.branding import LIGHT_TOKENS, Branding
 from forgd_verdict.dashboard.render import render_events
 from forgd_verdict.store import FindingRow, LocalFileStore, VerdictRecord
 from forgd_verdict.store.base import (
+    EVENT_TOOL_CALL,
     SOURCE_CODE_HOOK,
     SOURCE_COMPLIANCE_SCAN,
     SOURCE_INFERENCE_HOOK,
+    SOURCE_MANAGED_SCAN,
 )
 
 ORG_A, ORG_B = "org_aaaaaaaaaa", "org_bbbbbbbbbb"
 
 
 def _rec(n: int, *, source=SOURCE_INFERENCE_HOOK, surface="claude-ai", action="allow",
-         detector=None, org=None, reference=None, session=None) -> VerdictRecord:
+         detector=None, org=None, reference=None, session=None, event=None, tally=None,
+         request=True) -> VerdictRecord:
     findings = [FindingRow(detector, "block", "messages[2]", f"sha256:{n:04d}")] if detector \
         else []
     return VerdictRecord(
         source=source, observed_at=f"2026-09-17T10:{n // 60:02d}:{n % 60:02d}Z",
         surface=surface, action=action,
-        request_id=None if session else f"req{n:05d}", session_id=session,
+        request_id=None if session or not request else f"req{n:05d}", session_id=session,
         reference_id=reference, findings=findings, findings_count=len(findings),
-        tenant_hash=org, build="1.2.7+abc")
+        tenant_hash=org, build="1.2.7+abc", event=event, tally=tally)
 
 
 def _store(tmp_path, records) -> LocalFileStore:
@@ -44,38 +47,113 @@ def _ids(html: str) -> list[str]:
     return re.findall(r">((?:req\d{5}|clls_\w+))</a>", html)
 
 
+def _weight(html: str) -> int:
+    """The records a log page stands for: one per row, and a Code hook tally
+    row's allows."""
+    rows = html.split("<tbody>")[1].split("</tbody>")[0].split("<tr>")[1:] \
+        if "<tbody>" in html else []
+    total = 0
+    for row in rows:
+        m = re.search(r"([\d,]+) allows?</span>", row)
+        total += int(m.group(1).replace(",", "")) if m else 1
+    return total
+
+
+def _counted(n: int) -> list[VerdictRecord]:
+    """A window that holds each kind of record a figure can miscount: tool
+    call checks beside prompts, a Code hook tally, a managed scan, a
+    warn-only scan, and an inline deny on the Code hook."""
+    return [
+        _rec(n, surface="claude-ai"),
+        _rec(n + 1, surface="claude-ai", action="deny", detector="regex:ssn"),
+        _rec(n + 2, surface="claude-ai", event=EVENT_TOOL_CALL, action="deny",
+             detector="regex:ssn"),
+        _rec(n + 3, source=SOURCE_CODE_HOOK, surface="claude-code", tally=50),
+        _rec(n + 4, source=SOURCE_CODE_HOOK, surface="claude-code", action="deny",
+             detector="regex:aws-access-key"),
+        _rec(n + 5, source=SOURCE_COMPLIANCE_SCAN, surface="claude-ai", session="clls_a",
+             detector="regex:ssn"),
+        VerdictRecord(source=SOURCE_COMPLIANCE_SCAN, observed_at="2026-09-17T11:00:00Z",
+                      surface="claude-ai", session_id="clls_w",
+                      findings=[FindingRow("presidio:person", "warn", "m", "sha256:w")],
+                      findings_count=1),
+        _rec(n + 6, source=SOURCE_MANAGED_SCAN, surface="claude-ai", session="clls_m",
+             detector="regex:aws-access-key"),
+        # Two managed scans against one warn-only compliance scan, so a link
+        # that read the compliance scan's flagged rows in place of every
+        # detection would open a different number of rows.
+        _rec(n + 7, source=SOURCE_MANAGED_SCAN, surface="claude-ai", session="clls_n",
+             detector="regex:aws-access-key"),
+    ]
+
+
 def _query(href: str) -> dict[str, str]:
     return dict(parse_qsl(unescape(href).split("?", 1)[1]))
 
 
-async def test_every_matrix_count_opens_exactly_the_records_it_counts(tmp_path):
-    store = _store(tmp_path, [
-        *[_rec(n, surface="claude-ai") for n in range(3)],
-        *[_rec(10 + n, surface="claude_code") for n in range(2)],
-        *[_rec(20 + n, source=SOURCE_CODE_HOOK, surface="claude-code") for n in range(4)],
-        _rec(30, source=SOURCE_COMPLIANCE_SCAN, surface="claude-ai", session="clls_30"),
-    ])
+async def test_every_coverage_count_opens_exactly_the_records_it_counts(tmp_path):
+    store = _store(tmp_path, [*_counted(0), _rec(40, surface="claude_code"),
+                              _rec(41, source=SOURCE_CODE_HOOK, surface="claude-code")])
     client = ASGIClient(Dashboard(store))
     _, html = await client.get("/coverage?window=all")
-    cells = re.findall(r'<a class="mx-link [^"]+" href="([^"]+)">(\d+)</a>', html)
-    assert len(cells) == 4
-    for href, count in cells:
+    links = re.findall(r'<a class="mx-link [^"]+" href="([^"]+)">(\d+)</a>', html)
+    links += re.findall(r'<td class="num"><a href="([^"]+)">([\d,]+)</a></td>', html)
+    assert len(links) >= 10
+    for href, count in links:
         _, page = await client.get(unescape(href))
-        assert len(_ids(page)) == int(count), _query(href)
+        assert _weight(page) == int(count.replace(",", "")), _query(href)
 
 
-async def test_the_headline_tiles_open_the_records_they_count(tmp_path):
-    store = _store(tmp_path, [_rec(1), _rec(2, action="deny", detector="regex:ssn")])
-    _, html = await ASGIClient(Dashboard(store)).get("/?window=all")
-    tiles = dict((label, href) for href, label in re.findall(
-        r'<a class="stat-card" href="([^"]+)"><div class="stat-label">([^<]+)</div>', html))
-    assert _query(tiles["Prompts evaluated live"]) == {"window": "all",
-                                                       "source": "inference_hook"}
-    assert _query(tiles["Would deny (inline)"]) == {"window": "all",
-                                                    "source": "inference_hook",
-                                                    "action": "deny"}
-    # Nothing was audited, so that tile has nothing to open.
-    assert "Sessions audited" not in tiles
+async def test_a_session_scanned_twice_is_one_count_and_two_rows_and_the_log_says_so(
+        tmp_path):
+    store = _store(tmp_path, [
+        _rec(1, source=SOURCE_COMPLIANCE_SCAN, session="clls_x"),
+        VerdictRecord(source=SOURCE_COMPLIANCE_SCAN, observed_at="2026-09-17T12:00:00Z",
+                      surface="claude-ai", session_id="clls_x"),
+    ])
+    client = ASGIClient(Dashboard(store))
+    _, html = await client.get("/?window=all")
+    href = re.search(r'<a class="stat-card" href="([^"]+)"><div class="stat-label">'
+                     r"Sessions audited", html).group(1)
+    _, page = await client.get(unescape(href))
+    assert _ids(page) == ["clls_x", "clls_x"]
+    assert "counts once on the summary pages" in page
+    _, inline = await client.get("/events?window=all&source=inference_hook")
+    assert "counts once on the summary pages" not in inline
+
+
+async def test_the_headline_tiles_open_exactly_the_records_they_count(tmp_path):
+    client = ASGIClient(Dashboard(_store(tmp_path, _counted(0))))
+    _, html = await client.get("/?window=all")
+    tiles = re.findall(r'<a class="stat-card" href="(/events[^"]+)"><div class="stat-label">'
+                       r'([^<]+)</div><div class="stat-value">([\d,]+)</div>', html)
+    assert {label for _, label, _ in tiles} == {
+        "Prompts evaluated live", "Sessions audited", "Would deny (inline)",
+        "Detected in audit"}
+    for href, label, count in tiles:
+        _, page = await client.get(unescape(href))
+        assert _weight(page) == int(count.replace(",", "")), label
+
+
+async def test_a_tile_with_nothing_to_count_has_no_link(tmp_path):
+    _, html = await ASGIClient(Dashboard(_store(tmp_path, [_rec(1)]))).get("/?window=all")
+    labels = re.findall(r'<a class="stat-card" href="/events[^"]+"><div class="stat-label">'
+                        r"([^<]+)</div>", html)
+    assert labels == ["Prompts evaluated live"]
+
+
+async def test_a_value_the_log_would_drop_is_not_linked(tmp_path):
+    store = _store(tmp_path, [_rec(1, surface="agent:my bot", detector="custom:has space"),
+                              _rec(2, request=False, reference="fv_ref_only")])
+    client = ASGIClient(Dashboard(store))
+    _, coverage = await client.get("/coverage?window=all")
+    assert "agent:my bot" in coverage
+    assert "surface=agent" not in coverage
+    _, detectors = await client.get("/detectors?window=all")
+    assert "custom:has space" in detectors and "has+space" not in detectors
+    _, log = await client.get("/events?window=all")
+    # A record known only by its reference id still opens.
+    assert "/events/detail?window=all&amp;id=fv_ref_only" in log
 
 
 async def test_the_surface_filter_narrows_and_a_hostile_value_is_dropped(tmp_path):
@@ -113,6 +191,13 @@ async def test_the_record_page_finds_every_record_carrying_the_id(tmp_path):
     assert "compliance scan" in html and "inference hook" in html
     _, html = await client.get("/events/detail?window=all&id=req09999")
     assert "No record with this id in this window" in html
+
+
+async def test_the_record_page_says_when_there_are_more_than_it_shows(tmp_path):
+    store = _store(tmp_path, [_rec(n, reference="fv_many") for n in range(21)])
+    _, html = await ASGIClient(Dashboard(store)).get("/events/detail?window=all&id=fv_many")
+    assert "The newest 20 records carrying this id are shown; there are more." in html
+    assert html.count("<h2>Findings</h2>") == 20
 
 
 @pytest.mark.parametrize("bad", ["", "x" * 201, "a b", "../x", "<script>", "-lead"])
@@ -198,6 +283,15 @@ def test_each_mode_sets_which_scheme_a_viewer_sees_first():
     assert themed.mode == "dark"
     assert Branding.from_policy({"theme": {"--bg-card": "#0C1F3A"},
                                  "mode": "auto"}).mode == "auto"
+
+
+def test_a_dark_theme_does_not_reach_the_light_scheme():
+    css = Branding.from_policy({"mode": "light", "theme": {
+        "--brand-accent-bg-strong": "#000000", "--warn-text": "#111111"}}).scheme_css
+    light = css.split(":root:not([data-theme=dark]){")[1].split("}")[0]
+    assert "--brand-accent-bg-strong:rgba(59, 130, 246, 0.18);" in light
+    assert "--warn-text:#92400E;" in light
+    assert "#000000" not in light and "#111111" not in light
 
 
 def test_markers_resolve_to_custom_properties_the_page_defines():

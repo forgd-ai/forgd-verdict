@@ -306,16 +306,21 @@ class Branding:
             return block(values, scheme, shadow).replace(":root", selector, 1)
 
         light_shadow = f"--shadow-card:{LIGHT_SHADOW};"
+        # A theme is written for the dark scheme, so in the light one each
+        # themed token LIGHT_TOKENS does not set goes back to its default.
+        defaults = {**root_tokens(TOKENS_CSS), **SLOT_DEFAULTS}
+        light_values = {**{k: defaults[k] for k in self.theme if k in defaults},
+                        **LIGHT_TOKENS}
         css = block(dark, "dark")
         # The viewer's choice (THEME_COOKIE), as `data-theme` on <html>,
         # overrides the mode.
         unchosen = ":root:not([data-theme=dark])"
         if self.mode == "light":
-            css += block_for(unchosen, LIGHT_TOKENS, "light", light_shadow)
+            css += block_for(unchosen, light_values, "light", light_shadow)
         elif self.mode == "auto":
             css += ("@media (prefers-color-scheme: light){"
-                    + block_for(unchosen, LIGHT_TOKENS, "light", light_shadow) + "}")
-        css += block_for(":root[data-theme=light]", LIGHT_TOKENS, "light", light_shadow)
+                    + block_for(unchosen, light_values, "light", light_shadow) + "}")
+        css += block_for(":root[data-theme=light]", light_values, "light", light_shadow)
         return css
 
     def fill(self, html: str) -> str:

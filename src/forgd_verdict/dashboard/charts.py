@@ -305,7 +305,7 @@ def matrix(
     cells: dict[tuple[str, str], int],
     empty_message: str = "No data yet",
     groups: Sequence[tuple[str, int]] | None = None,
-    href: Callable[[str, str], str] | None = None,
+    href: Callable[[str, str], str | None] | None = None,
 ) -> str:
     """Surfaces x control points.
 
@@ -322,7 +322,7 @@ def matrix(
     a label rather than colour, so it survives a printout.
 
     `href(row, col)` gives a non-zero cell's link, already escaped: the
-    records behind its count.
+    records behind its count. A cell it gives None is not linked.
     """
     if not rows:
         return empty(empty_message)
@@ -360,8 +360,9 @@ def matrix(
                 fill = seq_step(n, top)
                 dark = fill in SEQ[:3]
                 ink = "mx-on-dark" if dark else "mx-on-light"
-                value = (f'<a class="mx-link {ink}" href="{href(r, c)}">{n}</a>'
-                         if href is not None else f'<span class="{ink}">{n}</span>')
+                target = href(r, c) if href is not None else None
+                value = (f'<a class="mx-link {ink}" href="{target}">{n}</a>'
+                         if target else f'<span class="{ink}">{n}</span>')
                 tds.append(
                     f'<td class="mx-cell{div}" style="background:{fill}" '
                     f'title="{escape(r)} — {escape(c)}: {n}">{value}</td>'

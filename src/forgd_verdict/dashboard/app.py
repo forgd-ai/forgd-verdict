@@ -410,7 +410,7 @@ class Dashboard:
             return
         if path == "/events/detail":
             record_id = _query_param(qs, "id", "")
-            if not RECORD_ID.fullmatch(record_id):
+            if not render.RECORD_ID.fullmatch(record_id):
                 await self._json(send, 404, {"error": "not_found"})
                 return
             await self._html(send, self._event_detail(window, record_id, view, who),
@@ -434,11 +434,14 @@ class Dashboard:
             if not DEVICE_ID.fullmatch(device):
                 device = ""
             detector = _query_param(qs, "detector", "")
-            if not _DETECTOR_NAME.fullmatch(detector):
+            if not render.DETECTOR_NAME.fullmatch(detector):
                 detector = ""
             surface = _query_param(qs, "surface", "")
-            if not SURFACE_NAME.fullmatch(surface):
+            if not render.SURFACE_NAME.fullmatch(surface):
                 surface = ""
+            kind = _query_param(qs, "kind", "")
+            if kind not in render.KINDS:
+                kind = ""
             before = EventCursor.decode(_query_param(qs, "before", ""))
             show_allows = _query_param(qs, "code_hook_allows", "") == "show"
             await self._html(
@@ -456,6 +459,7 @@ class Dashboard:
                     before=before,
                     show_allows=show_allows,
                     surface=surface,
+                    kind=kind,
                 ),
                 headers,
             )
@@ -637,7 +641,7 @@ class Dashboard:
                 view: ViewScope | None = None, viewer: str = "",
                 principal=None, *, client: str = "", device: str = "",
                 detector: str = "", before: EventCursor | None = None,
-                show_allows: bool = False, surface: str = "") -> str:
+                show_allows: bool = False, surface: str = "", kind: str = "") -> str:
         view = view or ViewScope(None, None, "all")
         scoped = view.scoped
         """Newest-first event list, filtered by control point and verdict.
@@ -647,13 +651,10 @@ class Dashboard:
         """
         desc = self.store.describe()
         since = effective_since(window_to_since(window), desc.get("reset_at"))
-        from ..store.query import normalize_surface
-
         page = event_page(self.store, since, scoped, source, action,
                           client=client, device=device, detector=detector, before=before,
                           hide_code_hook_allows=not show_allows, fleets=self.fleets,
-                          match=(lambda r: normalize_surface(r.surface) == surface)
-                          if surface else None)
+                          match=render.event_match(surface, kind))
         scope = None
         if self._admin_group(principal) is not None:
             scope = self._action_scope(principal, {
@@ -687,6 +688,7 @@ class Dashboard:
             id_screen=_org_screen(),
             branding=self.branding,
             surface=surface,
+            kind=kind,
         )
 
     def _event_detail(self, window: str, record_id: str,
@@ -697,7 +699,8 @@ class Dashboard:
         view = view or ViewScope(None, None, "all")
         desc = self.store.describe()
         since = effective_since(window_to_since(window), desc.get("reset_at"))
-        page = event_page(self.store, since, view.scoped, limit=DETAIL_RECORDS,
+        # One more than is shown, so the page can say there are more.
+        page = event_page(self.store, since, view.scoped, limit=DETAIL_RECORDS + 1,
                           fleets=self.fleets,
                           match=lambda r: record_id in (r.request_id, r.session_id,
                                                         r.reference_id))
@@ -705,6 +708,8 @@ class Dashboard:
 
         return render.render_event_detail(
             page.records[:DETAIL_RECORDS], record_id, window=window, store_desc=desc,
+            more=len(page.records) > DETAIL_RECORDS,
+            read_to=page.before.label if page.before else "",
             generated_at=utcnow(), orgs=self._visible_orgs(view.allowed),
             selected=view.selected, viewer=viewer, banners=self._banners(),
             id_screen=_org_screen(), branding=self.branding)
@@ -1255,9 +1260,6 @@ async def _read_body(receive: Callable, max_bytes: int) -> tuple[bytes, bool]:
 
 
 # The Event Log's detector filter.
-_DETECTOR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}")
-SURFACE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,63}")
-RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:\-]{0,199}")
 SUMMARY_PAGES = {"/": "overview", "/coverage": "coverage", "/detectors": "detectors",
                  "/delivery": "delivery"}
 DETAIL_RECORDS = 20

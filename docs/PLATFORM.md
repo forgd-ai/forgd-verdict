@@ -1209,7 +1209,11 @@ The pages are Overview, Coverage, Detectors, Delivery, Events and Policy,
 in a rail down the left, with the time window and org picker in the header.
 Each figure that counts records links to the event log filtered to those
 records: a coverage matrix cell to its surface and control, a headline tile
-to its control and verdict, a detector to its findings. Each row of the event
+to its control and verdict, a detector to its findings. The rows a figure
+opens are the records it counts, with two differences the log states: a
+Code hook tally row stands for the allows it counts, and a session scanned
+more than once has a row per scan where the summary pages count it once.
+Each row of the event
 log links to `/events/detail?id=<id>`, which shows every record in the window
 carrying that request, session or reference id, with each finding's detector,
 severity, position, value hash and, when sealed, its `unseal` command. That
