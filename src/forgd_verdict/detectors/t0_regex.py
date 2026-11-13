@@ -26,8 +26,10 @@ class Rule(NamedTuple):
     validate: Callable[[str], bool] | None = None
     # Which capture group holds the sensitive text (0 = whole match).
     group: int = 0
-    # Reports exactly the spans of `group` that `pattern.finditer` would, in
-    # linear time, where finditer itself is not.
+    # Reports the spans in place of `pattern.finditer`: for `jwt`, exactly
+    # its spans in linear time, where finditer itself is not; for
+    # `github-token`, its spans with a stateless candidate whose header does
+    # not decode cut back to a classic token.
     find: Callable[[str], Iterator[tuple[int, int]]] | None = None
 
 
@@ -94,11 +96,7 @@ def _is_ssn(text: str) -> bool:
     return len(set(digits)) != 1
 
 
-def _is_jwt(text: str) -> bool:
-    parts = text.split(".")
-    if len(parts) != 3:
-        return False
-    head = parts[0]
+def _is_jose_header(head: str) -> bool:
     try:
         raw = base64.urlsafe_b64decode(head + "=" * (-len(head) % 4))
         payload = load_json(raw)
@@ -107,6 +105,11 @@ def _is_jwt(text: str) -> bool:
     # A real JOSE header always carries `alg`. This rejects the many
     # dot-separated base64-ish strings that are not tokens.
     return isinstance(payload, dict) and "alg" in payload
+
+
+def _is_jwt(text: str) -> bool:
+    parts = text.split(".")
+    return len(parts) == 3 and _is_jose_header(parts[0])
 
 
 _HEX = re.compile(r"[0-9A-F]+")
@@ -155,6 +158,32 @@ def _jwt_spans(text: str) -> Iterator[tuple[int, int]]:
             pos = match.end()
 
 
+_GITHUB_TOKEN = re.compile(
+    rf"gh(?:s_(?:[0-9]{{1,20}}_)?(eyJ[{_JWT_CLASS}]{{5,1024}}+)\."
+    rf"[{_JWT_CLASS}]{{8,1024}}+\.[{_JWT_CLASS}]{{8,1024}}+"
+    rf"|[pousr]_[A-Za-z0-9]{{36,255}})"
+)
+_GITHUB_CLASSIC = re.compile(r"gh[pousr]_[A-Za-z0-9]{36}")
+
+
+def github_token_spans(text: str) -> Iterator[tuple[int, int]]:
+    """Spans of `_GITHUB_TOKEN`, where a stateless candidate whose header
+    does not decode is cut back to the 40 characters of a classic token, as
+    `ghs_eyJ...` followed by `.release01.archive02` is, or skipped. The
+    search resumes after the cut, so a token glued to it is still found."""
+    pos = 0
+    while (match := _GITHUB_TOKEN.search(text, pos)) is not None:
+        start, end = match.span()
+        if match.group(1) is not None and not _is_jose_header(match.group(1)):
+            classic = _GITHUB_CLASSIC.match(text, start)
+            if classic is None:
+                pos = start + 1
+                continue
+            end = classic.end()
+        yield start, end
+        pos = end
+
+
 # The rules for credentials with a fixed prefix have no word boundary on
 # either side: a letter, digit or `_` touching the value, `key_AKIA...` or
 # `xoxb-...7`, does not stop a match. The PAN rule ends at a letter or digit
@@ -175,7 +204,10 @@ RULES: tuple[Rule, ...] = (
         ),
         group=1,
     ),
-    Rule("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{36,255}")),
+    # An installation token also comes in GitHub's stateless form,
+    # `ghs_<app id>_<JWT>`, about 520 characters. That alternative is tried
+    # first, so the match runs to the end of the signature.
+    Rule("github-token", _GITHUB_TOKEN, find=github_token_spans),
     Rule("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{22,255}")),
     Rule(
         "anthropic-api-key",
@@ -309,35 +341,53 @@ class T0RegexDetector:
         for why this exists rather than reconstructing values from hashes.
         """
         for unit in units:
-            if len(unit.text or "") < SHORTEST_MATCH:
-                continue
-            for rule in self._rules:
-                for start, end in spans(rule, unit.text):
-                    matched = unit.text[start:end]
-                    if rule.validate is not None and not rule.validate(matched):
-                        continue
-                    yield f"regex:{rule.id}", matched
+            for rule_id, start, end in self._unit_spans(unit.text or ""):
+                yield f"regex:{rule_id}", unit.text[start:end]
+
+    def _unit_spans(self, text: str) -> list[tuple[str, int, int]]:
+        """(rule id, start, end) of each validated match in `text`, less a
+        `jwt` match inside a `github-token` match: the JWT a stateless
+        installation token carries."""
+        if len(text) < SHORTEST_MATCH:
+            return []
+        found: list[tuple[str, int, int]] = []
+        for rule in self._rules:
+            for start, end in spans(rule, text):
+                if rule.validate is not None and not rule.validate(text[start:end]):
+                    continue
+                found.append((rule.id, start, end))
+        # Each rule's spans are in order and do not overlap, so the only token
+        # that can hold a `jwt` match is the last one starting at or before
+        # it, and one pass over both lists finds it.
+        tokens = [(s, e) for rule_id, s, e in found if rule_id == "github-token"]
+        if not tokens:
+            return found
+        kept: list[tuple[str, int, int]] = []
+        i = 0
+        for m in found:
+            if m[0] == "jwt":
+                while i + 1 < len(tokens) and tokens[i + 1][0] <= m[1]:
+                    i += 1
+                if tokens[i][0] <= m[1] and m[2] <= tokens[i][1]:
+                    continue
+            kept.append(m)
+        return kept
 
     def scan(self, units: Iterable[ScanUnit]) -> list[Finding]:
         findings: list[Finding] = []
         for unit in units:
-            if len(unit.text or "") < SHORTEST_MATCH:
-                continue
-            for rule in self._rules:
-                for start, end in spans(rule, unit.text):
-                    matched = unit.text[start:end]
-                    if rule.validate is not None and not rule.validate(matched):
-                        continue
-                    findings.append(
-                        Finding(
-                            detector=f"regex:{rule.id}",
-                            severity=self.severity,
-                            locator=unit.locator,
-                            excerpt_hash=digest(matched, self._salt),
-                            matched=matched,
-                            tool_name=unit.tool_name,
-                            start=start,
-                            end=end,
-                        )
+            for rule_id, start, end in self._unit_spans(unit.text or ""):
+                matched = unit.text[start:end]
+                findings.append(
+                    Finding(
+                        detector=f"regex:{rule_id}",
+                        severity=self.severity,
+                        locator=unit.locator,
+                        excerpt_hash=digest(matched, self._salt),
+                        matched=matched,
+                        tool_name=unit.tool_name,
+                        start=start,
+                        end=end,
                     )
+                )
         return findings

@@ -62,6 +62,7 @@ from pathlib import Path
 
 from ..models import Finding, ScanUnit, digest
 from .base import TIER_T1, DetectorFailed, ScanTruncated
+from .t0_regex import github_token_spans
 
 # gitleaks is fed the joined transcript. A frame can legally be 64 MiB; piping
 # that through a subprocess on the hot path is not worth it, so cap and log.
@@ -197,18 +198,34 @@ class GitleaksDetector:
             span_start, span_end = _span(item, unit.text, start - first_line)
             secret = item.get("Secret") or item.get("Match") or ""
             rule = item.get("RuleID") or "unknown"
-            findings.append(
-                Finding(
-                    detector=f"gitleaks:{rule}",
-                    severity=self.severity,
-                    locator=unit.locator,
-                    excerpt_hash=digest(secret, self._salt),
-                    matched=secret or None,
-                    tool_name=unit.tool_name,
-                    start=span_start,
-                    end=span_end,
+            # The baseline's stateless `github-app-token` alternative takes any
+            # `eyJ` header, and RE2 cannot decode one, so a dotted match is cut
+            # into the tokens T0's rule finds in it: a classic token starting
+            # `eyJ` loses the `.release01.archive02` after it, and a token
+            # glued inside a rejected candidate is still reported.
+            pieces = [(secret, span_start, span_end)]
+            if rule == "github-app-token" and "." in secret:
+                pieces = []
+                for lo, hi in github_token_spans(secret):
+                    value = secret[lo:hi]
+                    if span_start is not None \
+                            and unit.text[span_start + lo:span_start + hi] == value:
+                        pieces.append((value, span_start + lo, span_start + hi))
+                    else:
+                        pieces.append((value, None, None))
+            for value, begin, end in pieces:
+                findings.append(
+                    Finding(
+                        detector=f"gitleaks:{rule}",
+                        severity=self.severity,
+                        locator=unit.locator,
+                        excerpt_hash=digest(value, self._salt),
+                        matched=value or None,
+                        tool_name=unit.tool_name,
+                        start=begin,
+                        end=end,
+                    )
                 )
-            )
         if truncated:
             # Raised whether or not the scanned units produced findings.
             raise ScanTruncated(

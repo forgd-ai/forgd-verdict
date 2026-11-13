@@ -36,3 +36,11 @@ useDefault = true
 id = "aws-access-token"
 regex = '''(?:^|[^A-Z0-9])((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})(?:[^A-Z0-9]|$)'''
 secretGroup = 1
+
+# Overrides gitleaks' own rule of the same id, as above. Upstream takes
+# exactly 36 letters or digits after the prefix. GitHub's stateless
+# installation token is `ghs_<app id>_<JWT>`, about 520 characters, and the
+# first alternative matches all of one.
+[[rules]]
+id = "github-app-token"
+regex = '''ghs_(?:[0-9]{1,20}_)?eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|(?:ghu|ghs)_[0-9a-zA-Z]{36}'''

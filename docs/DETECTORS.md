@@ -66,7 +66,7 @@ pass before a finding is made.
 |---|---|---|
 | `aws-access-key` | `AKIA`, `ASIA`, `ABIA` or `ACCA` followed by 16 upper-case letters or digits | not directly after an upper-case letter or digit; not when the 16 characters are upper-case hex with a `0`, `1`, `8` or `9` among them, as in a hex digest |
 | `aws-secret-key` | 40 base64 characters | only after a label such as `aws_secret_access_key=`: `aws`, not directly after a letter or digit except at a camelCase hump, then `secret` or `sk`, optionally `access`, then `key`, then 1 to 10 quote, space, `:` or `=` characters |
-| `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_` or `ghr_`, then 36 to 255 letters or digits | none |
+| `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_` or `ghr_`, then 36 to 255 letters or digits; or GitHub's stateless App installation token, `ghs_`, an optional numeric app id and `_`, then a JWT: three dot-separated base64url segments, the first starting `eyJ`. About 520 characters, matched to the end of the signature | none |
 | `github-pat` | `github_pat_`, then 22 to 255 characters | none |
 | `anthropic-api-key` | `sk-ant-api` or `sk-ant-admin`, two digits, `-`, then 32 to 150 characters | none |
 | `anthropic-oauth-token` | `sk-ant-oat` or `sk-ant-ort`, two digits, `-`, then 32 to 200 characters: a Claude sign-in token | none |
@@ -76,7 +76,7 @@ pass before a finding is made.
 | `google-api-key` | `AIza`, then 35 characters | none |
 | `stripe-secret-key` | `sk_live_`, `sk_test_`, `rk_live_` or `rk_test_`, then 20 to 120 letters or digits | none |
 | `private-key-pem` | a `-----BEGIN … PRIVATE KEY-----` line: RSA, DSA, EC, OPENSSH, PGP, ENCRYPTED or bare | none |
-| `jwt` | three dot-separated segments of at least 8 characters, starting `eyJ` | the first segment must base64-decode to a JSON object with an `alg` field |
+| `jwt` | three dot-separated segments of at least 8 characters, starting `eyJ` | the first segment must base64-decode to a JSON object with an `alg` field. Not reported inside a `github-token` match, which covers the JWT a stateless installation token carries |
 | `ssn` | a US SSN written 3-2-4 with a separator | the same separator in both places: hyphen, en dash, dot or space. Then the SSN checks below |
 | `ssn-labeled` | nine digits, separated or not | a label within 20 non-digit characters before it: `ssn`, `s.s.n`, `social security` (optionally `number`, `no` or `#`), `soc sec`, `tax id`, `taxpayer id`. Then the SSN checks below |
 | `pan` | a payment card number: 13 to 19 digits, optionally separated by spaces or hyphens | the checks below |
@@ -241,9 +241,12 @@ two tiers overlap without either covering the other.
 **The config is pinned.** The subprocess always gets `--config`: the
 path in `detectors.gitleaks.config`, or the packaged
 `detectors/gitleaks-baseline.toml`, which extends gitleaks' default
-rules and overrides one: `aws-access-token` matches with a lower-case
+rules and overrides two. `aws-access-token` matches with a lower-case
 letter, `_` or punctuation on either side of the key, where gitleaks'
 own rule needs a word boundary, and takes the `A3T` prefix T0 does not.
+`github-app-token` also matches GitHub's stateless installation token,
+`ghs_<app id>_<JWT>`, to the end of its signature, where gitleaks' own
+rule takes exactly 36 letters or digits and misses it.
 gitleaks' other rules keep their upstream boundaries, so a value glued
 to a letter, digit or `_` is found by T1 only where the upstream rule
 has no boundary on that side; T0 covers the formats in its table. `GITLEAKS_CONFIG` and
