@@ -66,7 +66,7 @@ pass before a finding is made.
 |---|---|---|
 | `aws-access-key` | `AKIA`, `ASIA`, `ABIA` or `ACCA` followed by 16 upper-case letters or digits | not directly after an upper-case letter or digit; not when the 16 characters are upper-case hex with a `0`, `1`, `8` or `9` among them, as in a hex digest |
 | `aws-secret-key` | 40 base64 characters | only after a label such as `aws_secret_access_key=`: `aws`, not directly after a letter or digit except at a camelCase hump, then `secret` or `sk`, optionally `access`, then `key`, then 1 to 10 quote, space, `:` or `=` characters |
-| `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_` or `ghr_`, then 36 to 255 letters or digits | none |
+| `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_` or `ghr_`, then 36 to 255 letters or digits; or `ghs_` or `ghu_`, then three dot-separated segments of 8 to 1,024 letters, digits, `-` or `_` each: GitHub's stateless App installation token, about 520 characters, matched to the end of its last segment | none |
 | `github-pat` | `github_pat_`, then 22 to 255 characters | none |
 | `anthropic-api-key` | `sk-ant-api` or `sk-ant-admin`, two digits, `-`, then 32 to 150 characters | none |
 | `anthropic-oauth-token` | `sk-ant-oat` or `sk-ant-ort`, two digits, `-`, then 32 to 200 characters: a Claude sign-in token | none |
@@ -241,9 +241,13 @@ two tiers overlap without either covering the other.
 **The config is pinned.** The subprocess always gets `--config`: the
 path in `detectors.gitleaks.config`, or the packaged
 `detectors/gitleaks-baseline.toml`, which extends gitleaks' default
-rules and overrides one: `aws-access-token` matches with a lower-case
+rules and overrides two. `aws-access-token` matches with a lower-case
 letter, `_` or punctuation on either side of the key, where gitleaks'
 own rule needs a word boundary, and takes the `A3T` prefix T0 does not.
+`github-app-token` also matches GitHub's stateless `ghs_` and `ghu_`
+tokens, three dot-separated segments of at least 8 base64url
+characters each, where gitleaks' own rule takes exactly 36 letters or
+digits and misses them.
 gitleaks' other rules keep their upstream boundaries, so a value glued
 to a letter, digit or `_` is found by T1 only where the upstream rule
 has no boundary on that side; T0 covers the formats in its table. `GITLEAKS_CONFIG` and

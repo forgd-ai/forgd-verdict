@@ -175,7 +175,14 @@ RULES: tuple[Rule, ...] = (
         ),
         group=1,
     ),
-    Rule("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{36,255}")),
+    # `ghs_` and `ghu_` also come in GitHub's stateless form: three
+    # dot-separated base64url segments, about 520 characters in all. That
+    # alternative is tried first, so the match runs to the end of the
+    # signature.
+    Rule("github-token", re.compile(
+        rf"gh(?:[su]_[{_JWT_CLASS}]{{8,1024}}+\.[{_JWT_CLASS}]{{8,1024}}+\."
+        rf"[{_JWT_CLASS}]{{8,1024}}+|[pousr]_[A-Za-z0-9]{{36,255}})"
+    )),
     Rule("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{22,255}")),
     Rule(
         "anthropic-api-key",

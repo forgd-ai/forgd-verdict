@@ -81,7 +81,7 @@ GENERIC_PREFIXES = ("eyJ-", "curl -d ", "curl ", ".env ", "cat ~/.aws/credential
 RULE_PREFIXES: dict[str, tuple[str, ...]] = {
     "regex:aws-access-key": ("AKIA", "ASIA"),
     "regex:aws-secret-key": ("aws_secret_access_key=", "aws sk "),
-    "regex:github-token": ("ghp_",),
+    "regex:github-token": ("ghp_", "ghs_", "ghs_aaaaaaaa.", "ghs_aaaaaaaa.aaaaaaaa."),
     "regex:github-pat": ("github_pat_",),
     "regex:anthropic-api-key": ("sk-ant-api01-",),
     "regex:anthropic-oauth-token": ("sk-ant-oat01-",),
