@@ -1,10 +1,10 @@
 """GitHub tokens in both formats are found, and found to their last character.
 
-GitHub App installation tokens (`ghs_`) moved to a stateless format: three
-dot-separated base64url segments, about 520 characters. A rule that takes
-only letters and digits after the prefix either misses one, when the first
-segment is short, or matches its first segment and leaves the signature for
-a redacting sink to forward.
+GitHub App installation tokens moved to a stateless format, `ghs_<app
+id>_<JWT>`, about 520 characters. A rule that takes only letters and digits
+after the prefix either misses one, when the JWT header is short, or matches
+up to the first dot and leaves the payload and signature for a redacting sink
+to forward.
 
 Every value here is synthetic and built by concatenation.
 """
@@ -45,8 +45,11 @@ HEADERS = {
 }
 
 
-def _stateless(prefix: str, header: str) -> str:
-    return "gh" + prefix + "_" + header + "." + PAYLOAD + "." + SIGNATURE
+APP_IDS = {"app id": "123456" + "_", "no app id": ""}
+
+
+def _stateless(header: str, app_id: str = APP_IDS["app id"]) -> str:
+    return "gh" + "s_" + app_id + header + "." + PAYLOAD + "." + SIGNATURE
 
 
 CLASSIC = {p: "gh" + p + "_" + "A1b2C3d4E5" * 3 + "F6g7H8" for p in "pousr"}
@@ -60,17 +63,37 @@ def _t0_spans(text: str) -> list[str]:
     return [text[f.start:f.end] for f in found if f.detector == "regex:github-token"]
 
 
-assert all(len(_stateless("s", h)) > 400 for h in HEADERS.values())
+assert all(len(_stateless(h)) > 400 for h in HEADERS.values())
 assert len(HEADERS["short"]) == 20 and len(HEADERS["36"]) == 36
 assert "-" in SIGNATURE and "_" in SIGNATURE
 
 
-@pytest.mark.parametrize("prefix", ["s", "u"])
+@pytest.mark.parametrize("app_id", APP_IDS)
 @pytest.mark.parametrize("header", HEADERS)
 @pytest.mark.parametrize("after", AFTER)
-def test_a_stateless_token_is_matched_to_its_last_character(prefix, header, after):
-    token = _stateless(prefix, HEADERS[header])
+def test_a_stateless_token_is_matched_to_its_last_character(app_id, header, after):
+    token = _stateless(HEADERS[header], APP_IDS[app_id])
     assert _t0_spans(f"token: {token}{after}") == [token]
+
+
+@pytest.mark.parametrize("app_id", APP_IDS)
+def test_a_stateless_token_is_one_finding_and_not_also_a_jwt(app_id):
+    token = _stateless(HEADERS["36"], APP_IDS[app_id])
+    text = f"token: {token}. Done"
+    t0 = T0RegexDetector()
+    found = t0.scan([ScanUnit("t", None, text)])
+    assert [(f.detector, text[f.start:f.end]) for f in found] == [
+        ("regex:github-token", token)]
+    assert list(t0.matches([ScanUnit("t", None, text)])) == [("regex:github-token", token)]
+
+
+def test_a_jwt_outside_a_github_token_is_still_reported():
+    jwt = HEADERS["36"] + "." + PAYLOAD + "." + SIGNATURE
+    text = f"{_stateless(HEADERS['36'])} and {jwt}"
+    found = T0RegexDetector().scan([ScanUnit("t", None, text)])
+    assert sorted(f.detector for f in found) == ["regex:github-token", "regex:jwt"]
+    (j,) = [f for f in found if f.detector == "regex:jwt"]
+    assert text[j.start:j.end] == jwt
 
 
 @pytest.mark.parametrize("prefix", "pousr")
@@ -83,15 +106,29 @@ def test_a_classic_token_still_matches_exactly(prefix, after):
 @pytest.mark.parametrize("text", [
     "ghs_config.yaml.bak",
     "see ghs_abc.defghijk.lmnopqrs",
+    "ghs_abcdefgh.ijklmnop.qrstuvwx",
+    "ghs_123456_abcdefgh.ijklmnop.qrstuvwx",
     "ghu_" + "a" * 8 + "." + "b" * 8,
     "ghp_" + "a" * 20 + "." + "b" * 20 + "." + "c" * 20,
 ])
-def test_short_or_two_segment_text_after_a_prefix_is_clean(text):
+def test_dotted_text_after_a_prefix_is_clean(text):
+    assert _t0_spans(text) == []
+
+
+@pytest.mark.parametrize("prefix", "pousr")
+def test_a_classic_token_does_not_take_a_dotted_suffix(prefix):
+    token = CLASSIC[prefix]
+    assert _t0_spans(f"{token}.release01.archive02") == [token]
+
+
+@pytest.mark.parametrize("prefix", "pour")
+def test_only_an_installation_token_has_a_stateless_form(prefix):
+    text = "gh" + prefix + "_123456_" + HEADERS["36"] + "." + PAYLOAD + "." + SIGNATURE
     assert _t0_spans(text) == []
 
 
 def test_a_redacting_sink_forwards_none_of_a_stateless_token():
-    token = _stateless("s", HEADERS["short"])
+    token = _stateless(HEADERS["short"])
     text = f"use {token}. Thanks"
     loc = "otel[0].agent.query.user.message"
     rec = OtelRecord(kind="span", name="agent.query", attributes={"user.message": text})
@@ -109,13 +146,34 @@ def test_a_redacting_sink_forwards_none_of_a_stateless_token():
     assert PAYLOAD not in msg and SIGNATURE[-40:] not in msg
 
 
-@pytest.mark.parametrize("header", HEADERS)
-def test_gitleaks_matches_a_stateless_token_to_its_last_character(header):
+def _gitleaks() -> GitleaksDetector:
     gitleaks = GitleaksDetector()
     if not gitleaks.available():
         pytest.skip("gitleaks is not installed")
-    token = _stateless("s", HEADERS[header])
-    text = f"token: {token}. Done"
-    found: list[Finding] = gitleaks.scan([ScanUnit("t", None, text)])
-    assert [(f.detector, text[f.start:f.end]) for f in found] == [
+    return gitleaks
+
+
+def _gitleaks_hits(text: str) -> list[tuple[str, str]]:
+    found: list[Finding] = _gitleaks().scan([ScanUnit("t", None, text)])
+    return [(f.detector, text[f.start:f.end]) for f in found]
+
+
+@pytest.mark.parametrize("app_id", APP_IDS)
+@pytest.mark.parametrize("header", HEADERS)
+def test_gitleaks_matches_a_stateless_token_to_its_last_character(app_id, header):
+    token = _stateless(HEADERS[header], APP_IDS[app_id])
+    assert _gitleaks_hits(f"token: {token}. Done") == [("gitleaks:github-app-token", token)]
+
+
+@pytest.mark.parametrize("text", [
+    "ghs_abcdefgh.ijklmnop.qrstuvwx",
+    "ghu_123456_" + HEADERS["36"] + "." + PAYLOAD + ".abcdefgh",
+])
+def test_gitleaks_leaves_dotted_text_after_a_prefix(text):
+    assert [d for d, _ in _gitleaks_hits(text) if d == "gitleaks:github-app-token"] == []
+
+
+def test_gitleaks_does_not_extend_a_classic_token_over_a_dotted_suffix():
+    token = "gh" + "s_" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2"
+    assert _gitleaks_hits(f"{token}.release01.archive02") == [
         ("gitleaks:github-app-token", token)]
