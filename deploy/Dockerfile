@@ -69,7 +69,7 @@ RUN sh /tmp/collect_go_licenses.sh /out/gitleaks /out/licenses \
 # The forgd-verdict wheel. The build backend comes from build.txt, pinned and
 # hash-checked, and is used in place (--no-build-isolation) so the build
 # fetches nothing else. Only the wheel leaves this stage.
-FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS wheel
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS wheel
 WORKDIR /src
 COPY deploy/constraints/build.txt /tmp/build.txt
 RUN pip install --no-cache-dir --require-hashes --no-deps -r /tmp/build.txt
@@ -77,7 +77,7 @@ COPY pyproject.toml hatch_build.py README.md LICENSE NOTICE ./
 COPY src ./src
 RUN pip wheel --no-cache-dir --no-deps --no-build-isolation --wheel-dir /wheels .
 
-FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f AS base
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS base
 
 # gitleaks (T1), from the gitleaks stage.
 ARG GITLEAKS_VERSION
