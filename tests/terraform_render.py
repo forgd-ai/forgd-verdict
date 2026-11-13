@@ -360,7 +360,7 @@ def off_versus_baseline(tmp: Path, name: str, variables: dict, current: dict | N
 TERRAFORM = ROOT / "deploy" / "terraform"
 STACK_EDITS = {("cluster-aks", "main.tf"): [(
     "azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id",
-    'try(azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id, "planned")')]}
+    'try(azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id, "00000000-0000-0000-0000-000000000000")')]}
 MODULE_BLOCK = re.compile(r'^module "(\w+)" \{\n(.*?)^\}', re.M | re.S)
 
 
