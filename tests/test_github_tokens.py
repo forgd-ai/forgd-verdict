@@ -198,3 +198,21 @@ def test_an_undecodable_header_that_is_no_classic_token_is_no_finding():
     assert _t0_spans("gh" + "s_eyJhbGciOi.aaaaaaaa.aaaaaaaa next") == []
     assert [d for d, _ in _gitleaks_hits("gh" + "s_eyJhbGciOi.aaaaaaaa.aaaaaaaa next")
             if d == "gitleaks:github-app-token"] == []
+
+
+GLUED_STATELESS = "gh" + "s_" + "eyJhbGciOiJSUzI1NiJ9" + ".pppppppp.ssssssss"
+
+
+def test_a_token_glued_after_a_rejected_candidate_is_found():
+    rejected = "gh" + "s_1_eyJAAAAA"
+    assert _t0_spans(rejected + GLUED_STATELESS) == [GLUED_STATELESS]
+    assert _gitleaks_hits(rejected + GLUED_STATELESS) == [
+        ("gitleaks:github-app-token", GLUED_STATELESS)]
+
+
+def test_a_classic_fallback_stops_at_40_characters_so_a_glued_token_is_found():
+    classic = "gh" + "s_" + "eyJ" + "A" * 33
+    assert _t0_spans(classic + GLUED_STATELESS) == [classic, GLUED_STATELESS]
+    assert _gitleaks_hits(classic + GLUED_STATELESS) == [
+        ("gitleaks:github-app-token", classic),
+        ("gitleaks:github-app-token", GLUED_STATELESS)]

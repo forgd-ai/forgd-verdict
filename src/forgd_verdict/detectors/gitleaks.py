@@ -54,7 +54,6 @@ import bisect
 import concurrent.futures
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -63,7 +62,7 @@ from pathlib import Path
 
 from ..models import Finding, ScanUnit, digest
 from .base import TIER_T1, DetectorFailed, ScanTruncated
-from .t0_regex import is_stateless_github_token
+from .t0_regex import github_token_spans
 
 # gitleaks is fed the joined transcript. A frame can legally be 64 MiB; piping
 # that through a subprocess on the hot path is not worth it, so cap and log.
@@ -71,10 +70,6 @@ DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 
 # Shipped alongside this module; see the file for why it is mandatory.
 BASELINE_CONFIG = Path(__file__).with_name("gitleaks-baseline.toml")
-
-# The classic form of the baseline's `github-app-token` rule.
-_CLASSIC_APP_TOKEN = re.compile(r"gh[su]_[0-9A-Za-z]{36}")
-_CLASSIC_APP_TOKEN_LEN = 40
 
 # The config the running daemon loaded, exported by deploy/entrypoint.sh.
 GITLEAKS_CONFIG_ENV = "FORGD_GITLEAKS_CONFIG"
@@ -203,31 +198,34 @@ class GitleaksDetector:
             span_start, span_end = _span(item, unit.text, start - first_line)
             secret = item.get("Secret") or item.get("Match") or ""
             rule = item.get("RuleID") or "unknown"
-            if rule == "github-app-token" and "." in secret \
-                    and not is_stateless_github_token(secret):
-                # The baseline's stateless alternative takes any `eyJ` header,
-                # and RE2 cannot decode it: what follows a classic token that
-                # starts `eyJ`, `.release01.archive02`, is not part of it.
-                if _CLASSIC_APP_TOKEN.match(secret) is None:
-                    continue
-                secret = secret[:_CLASSIC_APP_TOKEN_LEN]
-                if span_start is None \
-                        or unit.text[span_start:span_start + len(secret)] != secret:
-                    span_start = span_end = None
-                else:
-                    span_end = span_start + len(secret)
-            findings.append(
-                Finding(
-                    detector=f"gitleaks:{rule}",
-                    severity=self.severity,
-                    locator=unit.locator,
-                    excerpt_hash=digest(secret, self._salt),
-                    matched=secret or None,
-                    tool_name=unit.tool_name,
-                    start=span_start,
-                    end=span_end,
+            # The baseline's stateless `github-app-token` alternative takes any
+            # `eyJ` header, and RE2 cannot decode one, so a dotted match is cut
+            # into the tokens T0's rule finds in it: a classic token starting
+            # `eyJ` loses the `.release01.archive02` after it, and a token
+            # glued inside a rejected candidate is still reported.
+            pieces = [(secret, span_start, span_end)]
+            if rule == "github-app-token" and "." in secret:
+                pieces = []
+                for lo, hi in github_token_spans(secret):
+                    value = secret[lo:hi]
+                    if span_start is not None \
+                            and unit.text[span_start + lo:span_start + hi] == value:
+                        pieces.append((value, span_start + lo, span_start + hi))
+                    else:
+                        pieces.append((value, None, None))
+            for value, begin, end in pieces:
+                findings.append(
+                    Finding(
+                        detector=f"gitleaks:{rule}",
+                        severity=self.severity,
+                        locator=unit.locator,
+                        excerpt_hash=digest(value, self._salt),
+                        matched=value or None,
+                        tool_name=unit.tool_name,
+                        start=begin,
+                        end=end,
+                    )
                 )
-            )
         if truncated:
             # Raised whether or not the scanned units produced findings.
             raise ScanTruncated(

@@ -163,21 +163,14 @@ _GITHUB_TOKEN = re.compile(
     rf"[{_JWT_CLASS}]{{8,1024}}+\.[{_JWT_CLASS}]{{8,1024}}+"
     rf"|[pousr]_[A-Za-z0-9]{{36,255}})"
 )
-_GITHUB_CLASSIC = re.compile(r"gh[pousr]_[A-Za-z0-9]{36,255}")
+_GITHUB_CLASSIC = re.compile(r"gh[pousr]_[A-Za-z0-9]{36}")
 
 
-def is_stateless_github_token(token: str) -> bool:
-    """True when `token` is `ghs_`, an optional app id and `_`, then a JWT
-    whose header decodes to a JOSE header."""
-    match = _GITHUB_TOKEN.fullmatch(token)
-    return match is not None and match.group(1) is not None \
-        and _is_jose_header(match.group(1))
-
-
-def _github_spans(text: str) -> Iterator[tuple[int, int]]:
+def github_token_spans(text: str) -> Iterator[tuple[int, int]]:
     """Spans of `_GITHUB_TOKEN`, where a stateless candidate whose header
-    does not decode is a classic token, as `ghs_eyJ...` followed by
-    `.release01.archive02` is, or no token."""
+    does not decode is cut back to the 40 characters of a classic token, as
+    `ghs_eyJ...` followed by `.release01.archive02` is, or skipped. The
+    search resumes after the cut, so a token glued to it is still found."""
     pos = 0
     while (match := _GITHUB_TOKEN.search(text, pos)) is not None:
         start, end = match.span()
@@ -214,7 +207,7 @@ RULES: tuple[Rule, ...] = (
     # An installation token also comes in GitHub's stateless form,
     # `ghs_<app id>_<JWT>`, about 520 characters. That alternative is tried
     # first, so the match runs to the end of the signature.
-    Rule("github-token", _GITHUB_TOKEN, find=_github_spans),
+    Rule("github-token", _GITHUB_TOKEN, find=github_token_spans),
     Rule("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{22,255}")),
     Rule(
         "anthropic-api-key",
