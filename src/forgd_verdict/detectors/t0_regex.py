@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator
 from typing import NamedTuple
 
@@ -27,8 +26,10 @@ class Rule(NamedTuple):
     validate: Callable[[str], bool] | None = None
     # Which capture group holds the sensitive text (0 = whole match).
     group: int = 0
-    # Reports exactly the spans of `group` that `pattern.finditer` would, in
-    # linear time, where finditer itself is not.
+    # Reports the spans in place of `pattern.finditer`: for `jwt`, exactly
+    # its spans in linear time, where finditer itself is not; for
+    # `github-token`, its spans with a stateless candidate whose header does
+    # not decode cut back to a classic token.
     find: Callable[[str], Iterator[tuple[int, int]]] | None = None
 
 
@@ -95,11 +96,7 @@ def _is_ssn(text: str) -> bool:
     return len(set(digits)) != 1
 
 
-def _is_jwt(text: str) -> bool:
-    parts = text.split(".")
-    if len(parts) != 3:
-        return False
-    head = parts[0]
+def _is_jose_header(head: str) -> bool:
     try:
         raw = base64.urlsafe_b64decode(head + "=" * (-len(head) % 4))
         payload = load_json(raw)
@@ -108,6 +105,11 @@ def _is_jwt(text: str) -> bool:
     # A real JOSE header always carries `alg`. This rejects the many
     # dot-separated base64-ish strings that are not tokens.
     return isinstance(payload, dict) and "alg" in payload
+
+
+def _is_jwt(text: str) -> bool:
+    parts = text.split(".")
+    return len(parts) == 3 and _is_jose_header(parts[0])
 
 
 _HEX = re.compile(r"[0-9A-F]+")
@@ -156,6 +158,39 @@ def _jwt_spans(text: str) -> Iterator[tuple[int, int]]:
             pos = match.end()
 
 
+_GITHUB_TOKEN = re.compile(
+    rf"gh(?:s_(?:[0-9]{{1,20}}_)?(eyJ[{_JWT_CLASS}]{{5,1024}}+)\."
+    rf"[{_JWT_CLASS}]{{8,1024}}+\.[{_JWT_CLASS}]{{8,1024}}+"
+    rf"|[pousr]_[A-Za-z0-9]{{36,255}})"
+)
+_GITHUB_CLASSIC = re.compile(r"gh[pousr]_[A-Za-z0-9]{36,255}")
+
+
+def is_stateless_github_token(token: str) -> bool:
+    """True when `token` is `ghs_`, an optional app id and `_`, then a JWT
+    whose header decodes to a JOSE header."""
+    match = _GITHUB_TOKEN.fullmatch(token)
+    return match is not None and match.group(1) is not None \
+        and _is_jose_header(match.group(1))
+
+
+def _github_spans(text: str) -> Iterator[tuple[int, int]]:
+    """Spans of `_GITHUB_TOKEN`, where a stateless candidate whose header
+    does not decode is a classic token, as `ghs_eyJ...` followed by
+    `.release01.archive02` is, or no token."""
+    pos = 0
+    while (match := _GITHUB_TOKEN.search(text, pos)) is not None:
+        start, end = match.span()
+        if match.group(1) is not None and not _is_jose_header(match.group(1)):
+            classic = _GITHUB_CLASSIC.match(text, start)
+            if classic is None:
+                pos = start + 1
+                continue
+            end = classic.end()
+        yield start, end
+        pos = end
+
+
 # The rules for credentials with a fixed prefix have no word boundary on
 # either side: a letter, digit or `_` touching the value, `key_AKIA...` or
 # `xoxb-...7`, does not stop a match. The PAN rule ends at a letter or digit
@@ -179,11 +214,7 @@ RULES: tuple[Rule, ...] = (
     # An installation token also comes in GitHub's stateless form,
     # `ghs_<app id>_<JWT>`, about 520 characters. That alternative is tried
     # first, so the match runs to the end of the signature.
-    Rule("github-token", re.compile(
-        rf"gh(?:s_(?:[0-9]{{1,20}}_)?eyJ[{_JWT_CLASS}]{{5,1024}}+\."
-        rf"[{_JWT_CLASS}]{{8,1024}}+\.[{_JWT_CLASS}]{{8,1024}}+"
-        rf"|[pousr]_[A-Za-z0-9]{{36,255}})"
-    )),
+    Rule("github-token", _GITHUB_TOKEN, find=_github_spans),
     Rule("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{22,255}")),
     Rule(
         "anthropic-api-key",
@@ -332,18 +363,22 @@ class T0RegexDetector:
                 if rule.validate is not None and not rule.validate(text[start:end]):
                     continue
                 found.append((rule.id, start, end))
-        # `finditer` matches do not overlap, so the only token that can hold a
-        # match is the last one starting at or before it.
-        starts = [s for rule_id, s, _ in found if rule_id == "github-token"]
-        if not starts:
+        # Each rule's spans are in order and do not overlap, so the only token
+        # that can hold a `jwt` match is the last one starting at or before
+        # it, and one pass over both lists finds it.
+        tokens = [(s, e) for rule_id, s, e in found if rule_id == "github-token"]
+        if not tokens:
             return found
-        ends = [e for rule_id, _, e in found if rule_id == "github-token"]
-
-        def inside_token(start: int, end: int) -> bool:
-            i = bisect_right(starts, start) - 1
-            return i >= 0 and end <= ends[i]
-
-        return [m for m in found if m[0] != "jwt" or not inside_token(m[1], m[2])]
+        kept: list[tuple[str, int, int]] = []
+        i = 0
+        for m in found:
+            if m[0] == "jwt":
+                while i + 1 < len(tokens) and tokens[i + 1][0] <= m[1]:
+                    i += 1
+                if tokens[i][0] <= m[1] and m[2] <= tokens[i][1]:
+                    continue
+            kept.append(m)
+        return kept
 
     def scan(self, units: Iterable[ScanUnit]) -> list[Finding]:
         findings: list[Finding] = []

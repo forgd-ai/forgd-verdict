@@ -177,3 +177,24 @@ def test_gitleaks_does_not_extend_a_classic_token_over_a_dotted_suffix():
     token = "gh" + "s_" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2"
     assert _gitleaks_hits(f"{token}.release01.archive02") == [
         ("gitleaks:github-app-token", token)]
+
+
+# A classic installation token whose first characters happen to be `eyJ`,
+# then a dotted name: the header does not decode, so it is not stateless.
+EYJ_CLASSIC = "gh" + "s_" + "eyJAb3Def5Ghi7Jkl9Mno2Pqr4Stu6Vwx8Yz"
+DOTTED_SUFFIX = ".release01.archive02"
+
+
+def test_a_classic_token_starting_eyj_does_not_take_a_dotted_suffix():
+    assert _t0_spans(f"{EYJ_CLASSIC}{DOTTED_SUFFIX} next") == [EYJ_CLASSIC]
+
+
+def test_gitleaks_trims_a_classic_token_starting_eyj_to_its_classic_span():
+    assert _gitleaks_hits(f"{EYJ_CLASSIC}{DOTTED_SUFFIX} next") == [
+        ("gitleaks:github-app-token", EYJ_CLASSIC)]
+
+
+def test_an_undecodable_header_that_is_no_classic_token_is_no_finding():
+    assert _t0_spans("gh" + "s_eyJhbGciOi.aaaaaaaa.aaaaaaaa next") == []
+    assert [d for d, _ in _gitleaks_hits("gh" + "s_eyJhbGciOi.aaaaaaaa.aaaaaaaa next")
+            if d == "gitleaks:github-app-token"] == []

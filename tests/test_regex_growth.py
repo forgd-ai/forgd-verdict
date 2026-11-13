@@ -245,6 +245,13 @@ PATTERN_SHAPES: dict[str, tuple[Shape, ...]] = {
     "forgd_verdict.detectors.t0_regex._JWT_HEADER_RUN": (
         Shape("a"), Shape("a" * 11 + "."), Shape("a", tail="."), Shape("a-"),
     ),
+    "forgd_verdict.detectors.t0_regex._GITHUB_TOKEN": (
+        Shape("ghs_"), Shape("ghs_1_"), Shape("ghs_eyJaaaaa."), Shape("ghs_1_eyJaaaaa.aaaaaaaa."),
+        Shape("a", "ghs_eyJ", "."), Shape("a", "ghs_eyJaaaaa.", "."), Shape("1_", "ghs_"),
+    ),
+    "forgd_verdict.detectors.t0_regex._GITHUB_CLASSIC": (
+        Shape("ghp_"), Shape("a", "ghs_", "."), Shape("ghs_a"),
+    ),
     "forgd_verdict.detectors.t0_regex._HEX": (Shape("A"), Shape("A", tail="G")),
     "forgd_verdict.detectors.t0_regex._NOT_BASE32": (Shape("A"), Shape("0")),
     "forgd_verdict.detectors.t0_regex._JWT_START": (Shape("eyJ"), Shape("eyJ-"), Shape("aeyJ")),
@@ -327,7 +334,16 @@ RUN_THROUGH: dict[str, Callable[[str], object]] = {
 }
 
 # Content-facing functions whose cost is not one module-level pattern.
+_JWT_SAMPLE = "eyJhbGciOiJSUzI1NiJ9.cGF5bG9hZDAw.YWJjZGVmZ2g"
+
 FUNCTION_SHAPES: dict[str, tuple[Callable[[str], object], tuple[Shape, ...]]] = {
+    # The jwt-inside-a-token sweep runs over every rule's matches at once.
+    "t0_regex.T0RegexDetector.scan": (
+        lambda text: t0_regex.T0RegexDetector().scan([core.ScanUnit("t", None, text)]),
+        (Shape("gh" + "s_1_" + _JWT_SAMPLE + " " + _JWT_SAMPLE + " "),
+         Shape("gh" + "s_" + _JWT_SAMPLE + " "), Shape(_JWT_SAMPLE + " "),
+         Shape("gh" + "s_eyJhbGciOi.aaaaaaaa.aaaaaaaa ")),
+    ),
     "provenance._canon": (
         provenance._canon,
         (Shape(" ", "a", "a"), Shape('"', "a", "a"), Shape("'\" ", "a", "a"),
