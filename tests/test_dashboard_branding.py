@@ -355,3 +355,17 @@ def test_a_themed_rail_keeps_its_colour_in_the_light_scheme():
     light = themed.scheme_css.split(":root[data-theme=light]", 1)[1]
     assert "--rail-bg" not in light
     assert "--rail-bg:#F4F1EA;" in themed.scheme_css
+
+
+def test_an_svg_may_open_with_a_declaration_and_comments():
+    from forgd_verdict.policy import IMAGE_SVG, sniff_image
+
+    svg = b'\xef\xbb\xbf <?xml version="1.0"?>\n<!-- a -->\n<!---->\n<!-- <svg> -->\n<svg viewBox="0 0 1 1"/>'
+    assert sniff_image(svg) == IMAGE_SVG
+    assert sniff_image(b"<!-- a --> text <svg/>") is None
+
+
+def test_an_svg_comment_ends_at_its_first_close():
+    from forgd_verdict.policy import sniff_image
+
+    assert sniff_image(b"<!-- a -->!--> <svg/>") is None

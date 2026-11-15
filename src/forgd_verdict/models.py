@@ -456,8 +456,12 @@ _HOSTNAME = re.compile(r"[a-z0-9_](?:[a-z0-9_.-]{0,251}[a-z0-9_.])?")
 _IPV6 = re.compile(r"[0-9a-f:.]{2,45}")
 _PLAIN = re.compile(r"[^@?#;=%\\\s]*")
 _SEGMENT_UNSAFE = re.compile(r"[;=@%\\\s]|[^\x21-\x7e]")
-# Anything URL-shaped inside free text.
-_EMBEDDED = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]*")
+# Anything URL-shaped inside free text: group 2 is the URL, starting at the
+# first letter of a run of scheme characters, and group 1 what precedes it in
+# that run. A match starts only where a run starts.
+_EMBEDDED = re.compile(
+    r"(?<![A-Za-z0-9+.-])([0-9+.-]*+)([A-Za-z][A-Za-z0-9+.-]*+://[^\s'\"<>]*+)"
+)
 
 
 def shown_url(value: str) -> str:
@@ -506,7 +510,7 @@ def shown_text(text: str) -> str:
     """`text` with every URL inside it passed through `shown_url`."""
     if "://" not in text:
         return text
-    return _EMBEDDED.sub(lambda m: shown_url(m.group(0)), text)
+    return _EMBEDDED.sub(lambda m: m[1] + shown_url(m[2]), text)
 
 
 # -- state names --------------------------------------------------------------

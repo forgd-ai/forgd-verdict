@@ -349,3 +349,14 @@ def test_a_malformed_bucket_spec_error_does_not_echo_a_credential(spec):
     with pytest.raises(Exception) as exc:  # noqa: B017 - any refusal, as long as it is quiet
         open_store(spec, instance="t")
     assert CANARY not in str(exc.value)
+
+
+@pytest.mark.parametrize("prefix", ["", "1", "1+", "-.", "9-"])
+def test_a_url_inside_free_text_starts_at_the_first_letter_of_its_scheme(prefix):
+    from forgd_verdict.models import shown_text
+
+    text = f"see {prefix}https://u:{CANARY}@h.example/x and 1ab://{CANARY}@k.example"
+    shown = shown_text(text)
+    assert CANARY not in shown
+    assert shown.startswith(f"see {prefix}https://")
+    assert " and 1ab://" in shown
