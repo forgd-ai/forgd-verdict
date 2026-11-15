@@ -27,7 +27,6 @@ from typing import NamedTuple
 
 import pytest
 
-import forgd_verdict
 from forgd_verdict import core, extract
 from forgd_verdict.behaviour import provenance
 from forgd_verdict.detectors import checksums, entropy, injection, mlpii, shell_exfil, t0_regex
@@ -595,7 +594,8 @@ _QUICK_ABORT_S = 5.0
 def _package_patterns() -> dict[str, re.Pattern]:
     seen = {id(p) for p in _module_patterns().values()}
     found: dict[str, re.Pattern] = {}
-    for info in pkgutil.walk_packages(forgd_verdict.__path__, "forgd_verdict."):
+    for info in pkgutil.walk_packages(importlib.import_module("forgd_verdict").__path__,
+                                      "forgd_verdict."):
         if info.name in _APP_ENTRY_POINTS:
             continue
         module = importlib.import_module(info.name)
