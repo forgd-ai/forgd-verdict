@@ -6,13 +6,18 @@ of what a repeat accepts, ended by a character it does not, is the other.
 Each pattern is timed on such inputs at sizes a fixed factor apart, and the
 ratio of the times is compared with the ratio of the sizes. No absolute time
 is asserted.
+
+Every other module-level pattern in the package is timed on its own literal
+characters, repeated.
 """
 
 from __future__ import annotations
 
 import gc
+import importlib
 import itertools
 import math
+import pkgutil
 import re
 import signal
 import threading
@@ -559,3 +564,87 @@ def test_content_pattern_scans_adversarial_text_in_linear_time(name, shape):
 )
 def test_content_function_runs_in_linear_time(name, shape):
     _assert_linear(name, FUNCTION_SHAPES[name][0], shape)
+
+
+# Every other module-level pattern in the package is timed on its own literal
+# characters, repeated. A pattern the package only calls through `match` or
+# `fullmatch` is timed through that call.
+ANCHORED: dict[str, str] = {
+    "forgd_verdict.models._SCHEME": "match",
+    "forgd_verdict.policy._SVG_ROOT": "match",
+    "forgd_verdict.overrides._RELEASE": "fullmatch",
+}
+# Shapes the literal units do not build: a repeat longer than three characters.
+EXTRA_SHAPES: dict[str, tuple[Shape, ...]] = {
+    "forgd_verdict.policy._SVG_ROOT": (Shape("--><!--", head="<!--"), Shape("<!---->"),
+                                       Shape("-", head="<!--")),
+}
+# Patterns that read only text the package ships, with what they read.
+PACKAGED_INPUT: dict[str, str] = {
+    "forgd_verdict.dashboard.branding._ROOT_DECL": "dashboard.branding.TOKENS_CSS",
+}
+# Modules that build an app on import, from the environment. They hold no
+# patterns.
+_APP_ENTRY_POINTS = ("forgd_verdict.intake.factory", "forgd_verdict.otel.factory",
+                     "forgd_verdict.server.factory")
+_FILLERS = ("a", "A", "0", " ", "-", ".", "/", ":")
+_QUICK_ABORT_S = 5.0
+
+
+def _package_patterns() -> dict[str, re.Pattern]:
+    seen = {id(p) for p in _module_patterns().values()}
+    found: dict[str, re.Pattern] = {}
+    for info in pkgutil.walk_packages(importlib.import_module("forgd_verdict").__path__,
+                                      "forgd_verdict."):
+        if info.name in _APP_ENTRY_POINTS:
+            continue
+        module = importlib.import_module(info.name)
+        for name, value in sorted(vars(module).items()):
+            if isinstance(value, re.Pattern) and id(value) not in seen:
+                seen.add(id(value))
+                found[f"{module.__name__}.{name}"] = value
+    return found
+
+
+PACKAGE_PATTERNS = _package_patterns()
+
+
+def _literal_units(pattern: re.Pattern) -> list[str]:
+    """Every 1-3 character run of the pattern's literal text, and fillers."""
+    source = pattern.pattern if isinstance(pattern.pattern, str) else pattern.pattern.decode("latin-1")
+    text = re.sub(r"\\[AzZbBdDsSwW]|\(\?[:!=<>#PimsxaLu]*|[()\[\]{}*+?|^$\\]", " ", source)
+    units = {word[i:i + n] for word in text.split() for n in (1, 2, 3)
+             for i in range(max(1, len(word) - n + 1))}
+    return sorted(units | set(_FILLERS))
+
+
+def _call(pattern: re.Pattern, method: str) -> Callable[[str], object]:
+    call = getattr(pattern, method)
+    if isinstance(pattern.pattern, bytes):
+        return lambda text: call(text.encode("latin-1", "replace"))
+    return call
+
+
+def test_listed_package_patterns_exist():
+    every = PACKAGE_PATTERNS.keys() | _module_patterns().keys()
+    assert ANCHORED.keys() - every == set(), "an ANCHORED entry names no pattern"
+    assert PACKAGED_INPUT.keys() - every == set(), "a PACKAGED_INPUT entry names no pattern"
+    assert EXTRA_SHAPES.keys() - every == set(), "an EXTRA_SHAPES entry names no pattern"
+
+
+@pytest.mark.parametrize("name", sorted(PACKAGE_PATTERNS.keys() - PACKAGED_INPUT.keys()))
+def test_package_pattern_scans_its_own_literals_in_linear_time(name):
+    """One scan at the smallest and largest size per shape; a shape whose
+    times grow by more than the limit over the range is timed in full."""
+    pattern = PACKAGE_PATTERNS[name]
+    scan = _call(pattern, ANCHORED.get(name, "findall"))
+    shapes = [shape for unit in _literal_units(pattern)
+              for shape in (Shape(unit), Shape(unit, tail="\x00"), Shape(unit, head=unit[:1], tail="!"))]
+    for shape in shapes + list(EXTRA_SHAPES.get(name, ())):
+        try:
+            quick = [_sample(scan, shape.build(size), 1, _QUICK_ABORT_S)
+                     for size in (SIZES[0], SIZES[-1])]
+        except _TooSlow:
+            pytest.fail(f"{name} on {shape.label()} still running after {_QUICK_ABORT_S}s")
+        if quick[1] > TIME_FLOOR_S and quick[1] / max(quick[0], TIME_FLOOR_S) > MAX_TIME_TOTAL:
+            _assert_linear(name, scan, shape)

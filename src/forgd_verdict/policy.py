@@ -1651,9 +1651,10 @@ def _credential_shown(value: Any) -> Any:
 
 IMAGE_PNG, IMAGE_SVG, IMAGE_WEBP = "image/png", "image/svg+xml", "image/webp"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+# A comment ends at its first `-->`.
 _SVG_ROOT = re.compile(
-    r"\A\ufeff?\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--.*?-->\s*)*<svg[\s>/]",
-    re.DOTALL | re.IGNORECASE,
+    r"\A\ufeff?\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--(?:[^-]|-(?!->))*+-->\s*)*+<svg[\s>/]",
+    re.IGNORECASE,
 )
 # `dashboard.branding` keys holding an image, as a path or a `data:` URI.
 BRANDING_IMAGE_KEYS = ("logo", "favicon")
