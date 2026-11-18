@@ -14,8 +14,12 @@ You need Python 3.11 or later and [uv](https://docs.astral.sh/uv/). CI
 tests on 3.11, 3.12 and 3.13.
 
 ```bash
-uv sync --all-extras
+uv sync --all-extras --python 3.13
 ```
+
+Without `--python`, uv can build the environment on any installed
+interpreter that satisfies `requires-python`, including one newer than CI
+tests.
 
 `uv.lock` is not committed. The hashed, pinned set for everything that
 ships, the images and the wheels, is `deploy/constraints/*.txt`, generated
