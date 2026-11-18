@@ -65,7 +65,7 @@ ml-pii = ["presidio-analyzer>=2.2"]
 dev = [
   "pytest>=8.0",
   "pytest-xdist>=3.6,<4",
-  "pytest-asyncio>=0.23",
+  "pytest-asyncio>=0.24",
   "PyYAML>=6.0",
   "uvicorn>=0.30",
   "PyJWT[crypto]>=2.13.0",
@@ -113,6 +113,7 @@ override-dependencies = ["cryptography>=50.0.0"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
   "serial: timing- or memory-bounded; runs alone, after the parallel suite",
 ]
