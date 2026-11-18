@@ -2243,6 +2243,7 @@ def _env_names(docs):
     return out
 
 
+@requires_helm
 def test_extra_env_reaches_every_role():
     """`sinks[].endpoint` is an $ENV_VAR because the URI names this
     deployment's own data collection rule, and committing it would point
@@ -2265,6 +2266,7 @@ def test_extra_env_reaches_every_role():
         assert "FORGD_SINK_ENDPOINT_AZMON" in names, sorted(names)
 
 
+@requires_helm
 def test_extra_env_is_absent_by_default():
     """An empty map renders nothing, not an empty entry."""
     docs = render()
@@ -2272,6 +2274,7 @@ def test_extra_env_is_absent_by_default():
                 if "FORGD_SINK_ENDPOINT_AZMON" in e]
 
 
+@requires_helm
 def test_the_attestation_reaches_the_pod():
     """The chart refuses trusted_header without `trustedHeaderStrippedBy`,
     and the app now requires the same thing. Passing it through keeps that
@@ -2333,6 +2336,7 @@ def test_the_fallback_threshold_matches_the_shipped_cron():
     )
 
 
+@requires_helm
 def test_the_scan_route_is_routed_to_the_intake_service():
     """Without its own rule `/scan` falls through to `/` -- the dashboard
     -- where oauth2-proxy answers a 302 to a login page. A hook reads that

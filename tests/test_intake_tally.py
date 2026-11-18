@@ -19,12 +19,13 @@ from test_intake_fleet import (
     SALT,
     _headers,
     _ndjson,
-    _policy,
     org_env,  # noqa: F401
 )
+from test_intake_fleet import _policy as _fleet_policy
 
 from forgd_verdict.intake.app import Intake
 from forgd_verdict.models import pseudonym
+from forgd_verdict.policy import Policy, _deep_merge
 from forgd_verdict.store import LocalFileStore
 from forgd_verdict.store import tally as tally_mod
 from forgd_verdict.store.attribution import policy_fleets
@@ -42,6 +43,14 @@ from forgd_verdict.store.views import event_page, read_summary
 PROD = pseudonym("org-prod-fixture", SALT, "org")
 DEV = pseudonym("org-dev-fixture", SALT, "org")
 SCAN_HEADERS = {"content-type": "application/json"}
+
+
+def _policy(**kw) -> Policy:
+    """The fleet test policy with gitleaks off. An `auto` gitleaks whose
+    binary is missing lands in every verdict's `tiers_dropped`, and a
+    verdict with a dropped tier is never tallied."""
+    return Policy(raw=_deep_merge(_fleet_policy(**kw).raw,
+                                  {"detectors": {"gitleaks": {"enabled": False}}}))
 
 
 def _sid(n: int) -> str:
