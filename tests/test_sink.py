@@ -7,6 +7,8 @@ uncensored while the dashboard says the scan was clean.
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 from conftest import FakeConnect
 
@@ -1583,11 +1585,15 @@ def test_a_key_split_across_two_attributes_is_not_forwarded(tmp_path, monkeypatc
         assert event.attributes[key] == "[redacted:regex:aws-access-key:whole-value]"
     # What is stored does not change: the seam finding sits on the left
     # attribute only, as it did before the sink could see both sides.
+    # gitleaks reports it too when its binary is installed.
+    detectors = ["regex:aws-access-key"]
+    if shutil.which("gitleaks"):
+        detectors.append("gitleaks:aws-access-token")
     assert [f.to_log() for f in findings] == [
         {"detector": det, "severity": "block",
          "locator": "otel[0].agent.query.first.part",
          "excerpt_hash": findings[0].excerpt_hash, "tool_name": None}
-        for det in ("regex:aws-access-key", "gitleaks:aws-access-token")]
+        for det in detectors]
     from forgd_verdict.store.base import FindingRow
     assert all(f.seam_others == ("otel[0].agent.query.second.part",) for f in findings)
     assert "second.part" not in repr(findings)
