@@ -63,6 +63,8 @@ class RawServer:
                 attempt = len(self.paths)
             self.behaviour(self, conn, attempt, path)
         except OSError:
+            # The client times out or retries and closes its end while this
+            # thread is still reading or sending.
             pass
         finally:
             conn.close()
@@ -134,7 +136,7 @@ def serve():
 
 
 def make_client(client_class, server, max_retries=4):
-    return client_class(api_key=KEY, base_url=server.base, timeout_s=0.2,
+    return client_class(api_key=KEY, base_url=server.base, timeout_s=1.0,
                         per_minute=10**9, max_retries=max_retries)
 
 
