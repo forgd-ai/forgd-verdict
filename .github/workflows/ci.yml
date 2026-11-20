@@ -261,7 +261,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.26'
           cache-dependency-path: sidecar/gitleaksd/go.sum
@@ -450,7 +450,7 @@ jobs:
       # against one surfaces on the weekly run. The docker job's govulncheck
       # needs the built image and does not run on the schedule. check-latest
       # takes the newest 1.26 patch, the line the image's golang:1.26 tracks.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.26'
           check-latest: true
@@ -567,7 +567,7 @@ jobs:
           test -s /tmp/image-freeze.txt
           uvx pip-audit==2.10.1 -r /tmp/image-freeze.txt --disable-pip --no-deps
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.26'
           cache: false
@@ -861,7 +861,7 @@ jobs:
           test -s /tmp/image-freeze.txt
           uvx pip-audit==2.10.1 -r /tmp/image-freeze.txt --disable-pip --no-deps
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.26'
 
