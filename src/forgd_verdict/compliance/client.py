@@ -37,6 +37,7 @@ organization, so this client is deliberately serial and rate-limited.
 
 from __future__ import annotations
 
+import http.client
 import logging
 import math
 import time
@@ -155,13 +156,19 @@ class ComplianceClient:
                 headers=self._headers(),
                 method="GET",
             )
+            # `failure` is only the exception's type name. The exception itself
+            # is not kept: IncompleteRead.partial and JSONDecodeError.doc hold
+            # response bytes, and the ComplianceError is raised outside the
+            # handler so neither is its __cause__ or __context__.
+            failure: str | None = None
+            raw = b""
             try:
                 with self._opener.open(request, timeout=self._timeout) as response:
-                    return load_json(response.read().decode("utf-8"))
+                    raw = response.read()
             except urllib.error.HTTPError as exc:
                 # A 3xx arrives here too: the opener follows no redirect, so
                 # the key never reaches the host a Location names.
-                body = exc.read().decode("utf-8", "replace") if exc.fp is not None else ""
+                body = _error_body(exc)
                 # 429 and 5xx are retryable; a cursor is safe to reuse after a
                 # failure because a failed request does not advance position.
                 if exc.code in (429, 500, 502, 503, 504) and attempt < self._max_retries:
@@ -176,6 +183,25 @@ class ComplianceClient:
                     attempt += 1
                     continue
                 raise ComplianceError(0, str(exc.reason), url) from exc
+            except (OSError, http.client.HTTPException) as exc:
+                # Raised once the response has started: a dropped connection,
+                # a read timeout or a short body. urllib wraps only errors
+                # raised while sending in URLError.
+                failure = type(exc).__name__
+            if failure is None:
+                try:
+                    page = load_json(raw.decode("utf-8"))
+                except ValueError as exc:
+                    failure = type(exc).__name__
+            if failure is not None:
+                if attempt < self._max_retries:
+                    time.sleep(min(2**attempt, 30))
+                    attempt += 1
+                    continue
+                raise ComplianceError(0, failure, url)
+            if not isinstance(page, dict):
+                raise ComplianceError(0, "non-object JSON", url)
+            return page
 
     # -- activity feed (cursor pagination) --------------------------------
 
@@ -352,6 +378,16 @@ def _encode_params(params: dict[str, Any]) -> str:
         else:
             pairs.append((key, str(value)))
     return urllib.parse.urlencode(pairs)
+
+
+def _error_body(exc: urllib.error.HTTPError) -> str:
+    """The error response's body, or "" when it cannot be read whole."""
+    if exc.fp is None:
+        return ""
+    try:
+        return exc.read().decode("utf-8", "replace")
+    except (OSError, http.client.HTTPException):
+        return ""
 
 
 def _retry_after(headers, attempt: int) -> float:
