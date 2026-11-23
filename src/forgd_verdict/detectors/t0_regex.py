@@ -80,7 +80,7 @@ def _is_pan(text: str) -> bool:
         return False
     # Require a plausible major-industry identifier. Without this, any Luhn-
     # valid long number (some order IDs, IMEIs) trips the rule.
-    return digits[0] in "3456" or digits.startswith(("2221", "2720"))
+    return digits[0] in "3456" or 2221 <= int(digits[:4]) <= 2720
 
 
 def _is_ssn(text: str) -> bool:
