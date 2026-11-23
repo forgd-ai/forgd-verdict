@@ -113,8 +113,8 @@ match:
 and the digits are not all the same.
 
 **PAN checks**: 13 to 19 digits; more than two distinct digits; Luhn
-passes; and the number starts with 3, 4, 5 or 6, or with `2221` or
-`2720`.
+passes; and the number starts with 3, 4, 5 or 6, or its first four
+digits are in the range `2221` to `2720`.
 
 ### False-positive shapes the T0 rules avoid
 

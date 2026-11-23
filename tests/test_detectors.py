@@ -174,6 +174,31 @@ def test_ordinary_prose_and_code_are_clean():
         assert hits(sample) == set(), sample
 
 
+def luhn_completed(prefix: str, length: int = 16) -> str:
+    """`prefix` padded with varied digits to `length`, with a Luhn check digit."""
+    body = (prefix + "3141592653589793")[: length - 1]
+    for check in "0123456789":
+        total = 0
+        for index, char in enumerate(reversed(body + check)):
+            digit = int(char) * (2 if index % 2 else 1)
+            total += digit - 9 if digit > 9 else digit
+        if total % 10 == 0:
+            return body + check
+    raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize("prefix", ["2221", "2222", "2500", "2699", "2719", "2720"])
+def test_mastercard_2_series_is_a_pan(prefix):
+    number = luhn_completed(prefix)
+    assert _is_pan(number)
+    assert "regex:pan" in hits(f"card {number} on file")
+
+
+@pytest.mark.parametrize("prefix", ["2220", "2721", "2800", "1999"])
+def test_numbers_outside_the_2_series_range_are_not_pans(prefix):
+    assert not _is_pan(luhn_completed(prefix))
+
+
 def test_luhn_and_validators_directly():
     assert _is_pan("4539578763621486")
     assert not _is_pan("4539578763621487")
