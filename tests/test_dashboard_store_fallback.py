@@ -18,6 +18,7 @@ WARNING = "dashboard has no findings store;"
 @pytest.fixture
 def no_store_env(monkeypatch, tmp_path):
     monkeypatch.delenv("FORGD_VERDICT_STORE", raising=False)
+    monkeypatch.delenv("FORGD_VERDICT_POLICY", raising=False)
     monkeypatch.chdir(tmp_path)
 
 
@@ -35,7 +36,7 @@ def _policy_with_store(monkeypatch, store):
 
 def test_falling_back_to_local_findings_warns(caplog, no_store_env, tmp_path):
     [record] = _warnings(caplog)
-    assert "./findings" in record.getMessage()
+    assert str(tmp_path / "findings") in record.getMessage()
     assert record.fields["path"] == str(tmp_path / "findings")
     assert "--store" in record.fields["remediation"]
     assert "FORGD_VERDICT_STORE" in record.fields["remediation"]
@@ -43,7 +44,7 @@ def test_falling_back_to_local_findings_warns(caplog, no_store_env, tmp_path):
 
 def test_the_warning_says_when_the_directory_was_just_created(caplog, no_store_env, tmp_path):
     [record] = _warnings(caplog)
-    assert "created" in record.getMessage()
+    assert "will be created" in record.getMessage()
 
     [record] = _warnings(caplog)
     assert "created" not in record.getMessage()
@@ -56,6 +57,20 @@ def test_the_warning_names_a_policy_store_it_ignores(caplog, no_store_env, monke
     assert "server.store" in record.getMessage()
     assert "example.invalid" not in record.getMessage()
     assert "example.invalid" not in repr(record.fields)
+
+
+def test_an_ignored_policy_store_is_named_when_findings_already_exists(
+        caplog, no_store_env, monkeypatch, tmp_path):
+    (tmp_path / "findings").mkdir()
+    _policy_with_store(monkeypatch, "https://example.invalid/findings")
+    [record] = _warnings(caplog)
+    assert "The policy sets server.store" in record.getMessage()
+    assert "created" not in record.getMessage()
+
+
+def test_an_empty_store_variable_falls_back_and_warns(caplog, no_store_env, monkeypatch):
+    monkeypatch.setenv("FORGD_VERDICT_STORE", "")
+    assert len(_warnings(caplog)) == 1
 
 
 def test_without_a_policy_store_the_warning_does_not_mention_one(caplog, no_store_env):
@@ -75,7 +90,7 @@ def test_the_store_variable_does_not_warn(caplog, no_store_env, monkeypatch, tmp
 def test_a_render_with_no_store_prints_the_warning(tmp_path):
     # A subprocess: under pytest the root logger has a handler, so the
     # last-resort stderr handler a real run relies on never fires.
-    env = {k: v for k, v in os.environ.items() if k != "FORGD_VERDICT_STORE"}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FORGD_")}
     out = subprocess.run(
         [sys.executable, "-m", "forgd_verdict.dashboard", "--render", "out.html"],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)

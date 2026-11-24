@@ -1317,12 +1317,12 @@ def _warn_local_fallback(policy) -> None:
     """Warn that the dashboard is reading LOCAL_FALLBACK_STORE. Names
     `server.store` when the policy sets it, never its value."""
     path = Path(LOCAL_FALLBACK_STORE).resolve()
-    created = "" if path.exists() else ", created empty now,"
-    ignored = (" policy.yaml sets server.store, which the dashboard does not read."
+    created = "" if path.exists() else "it will be created; "
+    ignored = (" The policy sets server.store, which the dashboard does not read."
                if (policy.raw.get("server") or {}).get("store") else "")
     log.warning(
-        f"dashboard has no findings store; reading {LOCAL_FALLBACK_STORE}{created} "
-        f"which is empty unless a service on this host writes there.{ignored}",
+        f"dashboard has no findings store; reading {path} ({created}empty unless "
+        f"a service on this host writes there).{ignored}",
         extra={"fields": {
             "path": str(path),
             "remediation": "pass --store or set FORGD_VERDICT_STORE to the store "
