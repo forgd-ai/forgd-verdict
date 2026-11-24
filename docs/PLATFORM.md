@@ -877,6 +877,11 @@ forgd-verdict dashboard --store ./findings --port 8080     # serve
 forgd-verdict dashboard --store ./findings --render out.html   # static snapshot
 ```
 
+With neither `--store` nor `FORGD_VERDICT_STORE`, the dashboard reads
+`./findings` and logs the WARNING `dashboard has no findings store`,
+naming the absolute path it reads. It does not read `server.store` from
+the policy file, and the WARNING says so when the policy sets it.
+
 ### Adapter 3 runs as a job
 
 In Azure it is a Container Apps Job rather than a service: it holds the

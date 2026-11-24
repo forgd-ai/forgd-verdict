@@ -76,6 +76,9 @@ CACHE_MAX_BYTES = 8 * 1024 * 1024
 AUTH_WORKERS = 8
 
 log = logging.getLogger("forgd_verdict.dashboard")
+# The store `create_app` reads when neither --store nor FORGD_VERDICT_STORE
+# names one.
+LOCAL_FALLBACK_STORE = "./findings"
 # The shape of an Origin header: scheme, host and optional port.
 _ORIGIN = re.compile(r"https?://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?")
 
@@ -1310,11 +1313,31 @@ def _require_signing_key(raw: dict) -> None:
             "Generate one with `forgd-verdict overrides keygen`")
 
 
+def _warn_local_fallback(policy) -> None:
+    """Warn that the dashboard is reading LOCAL_FALLBACK_STORE. Names
+    `server.store` when the policy sets it, never its value."""
+    path = Path(LOCAL_FALLBACK_STORE).resolve()
+    created = "" if path.exists() else "it will be created; "
+    ignored = (" The policy sets server.store, which the dashboard does not read."
+               if (policy.raw.get("server") or {}).get("store") else "")
+    log.warning(
+        f"dashboard has no findings store; reading {path} ({created}empty unless "
+        f"a service on this host writes there).{ignored}",
+        extra={"fields": {
+            "path": str(path),
+            "remediation": "pass --store or set FORGD_VERDICT_STORE to the store "
+                           "the services write to"}},
+    )
+
+
 def create_app(store_spec: str | None = None, require_principal: bool | None = None):
     from ..policy import load_policy
     from ..store import open_store
 
-    spec = store_spec or os.environ.get("FORGD_VERDICT_STORE") or "./findings"
+    spec = store_spec or os.environ.get("FORGD_VERDICT_STORE")
+    fallback = not spec
+    if fallback:
+        spec = LOCAL_FALLBACK_STORE
 
     # `dashboard.auth`, parsed at startup so a mode missing its audience
     # fails here rather than on the first request.
@@ -1366,6 +1389,8 @@ def create_app(store_spec: str | None = None, require_principal: bool | None = N
                                auth or AuthConfig(mode=MODE_NONE))
     # Not inside a try: a BrandingError stops the dashboard from starting.
     branding = Branding.from_policy((policy.raw.get("dashboard") or {}).get("branding"))
+    if fallback:
+        _warn_local_fallback(policy)
     store = open_store(spec, plugins=policy.plugin_allow if policy is not None else (),
                        profile="dashboard")
     compliance = None
