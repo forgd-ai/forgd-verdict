@@ -35,6 +35,7 @@ need one skip when it is missing (see [Terraform and Helm](#terraform-and-helm))
 ```bash
 uv run pytest -q                  # conformance, signature, privacy, incremental
 uv run python loadtest.py --help  # latency harness
+scripts/test_like_ci.sh           # lint and both test passes, as ci.yml runs them
 ```
 
 * **Protocol conformance:** golden frames (text, tool_use/tool_result,
