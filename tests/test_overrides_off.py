@@ -342,7 +342,8 @@ def test_off_reset_stats_writes_the_legacy_marker_exactly(off, tmp_path, touched
     assert not LocalFileStore(root).get_reset_marker()
     monkeypatch.delenv("FORGD_VERDICT_STORE", raising=False)
     assert _cli(tmp_path, extra, "reset-stats") == 2
-    assert capsys.readouterr().err == "no store configured: pass --store or set server.store\n"
+    assert capsys.readouterr().err == ("no store configured: pass --store, set server.store, "
+                                       "or export FORGD_VERDICT_STORE\n")
     assert _tree(root) == ["markers/stats_reset"]
     assert touched == []
 

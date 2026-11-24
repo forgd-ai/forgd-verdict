@@ -286,7 +286,7 @@ def _cmd_spotcheck(args: argparse.Namespace) -> int:
     return 0
 
 
-def _control_store(args: argparse.Namespace, fallback: str | None = None):
+def _control_store(args: argparse.Namespace):
     """The store the runtime overrides live in, or None with a message."""
     import os
 
@@ -295,7 +295,7 @@ def _control_store(args: argparse.Namespace, fallback: str | None = None):
 
     policy = load_policy(args.policy)
     spec = (args.store or policy.server.get("store")
-            or os.environ.get("FORGD_VERDICT_STORE") or fallback)
+            or os.environ.get("FORGD_VERDICT_STORE"))
     if not spec:
         print("no store configured: pass --store, set server.store, or export "
               "FORGD_VERDICT_STORE", file=sys.stderr)
@@ -533,12 +533,9 @@ def _print_frames(args: argparse.Namespace, store, excluded: set[str]) -> None:
 
 def _legacy_exclude(args: argparse.Namespace) -> int:
     """`exclude` with runtime overrides off: the markers/excluded_requests object."""
-    from .policy import load_policy
-    from .store import open_store
-
-    policy = load_policy(args.policy)
-    spec = args.store or policy.raw["server"].get("store") or "./findings"
-    store = open_store(str(spec), plugins=policy.plugin_allow, profile="dashboard")
+    store = _control_store(args)
+    if store is None:
+        return 2
 
     if args.list:
         _print_frames(args, store, store.get_excluded())
@@ -564,20 +561,11 @@ def _legacy_exclude(args: argparse.Namespace) -> int:
 
 def _legacy_reset_stats(args: argparse.Namespace) -> int:
     """`reset-stats` with runtime overrides off: the markers/stats_reset object."""
-    import os
-
-    from .policy import load_policy
-    from .store import open_store
     from .store.base import utcnow
 
-    policy = load_policy(args.policy)
-    spec = args.store or policy.server.get("store") or os.environ.get(
-        "FORGD_VERDICT_STORE"
-    )
-    if not spec:
-        print("no store configured: pass --store or set server.store", file=sys.stderr)
+    store = _control_store(args)
+    if store is None:
         return 2
-    store = open_store(str(spec), plugins=policy.plugin_allow, profile="dashboard")
     if args.clear:
         store.set_reset_marker("")
         print(json.dumps({"reset_at": None, "note": "marker cleared"}, indent=2))
@@ -609,7 +597,7 @@ def _cmd_exclude(args: argparse.Namespace) -> int:
 
     if not _overrides_on(args):
         return _legacy_exclude(args)
-    store = _control_store(args, fallback="./findings")
+    store = _control_store(args)
     if store is None:
         return 2
 
