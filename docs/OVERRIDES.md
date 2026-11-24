@@ -342,6 +342,10 @@ who set it and when, and whether it masks a different baseline.
 
 ### From the CLI
 
+Each command reads the store from `--store`, then `server.store`, which
+`FORGD_VERDICT_STORE` sets. With none of them it exits `2` with `no store
+configured`; the commands below assume one is set.
+
 Every write needs the control identity's credentials and the signing key
 (see [Running the CLI as the control identity](#running-the-cli-as-the-control-identity)).
 
