@@ -75,6 +75,8 @@ class StoreSink:
         self.written = 0
         self.dropped = 0
         self.errors = 0
+        # Records accepted with no store to write them to.
+        self.skipped = 0
         self.flushes = 0
         self.last_flush_ms = 0.0
         self.retries = 0
@@ -119,6 +121,7 @@ class StoreSink:
     def submit(self, row: dict[str, Any], findings: list[Finding] | None = None) -> None:
         """Enqueue one verdict. Never blocks, never raises."""
         if self.store is None:
+            self.skipped += 1
             return
         try:
             record = verdict_from_log_row(row, self.salt)
@@ -140,6 +143,7 @@ class StoreSink:
         and this returns.
         """
         if self.store is None:
+            self.skipped += 1
             return True
         try:
             self._enqueue(record)
@@ -155,7 +159,10 @@ class StoreSink:
         """Enqueue all of `records` or none of them. True if they were
         accepted; a refusal counts every record in `dropped`, except one
         while `degraded`, which the caller is expected to send again."""
-        if self.store is None or not records:
+        if self.store is None:
+            self.skipped += len(records)
+            return True
+        if not records:
             return True
         with self._accept_lock:
             if self._held:
@@ -395,6 +402,7 @@ class StoreSink:
             "written": self.written,
             "dropped": self.dropped,
             "errors": self.errors,
+            "skipped": self.skipped,
             "queued": queued,
             "batched": batched,
             "inflight": inflight,
