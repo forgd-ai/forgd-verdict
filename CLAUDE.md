@@ -81,6 +81,16 @@ minor; a deployment or docs change is a patch. Do not default to minor.
 `forgd` is always lowercase, including at the start of a sentence, in docs
 and in the README.
 
+## Where to look
+
+- **Reviewing a diff:** apply `CODING_STANDARDS.md`.
+- **Running checks before a push:** `scripts/test_like_ci.sh` runs lint and
+  both test passes as `ci.yml` does.
+- **Environment variables and the policy:** `load_policy` applies
+  `ENV_OVERRIDES` (`policy.py`), so `FORGD_VERDICT_STORE` and the other
+  overrides are already in `policy.server` and `policy.raw` by the time code
+  reads them.
+
 ## Writing
 
 Commit messages say what changed and why it was not obvious.
