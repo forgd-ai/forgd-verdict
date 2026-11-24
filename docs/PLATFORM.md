@@ -439,6 +439,13 @@ left in `store.dropped` and logs `store sink closed before its queue was
 written`. An exporter gives up on a batch after its own retry limit, and
 that loss shows on the sending side only.
 
+With no store configured, the collector and the intake each log the
+WARNING `<service> has no findings store; verdicts and findings are not
+recorded` at startup, and count each record they do not write under
+`store.skipped` in `/stats`. For the intake that is `/scan` records only:
+`/intake` refuses a shipped batch with `503` and counts it under
+`counts.store_disabled`, and the hook keeps the batch and resends it.
+
 The intake (adapter 2) writes its two routes differently.
 
 A `/scan` record is queued for the intake's batching writer, and delivery

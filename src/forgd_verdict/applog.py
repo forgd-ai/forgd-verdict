@@ -144,6 +144,20 @@ class TimingCSV:
         self._thread.join(timeout=5)
 
 
+def warn_if_storeless(log, store, service: str, key: str) -> None:
+    """Warn that `service` has no findings store, naming the policy key
+    that would set one: `key`, or `server.store`, which it falls back to."""
+    if store is not None:
+        return
+    fallback = "" if key == "server.store" else ", or server.store"
+    log.warning(
+        f"{service} has no findings store; verdicts and findings are not recorded",
+        extra={"fields": {"remediation": f"set {key}{fallback} (FORGD_VERDICT_STORE sets "
+                                         "server.store), unless running without a store "
+                                         "on purpose"}},
+    )
+
+
 def warn_if_unsalted(log, policy) -> bool:
     """Say so, loudly, when findings are being hashed with no salt.
 

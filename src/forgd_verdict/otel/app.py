@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable
 
 from .. import build_id
-from ..applog import configure_logging, exc_fields, warn_if_unsalted
+from ..applog import configure_logging, exc_fields, warn_if_storeless, warn_if_unsalted
 from ..core import UNSCANNED, UNSCANNED_CAPPED, left_out_tiers
 from ..detectors.gitleaks import HEALTHZ_TIMEOUT_S, daemon_state, livez
 from ..metadata import MetadataGuard
@@ -213,6 +213,7 @@ class Collector:
             },
         )
         warn_if_unsalted(self.log, self.policy)
+        warn_if_storeless(self.log, self.sink.store, "collector", "otel.store")
         warn_unset_credentials(self.log, self.policy, "collector")
         if self.sink.store is not None:
             publish_registry(self.sink.store, self.policy, "collector", self.log)
@@ -801,7 +802,8 @@ class Collector:
             # `held` is the failed batch the writer is retrying; while it is
             # non-zero, exports are answered 503 `store_unavailable`.
             "store": {"written": self.sink.written, "dropped": self.sink.dropped,
-                      "errors": self.sink.errors, "held": self.sink.stats()["held"]},
+                      "errors": self.sink.errors, "skipped": self.sink.skipped,
+                      "held": self.sink.stats()["held"]},
             "records_logs": counts.get("records_logs", 0),
             "records_traces": counts.get("records_traces", 0),
             "counts": {**counts, "metadata_redacted": self.meta.redacted},

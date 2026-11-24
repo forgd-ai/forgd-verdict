@@ -596,7 +596,11 @@ The verdict is answered before the write, so the write is at-most-once: a
 failed write is retried twice and then dropped. `/metrics` counts dropped
 records under `store.dropped` and failed writes under `store.errors`, and
 each failed write logs the WARNING `store flush failed` with a
-`dropped_total` field. The collector (adapter 4) also answers before the
+`dropped_total` field. With no store configured, the server logs the
+WARNING `verdict has no findings store; verdicts and findings are not
+recorded` at startup and counts each record it does not write under
+`store.skipped`; the collector and the intake log the same WARNING with
+their own name. The collector (adapter 4) also answers before the
 write, but its writer retries a failed write until the store takes it and
 the collector answers `503` meanwhile; see
 [PLATFORM.md § Adapter 4](PLATFORM.md#adapter-4--otel-collector).

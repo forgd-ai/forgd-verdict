@@ -17,7 +17,7 @@ from dataclasses import replace
 from functools import partial
 
 from .. import build_id
-from ..applog import exc_fields
+from ..applog import exc_fields, warn_if_storeless
 from ..budget import Budget
 from ..core import (
     _scrub,
@@ -362,6 +362,7 @@ class Intake:
             self._tally_thread = threading.Thread(target=self._tally_loop,
                                                   name="intake-tally", daemon=True)
             self._tally_thread.start()
+        warn_if_storeless(_log, store, "intake", "intake.store")
         if store is not None:
             publish_registry(store, self.policy, "intake", _log)
         self.overrides = reader_for(
@@ -662,6 +663,9 @@ class Intake:
                 # budget. A full queue or a failed write is counted in the
                 # sink's `dropped` and `errors`, in /stats.
                 self.sink.submit_record(record)
+        elif units:
+            # Storeless: the record is never built, so count it here.
+            self.sink.skipped += 1
 
         return {
             **verdict.to_wire(),

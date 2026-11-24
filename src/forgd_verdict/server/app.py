@@ -29,7 +29,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .. import build_id
-from ..applog import TimingCSV, configure_logging, exc_fields, warn_if_unsalted
+from ..applog import TimingCSV, configure_logging, exc_fields, warn_if_storeless, warn_if_unsalted
 from ..budget import Budget
 from ..cache import InMemoryLRUCache
 from ..core import (
@@ -163,6 +163,7 @@ class VerdictServer:
             },
         )
         warn_if_unsalted(self.log, self.policy)
+        warn_if_storeless(self.log, self.sink.store, "verdict", "server.store")
         warn_unset_credentials(self.log, self.policy, "verdict")
         if self.sink.store is not None:
             publish_registry(self.sink.store, self.policy, "verdict", self.log)

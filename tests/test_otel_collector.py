@@ -1119,12 +1119,12 @@ async def test_stats_counts_store_writes_and_drops(tmp_path):
 
     status, body = await client.get("/stats", auth_hdr)
     assert status == 200
-    assert body["store"] == {"written": 0, "dropped": 0, "errors": 0, "held": 0}
+    assert body["store"] == {"written": 0, "dropped": 0, "errors": 0, "skipped": 0, "held": 0}
 
     c.sink.dropped += 3
     c.sink.errors += 1
     status, body = await client.get("/stats", auth_hdr)
-    assert body["store"] == {"written": 0, "dropped": 3, "errors": 1, "held": 0}
+    assert body["store"] == {"written": 0, "dropped": 3, "errors": 1, "skipped": 0, "held": 0}
     c.close()
 
 
