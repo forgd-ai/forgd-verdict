@@ -33,6 +33,15 @@ Auth is `x-api-key` with a Compliance Access Key; the session endpoints
 reject Admin API keys with 403. `anthropic-version` is required on every
 request. All /v1/compliance/* endpoints share 600 requests/minute per parent
 organization, so this client is deliberately serial and rate-limited.
+
+Organizations, verified 2026-11-28 against .../compliance-api-access,
+.../compliance-org-data, .../compliance-content-data and
+.../compliance-sessions: a key created for the parent organization reads
+every linked organization, and a key created for one organization reads that
+one. Activity, chat and session records carry `organization_uuid`. The
+activities, chats and remote session lists accept `organization_ids[]` (the
+UUID or the `org_`-prefixed form); the local session list has no
+organization filter.
 """
 
 from __future__ import annotations
@@ -211,6 +220,7 @@ class ComplianceClient:
         activity_types: list[str] | None = None,
         after_id: str | None = None,
         created_at_gte: str | None = None,
+        organization_ids: list[str] | None = None,
         limit: int = 100,
     ) -> Iterator[tuple[dict[str, Any], str | None, bool]]:
         """Yield (activity, last_id, has_more) newest-first, paging with after_id."""
@@ -219,6 +229,8 @@ class ComplianceClient:
             params: dict[str, Any] = {"limit": limit}
             if activity_types:
                 params["activity_types[]"] = activity_types
+            if organization_ids:
+                params["organization_ids[]"] = organization_ids
             if created_at_gte:
                 params["created_at.gte"] = created_at_gte
             if cursor:
@@ -242,6 +254,7 @@ class ComplianceClient:
         created_at_gte: str | None = None,
         created_at_lt: str | None = None,
         updated_at_gte: str | None = None,
+        organization_ids: list[str] | None = None,
         limit: int = 100,
     ) -> Iterator[dict[str, Any]]:
         path = f"/v1/compliance/apps/sessions/{segment(family)}"
@@ -255,6 +268,9 @@ class ComplianceClient:
             # `updated_at.gte` exists on the local list only.
             if updated_at_gte and family == "local":
                 params["updated_at.gte"] = updated_at_gte
+            # `organization_ids[]` exists on the remote list only.
+            if organization_ids and family == "remote":
+                params["organization_ids[]"] = organization_ids
             if page_token:
                 params["page"] = page_token
             page = self.get(path, params)
@@ -271,6 +287,7 @@ class ComplianceClient:
         *,
         updated_at_gte: str | None = None,
         after_id: str | None = None,
+        organization_ids: list[str] | None = None,
         limit: int = 100,
     ) -> Iterator[dict[str, Any]]:
         """Yield chat metadata, oldest-updated first.
@@ -289,6 +306,8 @@ class ComplianceClient:
             params: dict[str, Any] = {"limit": limit, "order_by": "updated_at"}
             if updated_at_gte:
                 params["updated_at.gte"] = updated_at_gte
+            if organization_ids:
+                params["organization_ids[]"] = organization_ids
             if cursor:
                 params["after_id"] = cursor
             page = self.get("/v1/compliance/apps/chats", params)

@@ -1,8 +1,10 @@
 """Adapter 3 across several of a customer's orgs.
 
-The Compliance Access Key IS the organization: it is minted inside one org
-and reads only that one. So N orgs is N keys, and the interesting failures
-are about keeping their state and their errors apart.
+Each `compliance.orgs` entry is one org, with its own key and cursor. A key
+created for one organization reads that one; a key created for the parent
+organization reads every linked one, and the scanner narrows it to the
+entry's org (tests/test_compliance_org_scope.py). The failures here are about
+keeping the entries' state and their errors apart.
 """
 
 from __future__ import annotations
@@ -101,6 +103,7 @@ class FakeScanner:
     detectors: tuple = ()
     sessions_failed = 0
     chats_failed = 0
+    other_org_skipped = 0
 
     def __init__(self, policy, org=None, client=None, store=None, detectors=None):
         org = org or {}
