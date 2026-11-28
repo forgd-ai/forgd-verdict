@@ -799,9 +799,10 @@ class Policy:
     def compliance_orgs(self) -> list[dict[str, Any]]:
         """One resolved entry per org adapter 3 scans.
 
-        The Compliance Access Key *is* the organization -- it is minted
-        inside one org and reads only that one -- so scanning N orgs is N
-        keys, not one key with a parameter.
+        Each entry is one org, with its own key and cursor. A key created
+        for one organization reads that one; a key created for the parent
+        organization reads every linked one, and `ComplianceScanner` narrows
+        each entry's requests and records to the org its `id` names.
 
         The single-org form (`compliance.api_key` + `compliance.org_id`)
         is read as exactly one org.

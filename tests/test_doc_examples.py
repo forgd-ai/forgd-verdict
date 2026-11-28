@@ -181,7 +181,8 @@ def test_the_key_scope_has_one_home_that_states_both_scopes_and_what_ingest_does
     assert KEY_SCOPE_URL in section
     for needle in ("parent organization", "single organization", "cannot be changed",
                    "one single-organization key per `compliance.orgs` entry",
-                   "under the entry's `id`", "once under each entry's org"):
+                   "`organization_ids[]`", "names none, is skipped", "`other_org_skipped`",
+                   "without reading or filing anything twice"):
         assert needle in section, needle
 
 

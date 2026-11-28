@@ -21,7 +21,7 @@ KEY = "sk-ant-api03-" + "x" * 90
 
 
 def _report(i: int):
-    return SimpleNamespace(i=i, action="deny" if i % 4 == 0 else "allow",
+    return SimpleNamespace(i=i, action="deny" if i % 4 == 0 else "allow", org_id="",
                            artifacts_scanned=0, artifacts_failed=0, content_read=True)
 
 
@@ -70,7 +70,7 @@ def _compliance(n: int, monkeypatch, caplog):
 
     class Scanner:
         org_id = "org-a"
-        sessions_failed = chats_failed = 0
+        sessions_failed = chats_failed = other_org_skipped = 0
 
         def __init__(self, policy, org=None, store=None, detectors=None):
             self.detectors = detectors_

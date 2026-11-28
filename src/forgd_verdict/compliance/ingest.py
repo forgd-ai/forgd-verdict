@@ -176,9 +176,9 @@ def run_ingest(
     """One ingest pass across every configured org. Summary for logging.
 
     Orgs are scanned SERIALLY. The Compliance client is already deliberately
-    serial and rate-limited; the limits are per-org, but a parallel pass
-    turns one rate-limited job into several competing for the same runner on
-    a six-hourly cron with nobody waiting. There is nothing to buy.
+    serial and rate-limited, and the 600 requests a minute are shared by
+    every org under one parent organization, so a parallel pass would have
+    its entries compete for the same budget. There is nothing to buy.
     """
     from ..applog import warn_if_unsalted
     from ..policy import warn_unset_credentials
@@ -204,6 +204,7 @@ def run_ingest(
         "artifacts_failed": 0,
         "verdicts_written": 0,
         "denials_written": 0,
+        "other_org_skipped": 0,
     }
     per_org: list[dict[str, Any]] = []
     for org in orgs:
@@ -292,7 +293,7 @@ def _ingest_one_org(
                 sessions += 1
                 if report.action == "deny":
                     denies += 1
-                batch.append(report_to_record(report, salt, org_id))
+                batch.append(report_to_record(report, salt, report.org_id or org_id))
                 if len(batch) >= batch_size:
                     written += store.write_verdicts(meta.records(batch))
                     batch = []
@@ -322,7 +323,7 @@ def _ingest_one_org(
             chats_unread += not report.content_read
             if report.action == "deny":
                 chat_denies += 1
-            batch.append(chat_to_record(report, salt, org_id))
+            batch.append(chat_to_record(report, salt, report.org_id or org_id))
             if len(batch) >= batch_size:
                 chat_rows += store.write_verdicts(meta.records(batch))
                 batch = []
@@ -337,13 +338,24 @@ def _ingest_one_org(
         # explicit rather than assumed.
         pending: list[DenialRecord] = []
         for activity in scanner.denials(since=since):
-            pending.append(activity_to_denial(activity, scanner, salt, org_id))
+            pending.append(activity_to_denial(activity, scanner, salt,
+                                              scanner.tenant_of(activity)))
             if len(pending) >= batch_size:
                 denial_rows += store.write_denials(meta.records(pending))
                 pending = []
         if pending:
             denial_rows += store.write_denials(meta.records(pending))
         scanner.commit()
+
+    if scanner.other_org_skipped:
+        # The key reads more than this entry's organization: it was created
+        # for the parent organization. Each request that takes
+        # `organization_ids[]` is narrowed to the entry's, so these are the
+        # local sessions, which the API cannot filter, and anything that
+        # came back regardless.
+        log.warning("the compliance key reads organizations other than this entry's; "
+                    "their records were skipped", extra={"fields": {
+                        "org": org.get("label"), "skipped": scanner.other_org_skipped}})
 
     return {
         "sessions_scanned": sessions,
@@ -357,4 +369,5 @@ def _ingest_one_org(
         "artifacts_failed": artifacts_failed,
         "verdicts_written": written + chat_rows,
         "denials_written": denial_rows,
+        "other_org_skipped": scanner.other_org_skipped,
     }

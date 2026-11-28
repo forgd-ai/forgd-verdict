@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -33,6 +34,15 @@ from .client import ComplianceClient, ComplianceError
 
 DENIED_ACTIVITY = "inference_hooks_request_denied"
 BREAKER_ACTIVITY = "inference_hooks_circuit_breaker_tripped"
+
+# The form of `organization_uuid` on Compliance API records, lowercased.
+_ORG_UUID = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+
+
+def record_org(record: Any) -> str:
+    """A Compliance API record's `organization_uuid`, lowercased, or ""."""
+    value = record.get("organization_uuid") if isinstance(record, dict) else None
+    return value.strip().lower() if isinstance(value, str) else ""
 
 
 @dataclass
@@ -69,6 +79,8 @@ class ChatReport:
     scan_ms: float = 0.0
     budget_exceeded: bool = False
     tiers_dropped: list[str] = field(default_factory=list)
+    # The org the chat is filed under; see `ComplianceScanner.tenant_of`.
+    org_id: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -103,6 +115,8 @@ class SessionReport:
     # tier can actually be dropped.
     budget_exceeded: bool = False
     tiers_dropped: list[str] = field(default_factory=list)
+    # The org the session is filed under; see `ComplianceScanner.tenant_of`.
+    org_id: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -303,6 +317,18 @@ class ComplianceScanner:
         self.org_id = str(org.get("id") or env_or_literal(cfg.get("org_id")) or "")
         self.org_label = str(org.get("label")
                              or pseudonym(self.org_id, policy.hash_salt, "org") or "unnamed")
+        # The organization this entry reads, when its `id` is an
+        # organization UUID. A key created for the parent organization reads
+        # every linked organization, so each request that takes
+        # `organization_ids[]` is narrowed to this one, and a record that
+        # names another organization is skipped and counted in
+        # `other_org_skipped`.
+        lowered = self.org_id.strip().lower()
+        self.scope = lowered if _ORG_UUID.match(lowered) else ""
+        self.other_org_skipped = 0
+        if self.org_id and not self.scope:
+            log.warning("compliance org id is not an organization UUID; records are not "
+                        "narrowed to it", extra={"fields": {"org": self.org_label}})
 
         self.client = client or ComplianceClient(
             api_key=str(org.get("api_key") or env_or_literal(cfg.get("api_key")) or ""),
@@ -370,12 +396,22 @@ class ComplianceScanner:
             kwargs["updated_at_gte"] = window_start
         else:
             kwargs["created_at_gte"] = window_start
+        if self.scope:
+            # Sent on both families; the client drops it on `local`, whose
+            # list has no organization filter.
+            kwargs["organization_ids"] = [self.scope]
 
         truncated = failed = False
-        for count, session in enumerate(self.client.list_sessions(family, **kwargs)):
+        count = 0
+        for session in self.client.list_sessions(family, **kwargs):
+            # The local list is not filtered by the API, so a session there
+            # that names no organization cannot be shown to be this entry's.
+            if self.is_other_org(session, filtered=family != "local"):
+                continue
             if max_sessions is not None and count >= max_sessions:
                 truncated = True
                 break
+            count += 1
             try:
                 report = self._scan_one(session, family)
             except ComplianceError as exc:
@@ -500,7 +536,8 @@ class ComplianceScanner:
         start = time.perf_counter()
         units = compliance_units(messages)
         budget = Budget(self.policy.budget_ms)  # compliance.scan.budget_ms
-        result = scan(units, self.detectors, budget, self.policy.sealer(self.org_id or None))
+        result = scan(units, self.detectors, budget,
+                      self.policy.sealer(self.tenant_of(session) or None))
         result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
         extra, dropped = self._behaviour_findings(messages, result.findings)
         findings = list(result.findings) + extra
@@ -511,6 +548,7 @@ class ComplianceScanner:
         user = session.get("user") or {}
         report = SessionReport(
             session_id=session_id,
+            org_id=self.tenant_of(session),
             product_surface=session.get("product_surface"),
             user_id=user.get("id") if isinstance(user, dict) else None,
             created_at=session.get("created_at"),
@@ -608,12 +646,15 @@ class ComplianceScanner:
         run_started = _now_rfc3339()
         window_start = since or self._resume_window("chats")
         truncated = failed = False
-        for count, chat in enumerate(
-            self.client.list_chats(updated_at_gte=window_start, limit=self.page_limit)
-        ):
+        count = 0
+        for chat in self.client.list_chats(updated_at_gte=window_start,
+                                           limit=self.page_limit, **self._org_filter()):
+            if self.is_other_org(chat):
+                continue
             if max_chats is not None and count >= max_chats:
                 truncated = True
                 break
+            count += 1
             try:
                 report = self._scan_chat(chat, include_artifacts)
             except ComplianceError as exc:
@@ -658,7 +699,8 @@ class ComplianceScanner:
         if deleted_at is not None and not (full or {}).get("chat_messages"):
             dropped = [UNSCANNED_DELETED]
             return ChatReport(
-                chat_id=chat_id, user_id=user_id, model=chat.get("model"),
+                chat_id=chat_id, org_id=self.tenant_of(chat), user_id=user_id,
+                model=chat.get("model"),
                 created_at=chat.get("created_at"), updated_at=chat.get("updated_at"),
                 deleted_at=deleted_at, project_id=chat.get("project_id"),
                 action=decide([], self.policy, dropped=dropped).action,
@@ -718,7 +760,8 @@ class ComplianceScanner:
                     )
 
         budget = Budget(self.policy.budget_ms)  # compliance.scan.budget_ms
-        result = scan(units, self.detectors, budget, self.policy.sealer(self.org_id or None))
+        result = scan(units, self.detectors, budget,
+                      self.policy.sealer(self.tenant_of(chat) or None))
         result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
         dropped = list(result.detectors_skipped or [])
         if artifacts_failed:
@@ -728,6 +771,7 @@ class ComplianceScanner:
 
         return ChatReport(
             chat_id=chat_id,
+            org_id=self.tenant_of(chat),
             name=chat.get("name"),
             user_id=user_id,
             model=chat.get("model"),
@@ -746,6 +790,29 @@ class ComplianceScanner:
             tiers_dropped=dropped,
         )
 
+    # -- organizations ------------------------------------------------------
+
+    def _org_filter(self) -> dict[str, Any]:
+        """The `organization_ids` argument for a list call, or none."""
+        return {"organization_ids": [self.scope]} if self.scope else {}
+
+    def is_other_org(self, record: dict[str, Any], filtered: bool = True) -> bool:
+        """True, and counted, for a record this entry must not file: one
+        naming another organization, or, from a list the API did not narrow
+        (`filtered` False), one naming none."""
+        if not self.scope:
+            return False
+        org = record_org(record)
+        if org == self.scope or (not org and filtered):
+            return False
+        self.other_org_skipped += 1
+        return True
+
+    def tenant_of(self, record: dict[str, Any]) -> str:
+        """The org id a record is filed under: this entry's `id` when it has
+        one, otherwise the record's own `organization_uuid`."""
+        return self.org_id or record_org(record)
+
     # -- activity feed join ------------------------------------------------
 
     def denials(self, since: str | None = None) -> Iterator[dict[str, Any]]:
@@ -757,8 +824,11 @@ class ComplianceScanner:
             after_id=cursor,
             created_at_gte=since,
             limit=self.page_limit,
+            **self._org_filter(),
         ):
             last_seen = last_id or last_seen
+            if self.is_other_org(activity):
+                continue
             yield activity
         if last_seen:
             self._pending["activities_cursor"] = last_seen

@@ -299,13 +299,32 @@ parent-scoped key reads every chat, file, project and session transcript
 in every linked organization.
 
 Use one single-organization key per `compliance.orgs` entry, for the org
-that entry's `id` names. That is least privilege, and it is also what keeps
-the records right: adapter 3 sends no organization filter on any request,
-and files everything a pass reads under the entry's `id`. A parent-scoped
-key in one entry files every linked organization's sessions, chats and
-denials under that one org. The same parent-scoped key in N entries reads
-every organization N times and files each finding N times, once under each
-entry's org.
+that entry's `id` names. That is least privilege.
+
+A parent-scoped key also works, and adapter 3 keeps each entry to its own
+org. When an entry's `id` is an organization UUID:
+
+- The chat list, the remote session list and the Activity Feed are asked
+  for that org only (`organization_ids[]`).
+- The local session list has no organization filter, so a session whose
+  `organization_uuid` names another org, or names none, is skipped. So is
+  any other record that comes back naming another org.
+- Skipped records are counted as `other_org_skipped` in the ingest summary,
+  per org and in total, and the pass logs a warning naming the entry. A
+  steady count means the entry holds a parent-scoped key.
+
+The same parent-scoped key can therefore serve several entries, one per
+org, without reading or filing anything twice. It still reads every linked
+organization's local session list on every pass, and its compromise
+exposes all of them.
+
+An entry whose `id` is not a UUID, such as the `org_`-prefixed form, is not
+narrowed, and the scanner logs a warning saying so. Use the UUID: it is the
+`uuid` that `GET /v1/compliance/organizations` returns, and the
+`organization.id` Claude's OpenTelemetry exports carry.
+
+In the single-org form with no `org_id`, each record is filed under its
+own `organization_uuid`.
 
 ### Spot checking a detector's precision
 
