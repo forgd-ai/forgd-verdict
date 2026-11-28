@@ -84,6 +84,9 @@ def _compliance(n: int, monkeypatch, caplog):
         def denials(self, **kw):
             return iter(())
 
+        def scan_user_preferences(self):
+            return iter(())
+
         def commit(self):
             pass
 

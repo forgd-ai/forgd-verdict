@@ -42,6 +42,11 @@ one. Activity, chat and session records carry `organization_uuid`. The
 activities, chats and remote session lists accept `organization_ids[]` (the
 UUID or the `org_`-prefixed form); the local session list has no
 organization filter.
+
+  GET /v1/compliance/organizations/{org_uuid}/user_preferences  (beta)
+      page-token pagination (`page` in, `next_page` out), limit max 100,
+      `include_unset` and `user_ids[]` resent on every page. Account-level
+      text, so a member of two organizations is returned under both.
 """
 
 from __future__ import annotations
@@ -337,6 +342,32 @@ class ComplianceClient:
         is scanned. Takes the version_id, not the artifact's stable id.
         """
         return self.get(f"/v1/compliance/apps/artifacts/{segment(version_id)}/content")
+
+    def user_preferences(
+        self, org_uuid: str, *, include_unset: bool = False, limit: int = 100,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield each member's saved instructions in one organization.
+
+        `GET /v1/compliance/organizations/{org_uuid}/user_preferences`, in
+        beta: `conversation_preferences` (Instructions for Claude) and
+        `cowork_global_instructions`, under a `user` object. Page-token
+        pagination, `limit` at most 100. A page can hold fewer results than
+        `limit`, or none, and not be the last; only `next_page` null ends
+        it. `include_unset` is sent on every page, as the API requires.
+        """
+        path = f"/v1/compliance/organizations/{segment(org_uuid)}/user_preferences"
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": min(limit, 100)}
+            if include_unset:
+                params["include_unset"] = "true"
+            if page_token:
+                params["page"] = page_token
+            page = self.get(path, params)
+            yield from page.get("data") or []
+            page_token = page.get("next_page")
+            if not page_token:
+                return
 
     def session_messages(
         self,

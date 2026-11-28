@@ -33,6 +33,7 @@ from .base import (
     SOURCE_INFERENCE_HOOK,
     SOURCE_MANAGED_SCAN,
     SOURCE_OTEL_COLLECT,
+    SURFACE_SAVED_INSTRUCTIONS,
     TOKEN_SOURCES,
     WRITER_ADAPTER,
     WRITER_INTAKE_TOKEN,
@@ -358,6 +359,10 @@ class Summary:
     tool_call_checks: int = 0
     tool_call_would_deny: int = 0
     tool_call_denied: int = 0
+    # Members' saved instructions, scanned by adapter 3: one per member and
+    # field. Their findings count; they are neither requests nor sessions.
+    instructions_checked: int = 0
+    instructions_detected: int = 0
     # Split out, because a post-hoc session is not a request and summing
     # the two produces a headline number with no meaning.
     live_requests: int = 0
@@ -664,6 +669,19 @@ def build_summary(
                 surfaces[key].findings += v.findings_count
             count_findings(v, key)
             recon.live_value_hashes.update(f.excerpt_hash for f in v.findings)
+            continue
+        if v.surface == SURFACE_SAVED_INSTRUCTIONS:
+            pipe.observe(v, 1)
+            out.instructions_checked += 1
+            if v.detected:
+                out.instructions_detected += 1
+            out.total_findings += v.findings_count
+            row = surfaces.setdefault(SURFACE_SAVED_INSTRUCTIONS,
+                                      SurfaceRow(SURFACE_SAVED_INSTRUCTIONS))
+            row.findings += v.findings_count
+            if v.detected:
+                row.detections += 1
+            count_findings(v, SURFACE_SAVED_INSTRUCTIONS)
             continue
         # A tally row stands for `n` clean Code hook allows (store/tally.py).
         n = weight(v)
