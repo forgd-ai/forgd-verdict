@@ -60,6 +60,9 @@ SOURCE_INFERENCE_HOOK = "inference_hook"
 EVENT_TOOL_CALL = "tool_call"
 EVENT_OTHER = "other"
 SOURCE_COMPLIANCE_SCAN = "compliance_scan"
+# The surface of adapter 3's records of members' saved instructions. They
+# are not sessions, and `build_summary` counts them apart.
+SURFACE_SAVED_INSTRUCTIONS = "saved-instructions"
 # Adapter 2. Kept distinct from `inference_hook` because the two see the
 # same tool call at different moments: the Code hook sees it BEFORE
 # execution, the inference hook only on the next request, after it has

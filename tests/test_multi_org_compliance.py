@@ -131,6 +131,9 @@ class FakeScanner:
     def denials(self, **kw):
         return iter(())
 
+    def scan_user_preferences(self):
+        return iter(())
+
     def extract_reference_id(self, activity):
         return None
 

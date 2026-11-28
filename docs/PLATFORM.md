@@ -272,6 +272,34 @@ a clean chat, and a detection recorded for it earlier stays the chat's
 result in every summary. The ingest summary counts these as
 `chats_deleted_unread`.
 
+Each pass also reads the text members saved as **Instructions for
+Claude** (`conversation_preferences`) and as Cowork's **Global
+instructions** (`cowork_global_instructions`). That text is sent with every
+chat the member starts, so a credential pasted into it goes out every time.
+
+- **Filing:** each member, org and field is one record, on the surface
+  `saved-instructions`. Their findings count in every total; the records
+  are not requests or sessions, and the summary counts them apart, as
+  `instructions_checked` and `instructions_detected` in `/api/summary`.
+- **When it is scanned:** a field is scanned again only when its text
+  changes. The cursor keeps a salted digest of the text last scanned, never
+  the text.
+- **Cleared fields:** a field that was scanned and is now unset gets one
+  clean record. A detection still stays the member's result, as for a
+  deleted chat: the credential was sent while it was saved, and the fix is
+  to rotate it.
+- **Which org:** the endpoint takes one organization in its path, so an
+  entry needs its organization UUID as `id`. Without one the pass logs it
+  and scans nothing.
+- **Members of several orgs:** the text is account-level, so a member of
+  two orgs is recorded under each.
+- **Failures:** an org without the endpoint (`404`) is skipped. Any other
+  failure costs this pass, not the org, and is counted as
+  `instructions_failed`.
+- **Turning it off:** `--no-instructions` skips the pass.
+
+The summary counts `instructions_scanned` and `instructions_with_findings`.
+
 **Enterprise only.** A Team org has no Compliance API, so it belongs in
 `otel.orgs` and adapter 4 is its only fleetwide visibility.
 
@@ -280,6 +308,7 @@ result in every summary. The ingest summary counts these as
 | `/apps/sessions/{local,remote}` | Cowork, Claude Code, Claude Science, M365, Chrome |
 | `/apps/chats` + `/{id}/messages` | claude.ai chats |
 | `/apps/artifacts/{version}/content` | code and markdown Claude generated in a chat |
+| `/organizations/{org_uuid}/user_preferences` | members' saved instructions (beta) |
 
 Joins findings to `inference_hooks_request_denied` activities via
 `reference_id`. Read-only, rate-limited under the shared 600 req/min budget,

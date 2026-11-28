@@ -73,6 +73,8 @@ def summary_payload(s: Summary, window: str) -> dict[str, Any]:
         "tool_call_checks": s.tool_call_checks,
         "tool_call_would_deny": s.tool_call_would_deny,
         "tool_call_denied": s.tool_call_denied,
+        "instructions_checked": s.instructions_checked,
+        "instructions_detected": s.instructions_detected,
         "scanned_sessions": s.scanned_sessions,
         "hook_decisions": s.hook_decisions,
         # Inline controls only: a post-hoc scan cannot deny anything, so

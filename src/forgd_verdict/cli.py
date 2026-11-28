@@ -878,6 +878,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         max_sessions=args.max_sessions,
         include_denials=not args.no_denials,
         include_chats=not args.no_chats,
+        include_instructions=not args.no_instructions,
     )
     if managed:
         summary["managed_agents"] = run_managed_ingest(
@@ -1016,6 +1017,11 @@ def main(argv: list[str] | None = None) -> int:
         "--no-chats",
         action="store_true",
         help="skip claude.ai chats (they are a separate endpoint family)",
+    )
+    p_ing.add_argument(
+        "--no-instructions",
+        action="store_true",
+        help="skip members' saved instructions (the user_preferences endpoint)",
     )
     p_ing.set_defaults(func=_cmd_ingest)
 

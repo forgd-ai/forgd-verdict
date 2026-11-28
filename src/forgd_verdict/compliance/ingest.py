@@ -25,7 +25,13 @@ from ..store.base import (
     pseudonym,
 )
 from .client import ComplianceError
-from .scanner import ChatReport, ComplianceScanner, SessionReport
+from .scanner import (
+    INSTRUCTIONS_SURFACE,
+    ChatReport,
+    ComplianceScanner,
+    InstructionsReport,
+    SessionReport,
+)
 
 log = logging.getLogger("forgd_verdict.ingest")
 
@@ -87,6 +93,39 @@ def chat_to_record(
         # None, not 0, for a chat none of whose messages could be read.
         messages_total=report.messages if report.content_read else None,
         messages_scanned=report.messages if report.content_read else None,
+        action=report.action,
+        scan_ms=report.scan_ms,
+        findings_count=len(report.findings),
+        findings=[FindingRow.from_finding(f) for f in report.findings],
+        budget_exceeded=report.budget_exceeded,
+        tiers_dropped=list(report.tiers_dropped),
+        build=build_id(),
+    )
+
+
+def instructions_to_record(report: InstructionsReport, salt: str = "") -> VerdictRecord:
+    """One member's saved instructions in one field.
+
+    Filed under its own surface, so these do not count as claude.ai or Cowork
+    sessions. `session_id` names the field, the org and the member's
+    pseudonym: the text is account-level, so a member of two orgs has a
+    record under each, and `latest_per_session` must not collapse them. The
+    scans of one field in one org are one session there, which keeps a
+    detection after the text is changed or cleared.
+    """
+    from ..store.base import utcnow
+
+    member = pseudonym(report.user_id, salt, "user")
+    tenant = pseudonym(report.org_id, salt, "org")
+    return VerdictRecord(
+        source=SOURCE_COMPLIANCE_SCAN,
+        observed_at=utcnow(),
+        session_id=f"instructions:{report.field_name}:{tenant}:{member}",
+        surface=INSTRUCTIONS_SURFACE,
+        tenant_hash=tenant,
+        actor_hash=member,
+        messages_total=1,
+        messages_scanned=1,
         action=report.action,
         scan_ms=report.scan_ms,
         findings_count=len(report.findings),
@@ -171,6 +210,7 @@ def run_ingest(
     max_sessions: int | None = None,
     include_denials: bool = True,
     include_chats: bool = True,
+    include_instructions: bool = True,
     batch_size: int = 50,
 ) -> dict[str, Any]:
     """One ingest pass across every configured org. Summary for logging.
@@ -204,6 +244,9 @@ def run_ingest(
         "artifacts_failed": 0,
         "verdicts_written": 0,
         "denials_written": 0,
+        "instructions_scanned": 0,
+        "instructions_with_findings": 0,
+        "instructions_failed": 0,
         "other_org_skipped": 0,
     }
     per_org: list[dict[str, Any]] = []
@@ -213,6 +256,7 @@ def run_ingest(
                 policy, store, org,
                 families=families, since=since, max_sessions=max_sessions,
                 include_denials=include_denials, include_chats=include_chats,
+                include_instructions=include_instructions,
                 batch_size=batch_size, detectors=detectors,
             )
         except Exception as exc:  # noqa: BLE001
@@ -269,6 +313,7 @@ def _ingest_one_org(
     include_denials: bool,
     include_chats: bool,
     batch_size: int,
+    include_instructions: bool = True,
     detectors: list[Any] | None = None,
 ) -> dict[str, Any]:
     # The store holds the cursor as well as the findings.
@@ -347,6 +392,35 @@ def _ingest_one_org(
             denial_rows += store.write_denials(meta.records(pending))
         scanner.commit()
 
+    instructions = instruction_denies = instruction_rows = instructions_failed = 0
+    if include_instructions:
+        batch = []
+        try:
+            for report in scanner.scan_user_preferences():
+                instructions += 1
+                if report.action == "deny":
+                    instruction_denies += 1
+                batch.append(instructions_to_record(report, salt))
+                if len(batch) >= batch_size:
+                    instruction_rows += store.write_verdicts(meta.records(batch))
+                    batch = []
+        except ComplianceError as exc:
+            # The endpoint is in beta: a 404 is an org without it. Any other
+            # status costs this pass, not the org's sessions and chats, which
+            # are already written and committed; the digests stay where they
+            # were, so the next pass rescans.
+            status = getattr(exc, "status", None)
+            if status == 404:
+                log.info("saved instructions not available for this org",
+                         extra={"fields": {"org": org.get("label")}})
+            else:
+                instructions_failed = 1
+                log.warning("could not read saved instructions", extra={
+                    "fields": {"org": org.get("label"), "status": status}})
+        if batch:
+            instruction_rows += store.write_verdicts(meta.records(batch))
+        scanner.commit()
+
     if scanner.other_org_skipped:
         # The key reads more than this entry's organization: it was created
         # for the parent organization. Each request that takes
@@ -367,7 +441,10 @@ def _ingest_one_org(
         "chats_deleted_unread": chats_unread,
         "artifacts_scanned": artifacts,
         "artifacts_failed": artifacts_failed,
-        "verdicts_written": written + chat_rows,
+        "verdicts_written": written + chat_rows + instruction_rows,
         "denials_written": denial_rows,
+        "instructions_scanned": instructions,
+        "instructions_with_findings": instruction_denies,
+        "instructions_failed": instructions_failed,
         "other_org_skipped": scanner.other_org_skipped,
     }

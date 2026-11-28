@@ -13,6 +13,8 @@ Two things this is good for:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -30,6 +32,7 @@ from ..fsmode import write_private
 from ..metadata import MetadataGuard
 from ..models import ACTION_DENY, UNSCANNED_ARTIFACT, UNSCANNED_DELETED, Finding, pseudonym
 from ..policy import Policy, state_key
+from ..store.base import SURFACE_SAVED_INSTRUCTIONS
 from .client import ComplianceClient, ComplianceError
 
 DENIED_ACTIVITY = "inference_hooks_request_denied"
@@ -37,6 +40,15 @@ BREAKER_ACTIVITY = "inference_hooks_circuit_breaker_tripped"
 
 # The form of `organization_uuid` on Compliance API records, lowercased.
 _ORG_UUID = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+
+
+# The two saved-instruction fields `user_preferences` returns.
+INSTRUCTION_FIELDS = ("conversation_preferences", "cowork_global_instructions")
+# The surface their records are filed under, a row of its own in coverage.
+INSTRUCTIONS_SURFACE = SURFACE_SAVED_INSTRUCTIONS
+# The cursor key holding, per member pseudonym and field, a digest of the
+# text last scanned.
+INSTRUCTIONS_STATE = "user_preferences"
 
 
 def record_org(record: Any) -> str:
@@ -130,6 +142,25 @@ class SessionReport:
             "scan_ms": round(self.scan_ms, 2),
             "findings": [f.to_log() for f in self.findings],
         }
+
+
+@dataclass
+class InstructionsReport:
+    """One member's saved instructions in one field, scanned.
+
+    `cleared` is a field whose text was scanned before and is now unset; its
+    report carries no findings, so the member's latest record is clean.
+    """
+
+    user_id: str
+    field_name: str
+    org_id: str = ""
+    action: str = "allow"
+    findings: list[Finding] = field(default_factory=list)
+    scan_ms: float = 0.0
+    budget_exceeded: bool = False
+    tiers_dropped: list[str] = field(default_factory=list)
+    cleared: bool = False
 
 
 log = logging.getLogger("forgd_verdict.compliance")
@@ -788,6 +819,68 @@ class ComplianceScanner:
             scan_ms=elapsed,
             budget_exceeded=bool(result.budget_exceeded),
             tiers_dropped=dropped,
+        )
+
+    # -- saved instructions -------------------------------------------------
+
+    def scan_user_preferences(self) -> Iterator[InstructionsReport]:
+        """Scan each member's saved instructions in this entry's org.
+
+        A field is scanned when its text differs from the last text scanned
+        for that member, compared by a salted digest kept in the cursor, never
+        the text. A field that was scanned and is now unset yields a clean,
+        `cleared` report. The digests are committed only when the whole list
+        was read, so a pass that fails midway rescans next time.
+
+        Needs the entry's organization UUID: the endpoint takes one
+        organization in its path.
+        """
+        if not self.scope:
+            log.info("saved instructions need the entry's organization UUID; not scanned",
+                     extra={"fields": {"org": self.org_label}})
+            return
+        salt = self.policy.hash_salt
+        previous = self.state.data.get(INSTRUCTIONS_STATE)
+        previous = previous if isinstance(previous, dict) else {}
+        current: dict[str, dict[str, str]] = {}
+        for entry in self.client.user_preferences(self.scope, include_unset=True,
+                                                  limit=self.page_limit):
+            user = entry.get("user") if isinstance(entry, dict) else None
+            user_id = user.get("id") if isinstance(user, dict) else None
+            if not isinstance(user_id, str) or not user_id:
+                continue
+            member = pseudonym(user_id, salt, "user") or ""
+            before = previous.get(member)
+            before = before if isinstance(before, dict) else {}
+            for name in INSTRUCTION_FIELDS:
+                text = entry.get(name)
+                if isinstance(text, str) and text.strip():
+                    digest = hmac.new(salt.encode("utf-8"), text.encode("utf-8"),
+                                      hashlib.sha256).hexdigest()
+                    current.setdefault(member, {})[name] = digest
+                    if before.get(name) != digest:
+                        yield self._scan_instructions(user_id, name, text)
+                elif before.get(name):
+                    yield InstructionsReport(user_id=user_id, field_name=name,
+                                             org_id=self.org_id, cleared=True)
+        self._pending[INSTRUCTIONS_STATE] = current
+
+    def _scan_instructions(self, user_id: str, name: str, text: str) -> InstructionsReport:
+        start = time.perf_counter()
+        units = artifact_units(name, text)
+        budget = Budget(self.policy.budget_ms)  # compliance.scan.budget_ms
+        result = scan(units, self.detectors, budget, self.policy.sealer(self.org_id or None))
+        result.detectors_skipped = with_left_out(result.detectors_skipped, self.left_out)
+        verdict = decide(result.findings, self.policy, dropped=result.detectors_skipped)
+        return InstructionsReport(
+            user_id=user_id,
+            field_name=name,
+            org_id=self.org_id,
+            action=verdict.action,
+            findings=list(result.findings),
+            scan_ms=(time.perf_counter() - start) * 1000.0,
+            budget_exceeded=bool(result.budget_exceeded),
+            tiers_dropped=list(result.detectors_skipped or []),
         )
 
     # -- organizations ------------------------------------------------------

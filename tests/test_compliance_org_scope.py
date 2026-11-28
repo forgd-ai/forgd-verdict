@@ -86,6 +86,9 @@ class ParentKey:
     def artifact_content(self, version_id):
         raise AssertionError("no artifacts here")
 
+    def user_preferences(self, org_uuid, **kwargs):
+        return iter(())
+
     def activities(self, **kwargs):
         self.calls.append(("activities", kwargs))
         items = self._narrow(self.denials, kwargs)
